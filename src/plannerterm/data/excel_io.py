@@ -121,3 +121,36 @@ def coerce_date(value) -> str:
             continue
 
     raise ValueError(f"fecha_entrega inválida: {value!r}")
+
+
+def coerce_float(value) -> float | None:
+    """Coerce common Excel/Pandas numeric representations to float.
+
+    Returns None when value is empty/NaN.
+    Accepts numbers and strings (handles ',' as decimal separator).
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return None
+
+    # Handle common LATAM formats: 1.234,56 -> 1234.56
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+
+    try:
+        return float(s)
+    except Exception:
+        return None

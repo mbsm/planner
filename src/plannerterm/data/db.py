@@ -32,20 +32,9 @@ class Db:
                     value TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS line_config (
-                    line_id INTEGER PRIMARY KEY,
-                    families_json TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS parts (
                     numero_parte TEXT PRIMARY KEY,
                     familia TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS last_program (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    generated_on TEXT NOT NULL,
-                    program_json TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS sap_mb52 (
@@ -69,7 +58,11 @@ class Db:
                     fecha_entrega TEXT,
                     solicitado INTEGER,
                     cliente TEXT,
-                    oc_cliente TEXT
+                    oc_cliente TEXT,
+                    peso_neto REAL,
+                    peso_unitario_ton REAL,
+                    bodega INTEGER,
+                    despachado INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS order_priority (
@@ -92,6 +85,32 @@ class Db:
             if "kind" not in opp_cols:
                 con.execute("ALTER TABLE orderpos_priority ADD COLUMN kind TEXT")
 
+            # sap_vision v2: add optional weight fields (tons)
+            vision_cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision)").fetchall()]
+            if "peso_neto" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN peso_neto REAL")
+                except Exception:
+                    pass
+            if "peso_unitario_ton" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN peso_unitario_ton REAL")
+                except Exception:
+                    pass
+
+            # sap_vision v3: add progress fields (bodega / despachado)
+            vision_cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision)").fetchall()]
+            if "bodega" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN bodega INTEGER")
+                except Exception:
+                    pass
+            if "despachado" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN despachado INTEGER")
+                except Exception:
+                    pass
+
             # parts table v2: add optional post-process lead times (days)
             part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
             if "vulcanizado_dias" not in part_cols:
@@ -100,9 +119,30 @@ class Db:
                 con.execute("ALTER TABLE parts ADD COLUMN mecanizado_dias INTEGER")
             if "inspeccion_externa_dias" not in part_cols:
                 con.execute("ALTER TABLE parts ADD COLUMN inspeccion_externa_dias INTEGER")
+            # parts table v3: optional weight per piece (tons)
+            if "peso_ton" not in part_cols:
+                try:
+                    con.execute("ALTER TABLE parts ADD COLUMN peso_ton REAL")
+                except Exception:
+                    pass
+
+            # parts table v4: binary master attributes
+            if "mec_perf_inclinada" not in part_cols:
+                try:
+                    con.execute(
+                        "ALTER TABLE parts ADD COLUMN mec_perf_inclinada INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+            if "sobre_medida" not in part_cols:
+                try:
+                    con.execute(
+                        "ALTER TABLE parts ADD COLUMN sobre_medida INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
 
             # Seed default catalog entries only if catalog is empty.
-            # This allows users to delete/rename defaults and keep the result persistent.
             families_count = int(con.execute("SELECT COUNT(*) FROM families").fetchone()[0])
             if families_count == 0:
                 con.executemany(
@@ -119,51 +159,84 @@ class Db:
             )
 
             # Seed default SAP config values if missing.
-            con.execute(
-                "INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_centro', '4000')"
-            )
-            con.execute(
-                "INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_terminaciones', '4035')"
-            )
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_centro', '4000')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_terminaciones', '4035')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_material_prefixes', '436')")
 
-            # orders table v3 migration (pedido can repeat; add posicion and composite key)
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS orders (
-                    pedido TEXT NOT NULL,
-                    posicion TEXT NOT NULL,
-                    numero_parte TEXT NOT NULL,
-                    cantidad INTEGER NOT NULL,
-                    fecha_entrega TEXT NOT NULL,
-                    primer_correlativo INTEGER NOT NULL,
-                    ultimo_correlativo INTEGER NOT NULL,
-                    tiempo_proceso_min REAL,
-                    is_test INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (pedido, posicion, primer_correlativo, ultimo_correlativo)
-                );
-                """
-            )
+            # New process: Toma de dureza. Defaults to Terminaciones warehouse.
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_toma_dureza', '4035')")
 
-            cols = [r[1] for r in con.execute("PRAGMA table_info(orders)").fetchall()]
-            expected = {
-                "pedido",
-                "posicion",
-                "numero_parte",
-                "cantidad",
-                "fecha_entrega",
-                "primer_correlativo",
-                "ultimo_correlativo",
-                "tiempo_proceso_min",
-                "is_test",
-            }
+            # Other process warehouses (can be edited in UI).
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_mecanizado', '4049')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_mecanizado_externo', '4050')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_inspeccion_externa', '4046')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_por_vulcanizar', '4047')")
+            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_en_vulcanizado', '4048')")
 
-            if set(cols) != expected:
-                # Best-effort migration from older schema.
-                # If coming from v2 (pedido PK), keep rows as orders_old for manual recovery.
-                con.executescript(
+            # ----- Per-process tables (best-effort migrations) -----
+            # line_config: v2 adds `process` and composite primary key.
+            row = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='line_config'"
+            ).fetchone()
+            if int(row[0]) == 0:
+                con.execute(
+                    "CREATE TABLE line_config(process TEXT NOT NULL, line_id INTEGER NOT NULL, line_name TEXT, families_json TEXT NOT NULL, PRIMARY KEY(process, line_id))"
+                )
+            else:
+                cols = [r[1] for r in con.execute("PRAGMA table_info(line_config)").fetchall()]
+                if "process" not in cols:
+                    try:
+                        con.execute("ALTER TABLE line_config RENAME TO line_config_old")
+                        con.execute(
+                            "CREATE TABLE line_config(process TEXT NOT NULL, line_id INTEGER NOT NULL, line_name TEXT, families_json TEXT NOT NULL, PRIMARY KEY(process, line_id))"
+                        )
+                        con.execute(
+                            "INSERT OR IGNORE INTO line_config(process, line_id, line_name, families_json) SELECT 'terminaciones', line_id, NULL, families_json FROM line_config_old"
+                        )
+                    except Exception:
+                        pass
+
+                # line_config v3: add optional line_name
+                cols = [r[1] for r in con.execute("PRAGMA table_info(line_config)").fetchall()]
+                if "line_name" not in cols:
+                    try:
+                        con.execute("ALTER TABLE line_config ADD COLUMN line_name TEXT")
+                    except Exception:
+                        pass
+
+            # last_program: v2 uses process as primary key.
+            row = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='last_program'"
+            ).fetchone()
+            if int(row[0]) == 0:
+                con.execute(
+                    "CREATE TABLE last_program(process TEXT PRIMARY KEY, generated_on TEXT NOT NULL, program_json TEXT NOT NULL)"
+                )
+            else:
+                cols = [r[1] for r in con.execute("PRAGMA table_info(last_program)").fetchall()]
+                if "process" not in cols:
+                    try:
+                        con.execute("ALTER TABLE last_program RENAME TO last_program_old")
+                        con.execute(
+                            "CREATE TABLE last_program(process TEXT PRIMARY KEY, generated_on TEXT NOT NULL, program_json TEXT NOT NULL)"
+                        )
+                        con.execute(
+                            "INSERT OR IGNORE INTO last_program(process, generated_on, program_json) "
+                            "SELECT 'terminaciones', generated_on, program_json FROM last_program_old WHERE id = 1"
+                        )
+                    except Exception:
+                        pass
+
+            # orders: v4 adds process+almacen.
+            row = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders'"
+            ).fetchone()
+            if int(row[0]) == 0:
+                con.execute(
                     """
-                    ALTER TABLE orders RENAME TO orders_old;
                     CREATE TABLE orders (
+                        process TEXT NOT NULL,
+                        almacen TEXT NOT NULL,
                         pedido TEXT NOT NULL,
                         posicion TEXT NOT NULL,
                         numero_parte TEXT NOT NULL,
@@ -173,7 +246,101 @@ class Db:
                         ultimo_correlativo INTEGER NOT NULL,
                         tiempo_proceso_min REAL,
                         is_test INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (pedido, posicion, primer_correlativo, ultimo_correlativo)
+                        PRIMARY KEY (process, pedido, posicion, primer_correlativo, ultimo_correlativo)
                     );
                     """
                 )
+            else:
+                cols = [r[1] for r in con.execute("PRAGMA table_info(orders)").fetchall()]
+                if "process" not in cols:
+                    try:
+                        def table_exists(name: str) -> bool:
+                            return (
+                                con.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                    (name,),
+                                ).fetchone()
+                                is not None
+                            )
+
+                        def rename_table(src: str, dst: str) -> None:
+                            con.execute(f'ALTER TABLE "{src}" RENAME TO "{dst}"')
+
+                        # If a previous best-effort migration already created orders_old,
+                        # move it aside so we can rename the current orders table.
+                        if table_exists("orders_old"):
+                            suffix = 1
+                            while table_exists(f"orders_old_{suffix}"):
+                                suffix += 1
+                            rename_table("orders_old", f"orders_old_{suffix}")
+
+                        rename_table("orders", "orders_old")
+
+                        con.execute(
+                            """
+                            CREATE TABLE orders (
+                                process TEXT NOT NULL,
+                                almacen TEXT NOT NULL,
+                                pedido TEXT NOT NULL,
+                                posicion TEXT NOT NULL,
+                                numero_parte TEXT NOT NULL,
+                                cantidad INTEGER NOT NULL,
+                                fecha_entrega TEXT NOT NULL,
+                                primer_correlativo INTEGER NOT NULL,
+                                ultimo_correlativo INTEGER NOT NULL,
+                                tiempo_proceso_min REAL,
+                                is_test INTEGER NOT NULL DEFAULT 0,
+                                PRIMARY KEY (process, pedido, posicion, primer_correlativo, ultimo_correlativo)
+                            );
+                            """
+                        )
+
+                        almacen_term_row = con.execute(
+                            "SELECT value FROM app_config WHERE key='sap_almacen_terminaciones'"
+                        ).fetchone()
+                        almacen_term = str((almacen_term_row[0] if almacen_term_row else "4035") or "4035")
+
+                        old_cols = [r[1] for r in con.execute("PRAGMA table_info(orders_old)").fetchall()]
+
+                        has_posicion = "posicion" in old_cols
+                        has_is_test = "is_test" in old_cols
+
+                        if has_posicion:
+                            is_test_expr = "COALESCE(is_test, 0)" if has_is_test else "0"
+                            con.execute(
+                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
+                                f"SELECT 'terminaciones', ?, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, {is_test_expr} FROM orders_old",
+                                (almacen_term,),
+                            )
+                        else:
+                            # Legacy (no posicion): keep placeholder.
+                            con.execute(
+                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
+                                "SELECT 'terminaciones', ?, pedido, '0000', numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, 0 FROM orders_old",
+                                (almacen_term,),
+                            )
+                    except Exception:
+                        # Best-effort migrations should not prevent startup.
+                        pass
+
+            # ----- Best-effort normalization of SAP key columns -----
+            # Excel often turns keys like 4049 into 4049.0; normalize trailing ".0" and trim.
+            # This helps per-process warehouse filtering and MB52<->Visión joins.
+            for table, cols in (
+                ("sap_mb52", ["centro", "almacen", "documento_comercial", "posicion_sd"]),
+                ("sap_vision", ["pedido", "posicion"]),
+            ):
+                try:
+                    existing = {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+                    for col in cols:
+                        if col not in existing:
+                            continue
+                        con.execute(
+                            f"UPDATE {table} SET {col} = TRIM({col}) WHERE {col} IS NOT NULL AND TRIM({col}) <> ''"
+                        )
+                        con.execute(
+                            f"UPDATE {table} SET {col} = SUBSTR({col}, 1, LENGTH({col}) - 2) "
+                            f"WHERE {col} IS NOT NULL AND TRIM({col}) LIKE '%.0'"
+                        )
+                except Exception:
+                    pass

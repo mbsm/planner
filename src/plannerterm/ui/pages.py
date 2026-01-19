@@ -11,19 +11,20 @@ from plannerterm.ui.widgets import page_container, render_line_tables, render_na
 
 
 def register_pages(repo: Repository) -> None:
-    def auto_generate_and_save(notify: bool = True) -> bool:
+    def auto_generate_and_save(*, process: str = "terminaciones", notify: bool = True) -> bool:
+        process = str(process or "terminaciones").strip().lower()
         updated = False
         try:
-            if repo.count_orders() == 0:
+            if repo.count_orders(process=process) == 0:
                 return False
-            if repo.count_missing_parts_from_orders() > 0:
+            if repo.count_missing_parts_from_orders(process=process) > 0:
                 return False
-            if repo.count_missing_process_times_from_orders() > 0:
+            if repo.count_missing_process_times_from_orders(process=process) > 0:
                 return False
-            if len(repo.get_lines()) == 0:
+            if len(repo.get_lines(process=process)) == 0:
                 return False
-            lines = repo.get_lines_model()
-            orders = repo.get_orders_model()
+            lines = repo.get_lines_model(process=process)
+            orders = repo.get_orders_model(process=process)
             parts = repo.get_parts_model()
             manual_set = repo.get_manual_priority_orderpos_set()
             program, errors = generate_program(
@@ -32,37 +33,150 @@ def register_pages(repo: Repository) -> None:
                 parts=parts,
                 priority_orderpos=manual_set,
             )
-            repo.save_last_program(program=program, errors=errors)
+            repo.save_last_program(process=process, program=program, errors=errors)
             updated = True
             if notify:
-                ui.notify("Programa actualizado automáticamente")
+                label = (repo.processes.get(process, {}) or {}).get("label", process)
+                ui.notify(f"Programa actualizado automáticamente ({label})")
         except Exception as ex:
             ui.notify(f"Error actualizando programa: {ex}", color="negative")
             return False
 
         return updated
 
+    def auto_generate_and_save_all(*, notify: bool = False) -> list[str]:
+        updated: list[str] = []
+        for p in list(repo.processes.keys()):
+            if auto_generate_and_save(process=p, notify=False):
+                updated.append(p)
+        if notify and updated:
+            labels = [((repo.processes.get(p, {}) or {}).get("label", p)) for p in updated]
+            ui.notify(f"Programas actualizados: {', '.join(labels)}")
+        return updated
+
+    async def refresh_from_sap_all(*, notify: bool = True) -> None:
+        """Best-effort: rebuild orders per process (from current MB52+Visión+almacenes) then regenerate programs."""
+        rebuilt: list[str] = []
+        updated: list[str] = []
+        for p in list(repo.processes.keys()):
+            try:
+                ok = await asyncio.to_thread(lambda pp=p: repo.try_rebuild_orders_from_sap_for(process=pp))
+                if ok:
+                    rebuilt.append(p)
+            except Exception:
+                # Keep going even if one process has missing config.
+                continue
+
+        for p in rebuilt:
+            try:
+                if auto_generate_and_save(process=p, notify=False):
+                    updated.append(p)
+            except Exception:
+                continue
+
+        if notify:
+            if updated:
+                labels = [((repo.processes.get(p, {}) or {}).get("label", p)) for p in updated]
+                ui.notify(f"Programas actualizados: {', '.join(labels)}")
+            else:
+                ui.notify("Datos SAP actualizados. Programas no regenerados (faltan líneas/maestro/tiempos).", color="warning")
+
+    def kick_refresh_from_sap_all(*, notify: bool = True) -> None:
+        async def _runner() -> None:
+            await refresh_from_sap_all(notify=notify)
+
+        asyncio.create_task(_runner())
+
     @ui.page("/")
     def dashboard() -> None:
         render_nav()
         with page_container():
-            ui.label("Dashboard").classes("text-2xl font-semibold")
-            ui.label("Programa colas por línea según stock usable (SAP) y familias permitidas.").classes("pt-subtitle")
+            ui.label("Home").classes("text-2xl font-semibold")
+            ui.separator()
 
-            with ui.row().classes("w-full gap-3 pt-kpi"):
-                for title, value in [
-                    ("Líneas", len(repo.get_lines())),
-                    ("MB52", repo.count_sap_mb52()),
-                    ("Visión", repo.count_sap_vision()),
-                    ("Piezas usables", repo.count_usable_pieces()),
-                    ("Órdenes", repo.count_orders()),
-                    ("Piezas", repo.count_parts()),
-                    ("Sin familia", repo.count_missing_parts_from_orders()),
-                    ("Sin tiempos", repo.count_missing_process_times_from_orders()),
-                ]:
-                    with ui.card().classes("p-4"):
-                        ui.label(title).classes("text-sm text-slate-600")
-                        ui.label(str(value)).classes("text-2xl font-semibold")
+            overdue = repo.get_orders_overdue_rows(limit=200)
+            due_soon = repo.get_orders_due_soon_rows(days=14, limit=200)
+
+            overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
+            due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
+
+            # Pre-format tons for display (1 decimal) while keeping numeric `tons` for calculations.
+            for r in overdue:
+                r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+            for r in due_soon:
+                r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+
+            with ui.row().classes("w-full gap-4 items-stretch"):
+                with ui.card().classes("p-4 w-full"):
+                    ui.label(f"Pedidos atrasados — Total: {overdue_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label("Fecha de entrega anterior a hoy.").classes("text-sm text-slate-600")
+                    if overdue:
+                        ui.table(
+                            columns=[
+                                {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                                {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                                {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                                {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
+                                {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
+                                {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
+                                {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
+                                {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                                {"name": "dias", "label": "Días atraso", "field": "dias"},
+                            ],
+                            rows=overdue,
+                            row_key="_row_id",
+                        ).classes("w-full").props("dense flat bordered")
+                    else:
+                        ui.label("No hay pedidos atrasados.").classes("text-slate-600")
+
+                with ui.card().classes("p-4 w-full"):
+                    ui.label(f"Próximas 2 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label("Pedidos con entrega entre hoy y 14 días.").classes("text-sm text-slate-600")
+                    if due_soon:
+                        ui.table(
+                            columns=[
+                                {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                                {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                                {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                                {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
+                                {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
+                                {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
+                                {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
+                                {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                                {"name": "dias", "label": "Días restantes", "field": "dias"},
+                            ],
+                            rows=due_soon,
+                            row_key="_row_id",
+                        ).classes("w-full").props("dense flat bordered")
+                    else:
+                        ui.label("No hay pedidos dentro de las próximas 2 semanas.").classes("text-slate-600")
+
+            ui.separator()
+            ui.label("Carga por almacén (proceso)").classes("text-lg font-semibold")
+            ui.label(
+                "Piezas desde órdenes derivadas; tons desde Visión Planta ((peso neto kg / 1000) / solicitado)."
+            ).classes(
+                "text-sm text-slate-600"
+            )
+
+            load_rows = repo.get_process_load_rows()
+            if load_rows:
+                for r in load_rows:
+                    r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+                ui.table(
+                    columns=[
+                        {"name": "proceso", "label": "Proceso", "field": "proceso"},
+                        {"name": "almacen", "label": "Almacén", "field": "almacen"},
+                        {"name": "orderpos", "label": "Pedidos/Pos", "field": "orderpos"},
+                        {"name": "piezas", "label": "Piezas", "field": "piezas"},
+                        {"name": "tons", "label": "Tons", "field": "tons_fmt"},
+                        {"name": "piezas_sin_peso", "label": "Piezas sin peso", "field": "piezas_sin_peso"},
+                    ],
+                    rows=load_rows,
+                    row_key="_row_id",
+                ).classes("w-full").props("dense flat bordered")
+            else:
+                ui.label("Aún no hay órdenes cargadas.").classes("text-slate-600")
 
     @ui.page("/config")
     def config_lines() -> None:
@@ -82,23 +196,60 @@ def register_pages(repo: Repository) -> None:
                     "Almacén terminaciones",
                     value=repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035",
                 ).classes("w-64")
+                prefixes_in = ui.input(
+                    "Prefijos material (MB52)",
+                    value=repo.get_config(key="sap_material_prefixes", default="436") or "436",
+                    placeholder="Ej: 436  | o '436,437' | o '*' (sin filtro)",
+                ).classes("w-80")
+
+            ui.separator()
+            ui.label("Almacenes por proceso").classes("text-lg font-semibold")
+            ui.label("Se usan para filtrar MB52 al reconstruir rangos por proceso.").classes("text-sm text-slate-600")
+            with ui.row().classes("items-end w-full gap-3 flex-wrap"):
+                dura_in = ui.input(
+                    "Toma de dureza",
+                    value=(
+                        repo.get_config(
+                            key="sap_almacen_toma_dureza",
+                            default=(repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035"),
+                        )
+                        or "4035"
+                    ),
+                ).classes("w-56")
+                mec_in = ui.input(
+                    "Mecanizado",
+                    value=repo.get_config(key="sap_almacen_mecanizado", default="4049") or "4049",
+                ).classes("w-56")
+                mec_ext_in = ui.input(
+                    "Mecanizado externo",
+                    value=repo.get_config(key="sap_almacen_mecanizado_externo", default="4050") or "4050",
+                ).classes("w-56")
+                insp_ext_in = ui.input(
+                    "Inspección externa",
+                    value=repo.get_config(key="sap_almacen_inspeccion_externa", default="4046") or "4046",
+                ).classes("w-56")
+                por_vulc_in = ui.input(
+                    "Por vulcanizar",
+                    value=repo.get_config(key="sap_almacen_por_vulcanizar", default="4047") or "4047",
+                ).classes("w-56")
+                en_vulc_in = ui.input(
+                    "En vulcanizado",
+                    value=repo.get_config(key="sap_almacen_en_vulcanizado", default="4048") or "4048",
+                ).classes("w-56")
 
                 def save_cfg() -> None:
                     repo.set_config(key="sap_centro", value=str(centro_in.value or "").strip())
                     repo.set_config(key="sap_almacen_terminaciones", value=str(almacen_in.value or "").strip())
+                    repo.set_config(key="sap_material_prefixes", value=str(prefixes_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_toma_dureza", value=str(dura_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_mecanizado", value=str(mec_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_mecanizado_externo", value=str(mec_ext_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_inspeccion_externa", value=str(insp_ext_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_por_vulcanizar", value=str(por_vulc_in.value or "").strip())
+                    repo.set_config(key="sap_almacen_en_vulcanizado", value=str(en_vulc_in.value or "").strip())
                     ui.notify("Configuración guardada")
-                    try:
-                        if repo.try_rebuild_orders_from_sap():
-                            diag = repo.get_sap_rebuild_diagnostics()
-                            extra = (
-                                f" | sin match en Visión: {diag['distinct_orderpos_missing_vision']}"
-                                if diag.get("distinct_orderpos_missing_vision")
-                                else ""
-                            )
-                            ui.notify(f"Rangos generados: {repo.count_orders()}{extra}")
-                        auto_generate_and_save(notify=False)
-                    except Exception as ex:
-                        ui.notify(f"Error reconstruyendo rangos: {ex}", color="negative")
+                    ui.notify("Actualizando rangos/programas...")
+                    kick_refresh_from_sap_all(notify=False)
                     ui.navigate.to("/config")
 
                 ui.button("Guardar", on_click=save_cfg).props("unelevated color=primary")
@@ -107,7 +258,7 @@ def register_pages(repo: Repository) -> None:
             families = repo.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
 
             ui.separator()
-            ui.label("Líneas y familias permitidas").classes("text-lg font-semibold")
+            ui.label("Líneas y familias permitidas - Terminaciones").classes("text-lg font-semibold")
 
             num_lines = ui.number("Número de líneas", value=len(lines) or 8, min=1, max=50, step=1)
 
@@ -115,16 +266,26 @@ def register_pages(repo: Repository) -> None:
 
             rows_container = ui.column().classes("w-full")
             line_selects: dict[int, ui.select] = {}
+            line_names: dict[int, ui.input] = {}
 
             def rebuild_rows(n: int) -> None:
                 rows_container.clear()
                 line_selects.clear()
-                current = {ln["line_id"]: set(ln["families"]) for ln in repo.get_lines()}
+                line_names.clear()
+                current = {
+                    ln["line_id"]: {
+                        "families": set(ln["families"]),
+                        "name": str(ln.get("line_name") or "").strip(),
+                    }
+                    for ln in repo.get_lines()
+                }
                 for line_id in range(1, n + 1):
-                    allowed = current.get(line_id, set(families))
+                    allowed = (current.get(line_id, {}) or {}).get("families", set(families))
+                    name_val = (current.get(line_id, {}) or {}).get("name", "") or f"Línea {line_id}"
                     with rows_container:
                         with ui.row().classes("items-center w-full gap-3"):
                             ui.label(f"Línea {line_id}").classes("w-24")
+                            nm = ui.input("Nombre", value=name_val).classes("w-64")
                             ms = ui.select(
                                 families,
                                 value=list(allowed),
@@ -132,6 +293,7 @@ def register_pages(repo: Repository) -> None:
                                 label="Familias permitidas",
                             ).classes("w-96")
                             line_selects[line_id] = ms
+                            line_names[line_id] = nm
 
             def apply_all() -> None:
                 n = int(num_lines.value or 0)
@@ -149,7 +311,8 @@ def register_pages(repo: Repository) -> None:
                 for line_id in range(1, n + 1):
                     sel = line_selects.get(line_id)
                     selected_families = list((sel.value if sel else families) or [])
-                    repo.upsert_line(line_id=line_id, families=selected_families)
+                    nm = line_names.get(line_id)
+                    repo.upsert_line(line_id=line_id, line_name=(nm.value if nm else None), families=selected_families)
 
                 updated = auto_generate_and_save(notify=False)
                 if updated:
@@ -167,6 +330,101 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
             ui.button("Aplicar cambios", on_click=apply_all).props("unelevated color=primary")
 
+            def process_lines_editor(*, process: str, title: str) -> None:
+                lines_p = repo.get_lines(process=process)
+
+                with ui.expansion(title, value=False).classes("w-full"):
+                    num_lines_p = ui.number(
+                        "Número de líneas",
+                        value=len(lines_p) or 8,
+                        min=1,
+                        max=50,
+                        step=1,
+                    )
+                    ui.label("Ajusta familias y presiona 'Aplicar cambios'.").classes("text-sm text-slate-600")
+
+                    rows_container_p = ui.column().classes("w-full")
+                    line_selects_p: dict[int, ui.select] = {}
+                    line_names_p: dict[int, ui.input] = {}
+
+                    def rebuild_rows_p(n: int) -> None:
+                        rows_container_p.clear()
+                        line_selects_p.clear()
+                        line_names_p.clear()
+                        current = {
+                            ln["line_id"]: {
+                                "families": set(ln["families"]),
+                                "name": str(ln.get("line_name") or "").strip(),
+                            }
+                            for ln in repo.get_lines(process=process)
+                        }
+                        for line_id in range(1, n + 1):
+                            allowed = (current.get(line_id, {}) or {}).get("families", set(families))
+                            name_val = (current.get(line_id, {}) or {}).get("name", "") or f"Línea {line_id}"
+                            with rows_container_p:
+                                with ui.row().classes("items-center w-full gap-3"):
+                                    ui.label(f"Línea {line_id}").classes("w-24")
+                                    nm = ui.input("Nombre", value=name_val).classes("w-64")
+                                    ms = ui.select(
+                                        families,
+                                        value=list(allowed),
+                                        multiple=True,
+                                        label="Familias permitidas",
+                                    ).classes("w-96")
+                                    line_selects_p[line_id] = ms
+                                    line_names_p[line_id] = nm
+
+                    def apply_all_p() -> None:
+                        n = int(num_lines_p.value or 0)
+                        if n <= 0:
+                            ui.notify("Número de líneas inválido", color="negative")
+                            return
+
+                        existing_ids = [ln["line_id"] for ln in repo.get_lines(process=process)]
+                        for line_id in sorted(existing_ids):
+                            if int(line_id) > n:
+                                repo.delete_line(process=process, line_id=int(line_id))
+
+                        for line_id in range(1, n + 1):
+                            sel = line_selects_p.get(line_id)
+                            selected_families = list((sel.value if sel else families) or [])
+                            nm = line_names_p.get(line_id)
+                            repo.upsert_line(
+                                process=process,
+                                line_id=line_id,
+                                line_name=(nm.value if nm else None),
+                                families=selected_families,
+                            )
+
+                        # If this process hasn't built orders yet, try to rebuild now.
+                        try:
+                            repo.try_rebuild_orders_from_sap_for(process=process)
+                        except Exception:
+                            pass
+
+                        updated = auto_generate_and_save(process=process, notify=False)
+                        if updated:
+                            ui.notify("Configuración guardada. Programa actualizado.")
+                        else:
+                            ui.notify("Configuración guardada. Programa no actualizado (faltan datos).", color="warning")
+
+                    rebuild_rows_p(int(num_lines_p.value))
+
+                    def on_num_change_p() -> None:
+                        rebuild_rows_p(int(num_lines_p.value))
+
+                    num_lines_p.on("change", lambda _: on_num_change_p())
+                    ui.button("Aplicar cambios", on_click=apply_all_p).props("unelevated color=primary")
+
+            ui.separator()
+            ui.label("Otras líneas de proceso").classes("text-lg font-semibold")
+            process_lines_editor(process="toma_de_dureza", title="Toma de dureza")
+            process_lines_editor(process="mecanizado", title="Mecanizado")
+            process_lines_editor(process="mecanizado_externo", title="Mecanizado externo")
+            process_lines_editor(process="inspeccion_externa", title="Inspección externa")
+            process_lines_editor(process="por_vulcanizar", title="Por vulcanizar")
+            process_lines_editor(process="en_vulcanizado", title="En vulcanizado")
+
     @ui.page("/actualizar")
     def actualizar_data() -> None:
         render_nav(active="actualizar")
@@ -174,17 +432,42 @@ def register_pages(repo: Repository) -> None:
             ui.label("Actualizar datos SAP").classes("text-2xl font-semibold")
             ui.label("Sube MB52 y Visión Planta. Centro/Almacén se configuran en Parámetros.").classes("pt-subtitle")
 
+            with ui.row().classes("items-center gap-3 pt-2"):
+                mb52_merge = ui.checkbox(
+                    "MB52: acumular por almacén (no borra otros almacenes)",
+                    value=False,
+                ).props("dense")
+
             def uploader(kind: str, label: str):
                 async def handle_upload(e):
                     try:
                         content = await e.file.read()
-                        repo.import_excel_bytes(kind=kind, content=content)
+                        if kind in {"mb52", "sap_mb52"}:
+                            repo.import_sap_mb52_bytes(content=content, mode=("merge" if mb52_merge.value else "replace"))
+                        else:
+                            repo.import_excel_bytes(kind=kind, content=content)
                         filename = getattr(e.file, "name", None) or getattr(e.file, "filename", None)
                         extra = f" ({filename})" if filename else ""
                         if kind in {"mb52", "sap_mb52"}:
                             ui.notify(f"Importado: MB52{extra} (filas: {repo.count_sap_mb52()})")
 
-                            missing_master = repo.get_missing_parts_from_mb52()
+                            missing_by_material: dict[str, dict] = {}
+                            for proc in repo.processes.keys():
+                                for it in repo.get_missing_parts_from_mb52_for(process=proc):
+                                    material = str(it.get("material", "")).strip()
+                                    if not material:
+                                        continue
+                                    rec = missing_by_material.setdefault(
+                                        material,
+                                        {
+                                            "material": material,
+                                            "texto_breve": str(it.get("texto_breve", "") or "").strip(),
+                                            "processes": set(),
+                                        },
+                                    )
+                                    rec["processes"].add(proc)
+
+                            missing_master = [missing_by_material[k] for k in sorted(missing_by_material.keys())]
                             if missing_master:
                                 families = repo.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
                                 dialog = ui.dialog()
@@ -201,6 +484,7 @@ def register_pages(repo: Repository) -> None:
                                             for it in missing_master:
                                                 material = str(it.get("material", "")).strip()
                                                 desc = str(it.get("texto_breve", "")).strip()
+                                                procs = sorted(list(it.get("processes") or []))
                                                 if not material:
                                                     continue
 
@@ -209,12 +493,16 @@ def register_pages(repo: Repository) -> None:
                                                         ui.label(material).classes("font-medium")
                                                         if desc:
                                                             ui.label(desc).classes("text-xs text-slate-600 leading-tight")
+                                                        if procs:
+                                                            ui.label(", ".join(procs)).classes("text-xs text-slate-500")
 
                                                     fam = ui.select(families, value="Otros", label="Familia").classes("w-56")
                                                     v = ui.number("Vulc (d)", value=0, min=0, max=365, step=1).classes("w-28")
                                                     m = ui.number("Mec (d)", value=0, min=0, max=365, step=1).classes("w-28")
                                                     i = ui.number("Insp ext (d)", value=0, min=0, max=365, step=1).classes("w-32")
-                                                    entries[material] = {"fam": fam, "v": v, "m": m, "i": i}
+                                                    mpi = ui.checkbox("Mec perf incl.", value=False).props("dense")
+                                                    sm = ui.checkbox("Sobre medida", value=False).props("dense")
+                                                    entries[material] = {"fam": fam, "v": v, "m": m, "i": i, "mpi": mpi, "sm": sm}
 
                                         ui.separator()
                                         with ui.row().classes("justify-end w-full gap-3"):
@@ -224,30 +512,18 @@ def register_pages(repo: Repository) -> None:
                                                 try:
                                                     for material, w in entries.items():
                                                         fam_val = str(w["fam"].value or "Otros").strip() or "Otros"
-                                                        repo.add_family(name=fam_val)
-                                                        repo.upsert_part(numero_parte=material, familia=fam_val)
-                                                        repo.update_part_process_times(
+                                                        repo.upsert_part_master(
                                                             numero_parte=material,
+                                                            familia=fam_val,
                                                             vulcanizado_dias=int(w["v"].value or 0),
                                                             mecanizado_dias=int(w["m"].value or 0),
                                                             inspeccion_externa_dias=int(w["i"].value or 0),
+                                                            mec_perf_inclinada=bool(w["mpi"].value),
+                                                            sobre_medida=bool(w["sm"].value),
                                                         )
 
                                                     ui.notify("Maestro actualizado")
-                                                    try:
-                                                        if repo.try_rebuild_orders_from_sap():
-                                                            diag = repo.get_sap_rebuild_diagnostics()
-                                                            extra = (
-                                                                f" | sin match en Visión: {diag['distinct_orderpos_missing_vision']}"
-                                                                if diag.get("distinct_orderpos_missing_vision")
-                                                                else ""
-                                                            )
-                                                            ui.notify(
-                                                                f"Órdenes generadas: {repo.count_orders()} (piezas usables: {repo.count_usable_pieces()}){extra}"
-                                                            )
-                                                        auto_generate_and_save(notify=False)
-                                                    except Exception as ex:
-                                                        ui.notify(f"Error reconstruyendo órdenes: {ex}", color="negative")
+                                                    asyncio.create_task(refresh_from_sap_all(notify=False))
 
                                                     dialog.close()
                                                     ui.navigate.to("/actualizar")
@@ -264,17 +540,7 @@ def register_pages(repo: Repository) -> None:
                         else:
                             ui.notify(f"Importado: {kind}{extra}")
 
-                        try:
-                            if repo.try_rebuild_orders_from_sap():
-                                diag = repo.get_sap_rebuild_diagnostics()
-                                extra = (
-                                    f" | sin match en Visión: {diag['distinct_orderpos_missing_vision']}"
-                                    if diag.get("distinct_orderpos_missing_vision")
-                                    else ""
-                                )
-                                ui.notify(f"Órdenes generadas: {repo.count_orders()} (piezas usables: {repo.count_usable_pieces()}){extra}")
-                        except Exception as ex:
-                            ui.notify(f"Error reconstruyendo órdenes: {ex}", color="negative")
+                        await refresh_from_sap_all(notify=False)
 
                         missing = repo.count_missing_parts_from_orders()
                         if missing:
@@ -283,7 +549,7 @@ def register_pages(repo: Repository) -> None:
                         missing_proc = repo.count_missing_process_times_from_orders()
                         if missing_proc:
                             ui.notify(f"Hay {missing_proc} números de parte sin tiempos. Ve a Config > Maestro materiales")
-                        auto_generate_and_save()
+                        auto_generate_and_save_all(notify=False)
                         ui.navigate.to("/actualizar")
                     except Exception as ex:
                         ui.notify(f"Error importando {kind}: {ex}", color="negative")
@@ -311,7 +577,7 @@ def register_pages(repo: Repository) -> None:
                 def _clear_imported():
                     repo.clear_imported_data()
                     ui.notify("Datos borrados")
-                    auto_generate_and_save()
+                    auto_generate_and_save_all(notify=False)
                     ui.navigate.to("/actualizar")
 
                 ui.button("Borrar datos importados", color="negative", on_click=_clear_imported).props("outline")
@@ -321,6 +587,23 @@ def register_pages(repo: Repository) -> None:
                 ui.markdown(
                     f"MB52: **{repo.count_sap_mb52()}** | Visión: **{repo.count_sap_vision()}** | Piezas usables: **{diag['usable_total']}** | Usables con Pedido/Pos/Lote: **{diag['usable_with_keys']}** | Cruzan con Visión: **{diag['usable_with_keys_and_vision']}** | Órdenes: **{repo.count_orders()}**"
                 )
+
+                try:
+                    centro_cfg = (repo.get_config(key="sap_centro", default="4000") or "").strip()
+                    almacenes = repo.get_sap_mb52_almacen_counts(centro=centro_cfg, limit=50)
+                    if almacenes:
+                        ui.separator()
+                        ui.label("MB52: almacenes presentes").classes("text-lg font-semibold")
+                        ui.table(
+                            columns=[
+                                {"name": "almacen", "label": "Almacén", "field": "almacen"},
+                                {"name": "count", "label": "Filas", "field": "count"},
+                            ],
+                            rows=almacenes,
+                            row_key="almacen",
+                        ).props("dense flat bordered")
+                except Exception:
+                    pass
                 if diag["usable_total"] and diag["usable_with_keys"] == 0:
                     ui.label(
                         "Hay piezas usables, pero MB52 no trae Documento comercial/Posición SD/Lote en esas filas (no se pueden agrupar por pedido/posición)."
@@ -682,6 +965,9 @@ def register_pages(repo: Repository) -> None:
                     {"name": "vulcanizado_dias", "label": "Vulc (d)", "field": "vulcanizado_dias"},
                     {"name": "mecanizado_dias", "label": "Mec (d)", "field": "mecanizado_dias"},
                     {"name": "inspeccion_externa_dias", "label": "Insp ext (d)", "field": "inspeccion_externa_dias"},
+                    {"name": "peso_ton", "label": "Peso Unitario", "field": "peso_ton"},
+                    {"name": "mec_perf_inclinada", "label": "Mec perf incl.", "field": "mec_perf_inclinada"},
+                    {"name": "sobre_medida", "label": "Sobre medida", "field": "sobre_medida"},
                 ],
                 rows=filtered_rows(),
                 row_key="numero_parte",
@@ -692,6 +978,36 @@ def register_pages(repo: Repository) -> None:
                 r"""
 <q-td :props="props">
   <span :class="props.row && props.row._missing_times ? 'text-negative font-medium' : ''">{{ props.value }}</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-peso_ton",
+                r"""
+<q-td :props="props">
+    <span v-if="props.value !== null && props.value !== undefined && String(props.value) !== ''">{{ Number(props.value).toFixed(1) }}</span>
+    <span v-else class="text-slate-400">—</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-mec_perf_inclinada",
+                r"""
+<q-td :props="props">
+    <q-badge v-if="Number(props.value) === 1" color="primary" label="Sí" />
+    <span v-else class="text-slate-400">—</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-sobre_medida",
+                r"""
+<q-td :props="props">
+    <q-badge v-if="Number(props.value) === 1" color="primary" label="Sí" />
+    <span v-else class="text-slate-400">—</span>
 </q-td>
 """,
             )
@@ -729,9 +1045,15 @@ def register_pages(repo: Repository) -> None:
                         v = ui.number("Vulc (d)", value=0, min=0, max=365, step=1).classes("w-40")
                         m = ui.number("Mec (d)", value=0, min=0, max=365, step=1).classes("w-40")
                         i = ui.number("Insp ext (d)", value=0, min=0, max=365, step=1).classes("w-40")
+                        pt = ui.number("Peso Unitario", value=0, min=0, step=0.001).classes("w-40")
                         v.props("outlined dense")
                         m.props("outlined dense")
                         i.props("outlined dense")
+                        pt.props("outlined dense")
+
+                    with ui.row().classes("w-full items-center gap-6 pt-2"):
+                        mpi_chk = ui.checkbox("Mec perf inclinada", value=False).props("dense")
+                        sm_chk = ui.checkbox("Sobre medida", value=False).props("dense")
 
                     ui.separator()
 
@@ -751,6 +1073,9 @@ def register_pages(repo: Repository) -> None:
                                     vulcanizado_dias=int(v.value) if v.value is not None else None,
                                     mecanizado_dias=int(m.value) if m.value is not None else None,
                                     inspeccion_externa_dias=int(i.value) if i.value is not None else None,
+                                    peso_ton=float(pt.value) if pt.value is not None else None,
+                                    mec_perf_inclinada=bool(mpi_chk.value),
+                                    sobre_medida=bool(sm_chk.value),
                                 )
                                 ui.notify("Guardado")
                             except Exception as ex:
@@ -813,6 +1138,9 @@ def register_pages(repo: Repository) -> None:
                     if row_data.get("inspeccion_externa_dias") is not None
                     else 0
                 )
+                pt.value = row_data.get("peso_ton") if row_data.get("peso_ton") is not None else 0
+                mpi_chk.value = bool(int(row_data.get("mec_perf_inclinada") or 0))
+                sm_chk.value = bool(int(row_data.get("sobre_medida") or 0))
                 edit_dialog.open()
 
             def on_row_event(e):
@@ -948,6 +1276,47 @@ def register_pages(repo: Repository) -> None:
             with ui.row().classes("items-end w-full gap-3"):
                 q = ui.input("Buscar", placeholder="Pedido, posición o cliente...").classes("w-72")
 
+                delete_all_dialog = ui.dialog().props("persistent")
+                with delete_all_dialog:
+                    with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 820px;"):
+                        ui.label("Borrar todas las prioridades").classes("text-xl font-semibold")
+                        ui.label(
+                            "Esto elimina TODAS las prioridades marcadas manualmente en pedidos/posición (las pruebas se mantienen)."
+                        ).classes("text-amber-700")
+                        confirm = ui.input("Escribe BORRAR para confirmar").classes("w-80")
+                        confirm.props("outlined dense")
+                        ui.separator()
+
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Cancelar", on_click=delete_all_dialog.close).props("flat")
+
+                            def do_delete_all() -> None:
+                                if str(confirm.value).strip().upper() != "BORRAR":
+                                    ui.notify("Confirmación incorrecta", color="negative")
+                                    return
+                                repo.delete_all_pedido_priorities(keep_tests=True)
+                                delete_all_dialog.close()
+                                ui.notify("Prioridades borradas")
+                                refresh_rows()
+
+                            ui.button("Borrar todo", color="negative", on_click=do_delete_all).props("unelevated")
+
+                def open_delete_all_dialog() -> None:
+                    confirm.value = ""
+                    confirm.update()
+                    delete_all_dialog.open()
+                    try:
+                        confirm.run_method("focus")
+                    except Exception:
+                        pass
+
+                ui.button(
+                    "Borrar todo",
+                    icon="delete_forever",
+                    color="negative",
+                    on_click=open_delete_all_dialog,
+                ).props("outline")
+
             def filtered_rows() -> list[dict]:
                 needle = str(q.value or "").strip().lower()
                 if not needle:
@@ -965,7 +1334,14 @@ def register_pages(repo: Repository) -> None:
                     {"name": "pedido", "label": "Pedido", "field": "pedido"},
                     {"name": "posicion", "label": "Posición", "field": "posicion"},
                     {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                    {"name": "cod_material", "label": "Cod. material", "field": "cod_material"},
+                    {"name": "descripcion_material", "label": "Descripción", "field": "descripcion_material"},
                     {"name": "fecha_pedido", "label": "Fecha pedido", "field": "fecha_pedido"},
+                    {"name": "solicitado", "label": "Cantidad", "field": "solicitado"},
+                    {"name": "peso_neto", "label": "Peso neto (tons)", "field": "peso_neto"},
+                    {"name": "bodega", "label": "Bodega", "field": "bodega"},
+                    {"name": "despachado", "label": "Despachado", "field": "despachado"},
+                    {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
                     {"name": "is_priority", "label": "Prioridad", "field": "is_priority"},
                 ],
                 rows=filtered_rows(),
@@ -976,8 +1352,27 @@ def register_pages(repo: Repository) -> None:
                 "body-cell-is_priority",
                 r"""
 <q-td :props="props">
-  <q-badge v-if="props.value && Number(props.value) === 1" color="negative" label="PRIORIDAD" />
+    <q-badge
+        v-if="props.value && Number(props.value) === 1 && (props.row && String(props.row.priority_kind || '').toLowerCase() === 'test')"
+        color="purple"
+        label="PRUEBA"
+    />
+    <q-badge
+        v-else-if="props.value && Number(props.value) === 1"
+        color="negative"
+        label="PRIORIDAD"
+    />
   <span v-else class="text-slate-400">—</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-peso_neto",
+                r"""
+<q-td :props="props">
+    <span v-if="props.value !== null && props.value !== undefined && String(props.value) !== ''">{{ Number(props.value).toFixed(1) }}</span>
+    <span v-else class="text-slate-400">—</span>
 </q-td>
 """,
             )
@@ -999,12 +1394,13 @@ def register_pages(repo: Repository) -> None:
             )
 
             dialog = ui.dialog().props("persistent")
-            state = {"pedido": "", "posicion": "", "is_priority": 0}
+            state = {"pedido": "", "posicion": "", "is_priority": 0, "priority_kind": ""}
 
             with dialog:
                 with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 720px;"):
                     ui.label("Editar pedido/posición").classes("text-xl font-semibold")
                     pedido_label = ui.label("").classes("font-mono text-slate-700")
+                    kind_label = ui.label("").classes("text-sm text-slate-600")
                     ui.separator()
 
                     priority_chk = ui.checkbox("Marcar como prioridad", value=False)
@@ -1064,6 +1460,7 @@ def register_pages(repo: Repository) -> None:
                 pedido = ""
                 posicion = ""
                 is_priority = 0
+                priority_kind = ""
                 if isinstance(row, dict):
                     pedido = str(row.get("pedido") or "").strip()
                     posicion = str(row.get("posicion") or "").strip()
@@ -1071,6 +1468,7 @@ def register_pages(repo: Repository) -> None:
                         is_priority = int(row.get("is_priority") or 0)
                     except Exception:
                         is_priority = 0
+                    priority_kind = str(row.get("priority_kind") or "").strip().lower()
                 elif key is not None:
                     key_s = str(key).strip()
                     for r in rows_all:
@@ -1081,6 +1479,7 @@ def register_pages(repo: Repository) -> None:
                                 is_priority = int(r.get("is_priority") or 0)
                             except Exception:
                                 is_priority = 0
+                            priority_kind = str(r.get("priority_kind") or "").strip().lower()
                             break
 
                 if not pedido or not posicion:
@@ -1090,18 +1489,22 @@ def register_pages(repo: Repository) -> None:
                 state["pedido"] = pedido
                 state["posicion"] = posicion
                 state["is_priority"] = is_priority
+                state["priority_kind"] = priority_kind
                 pedido_label.text = f"{pedido} / {posicion}"
+                kind_label.text = "Tipo: PRUEBA (se mantiene priorizada)" if priority_kind == "test" else ""
                 priority_chk.value = bool(is_priority)
                 dialog.open()
 
             tbl.on("rowDblClick", on_row_event)
             tbl.on("rowDblclick", on_row_event)
 
-    @ui.page("/programa")
-    def programa() -> None:
-        render_nav(active="programa")
+    def _render_program(process: str, *, active_key: str, title: str) -> None:
+        process = str(process or "terminaciones").strip().lower()
+        render_nav(active=active_key)
         with page_container():
-            if repo.count_orders() == 0:
+            ui.label(title).classes("text-2xl font-semibold")
+
+            if repo.count_orders(process=process) == 0:
                 mb = repo.count_sap_mb52()
                 vis = repo.count_sap_vision()
                 if mb == 0 or vis == 0:
@@ -1117,14 +1520,28 @@ def register_pages(repo: Repository) -> None:
                         )
                     return
 
-                diag = repo.get_sap_rebuild_diagnostics()
-                ui.label(
-                    "No hay rangos generados desde SAP todavía."
-                ).classes("text-amber-700")
+                diag = repo.get_sap_rebuild_diagnostics(process=process)
+                ui.label("No hay rangos generados desde SAP todavía.").classes("text-amber-700")
                 ui.markdown(
                     f"MB52: **{mb}** | Visión: **{vis}** | Piezas usables: **{diag['usable_total']}** | "
                     f"Usables con Pedido/Pos/Lote: **{diag['usable_with_keys']}** | Cruzan con Visión: **{diag['usable_with_keys_and_vision']}**"
                 )
+
+                # Helpful hint when MB52 doesn't include the configured almacen for this process.
+                try:
+                    centro_cfg = (repo.get_config(key="sap_centro", default="4000") or "").strip()
+                    almacenes = repo.get_sap_mb52_almacen_counts(centro=centro_cfg, limit=10)
+                    present = [a["almacen"] for a in almacenes if a.get("almacen")]
+                    if present and str(diag.get("almacen") or "") not in set(present):
+                        ui.label(
+                            f"MB52 cargado no contiene el almacén configurado ({diag.get('almacen')}). "
+                            f"Almacenes presentes (top): {', '.join(present)}"
+                        ).classes("text-amber-700")
+                        ui.label(
+                            "Sugerencia: si exportas MB52 por almacén, activa 'acumular por almacén' en /actualizar y sube los otros MB52 (4049/4050/4046/4047/4048)."
+                        ).classes("text-slate-600")
+                except Exception:
+                    pass
                 if diag.get("distinct_orderpos_missing_vision"):
                     ui.label(
                         f"Pedido/posición sin match en Visión: {diag['distinct_orderpos_missing_vision']} (sobre {diag['distinct_orderpos']})."
@@ -1133,19 +1550,18 @@ def register_pages(repo: Repository) -> None:
                 async def _rebuild_now() -> None:
                     ui.notify("Reconstruyendo rangos...")
                     try:
-                        n = await asyncio.to_thread(repo.rebuild_orders_from_sap)
+                        n = await asyncio.to_thread(lambda: repo.rebuild_orders_from_sap_for(process=process))
                         if n > 0:
-                            diag2 = repo.get_sap_rebuild_diagnostics()
+                            diag2 = repo.get_sap_rebuild_diagnostics(process=process)
                             extra = (
                                 f" | sin match en Visión: {diag2['distinct_orderpos_missing_vision']}"
                                 if diag2.get("distinct_orderpos_missing_vision")
                                 else ""
                             )
                             ui.notify(f"Rangos generados: {n}{extra}")
-                            # Reload to show next-stage validations/program.
                             ui.navigate.reload()
                         else:
-                            d = repo.get_sap_rebuild_diagnostics()
+                            d = repo.get_sap_rebuild_diagnostics(process=process)
                             ui.notify(
                                 f"No se generaron rangos (Cruzan con Visión: {d['usable_with_keys_and_vision']}). Revisa Vista previa.",
                                 color="warning",
@@ -1163,26 +1579,31 @@ def register_pages(repo: Repository) -> None:
                     )
                 return
 
-            missing = repo.count_missing_parts_from_orders()
+            missing = repo.count_missing_parts_from_orders(process=process)
             if missing:
                 ui.label(f"Hay {missing} partes sin familia. Completa Config > Familias.").classes("text-amber-700")
                 return
 
-            missing_proc = repo.count_missing_process_times_from_orders()
+            missing_proc = repo.count_missing_process_times_from_orders(process=process)
             if missing_proc:
-                ui.label(f"Hay {missing_proc} partes sin tiempos. Completa Config > Maestro materiales.").classes("text-amber-700")
+                ui.label(
+                    f"Hay {missing_proc} partes sin tiempos. Completa Config > Maestro materiales."
+                ).classes("text-amber-700")
                 return
 
-            if len(repo.get_lines()) == 0:
-                ui.label("Falta configurar líneas. Completa Parámetros > Líneas y familias permitidas.").classes("text-amber-700")
+            if len(repo.get_lines(process=process)) == 0:
+                ui.label(
+                    "Falta configurar líneas. Completa Parámetros > Líneas y familias permitidas."
+                ).classes("text-amber-700")
                 return
 
-            # Try to generate automatically when opening the page (silent)
-            auto_generate_and_save(notify=False)
+            auto_generate_and_save(process=process, notify=False)
 
-            last = repo.load_last_program()
+            last = repo.load_last_program(process=process)
             if last is None:
-                ui.markdown("_Aún no se ha generado un programa automáticamente. Asegúrate de actualizar pedidos y completar Familias/Config._")
+                ui.markdown(
+                    "_Aún no se ha generado un programa automáticamente. Asegúrate de actualizar pedidos y completar Familias/Config._"
+                )
             else:
                 ui.separator()
                 generated_on = str(last["generated_on"])
@@ -1191,8 +1612,15 @@ def register_pages(repo: Repository) -> None:
                 else:
                     ts = datetime.combine(date.fromisoformat(generated_on), datetime.min.time())
                 ui.label(f"Última actualización: {ts.strftime('%d-%m-%Y %H:%M')}").classes("text-slate-600")
-                line_families = {ln["line_id"]: list(ln["families"]) for ln in repo.get_lines()}
-                render_line_tables(last["program"], line_families=line_families)
+                lines_cfg = repo.get_lines(process=process)
+                line_families = {ln["line_id"]: list(ln["families"]) for ln in lines_cfg}
+                line_names = {ln["line_id"]: str(ln.get("line_name") or "").strip() for ln in lines_cfg}
+                grid = (
+                    "w-full grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 items-stretch"
+                    if process == "terminaciones"
+                    else None
+                )
+                render_line_tables(last["program"], line_families=line_families, line_names=line_names, grid_classes=grid)
 
                 errors = list((last.get("errors") or []))
                 if errors:
@@ -1208,10 +1636,58 @@ def register_pages(repo: Repository) -> None:
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
                             {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
                             {"name": "familia", "label": "Familia", "field": "familia"},
-                            {"name": "cantidad", "label": "Stock (MB52)", "field": "cantidad"},
+                            {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
                             {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
                             {"name": "error", "label": "Error", "field": "error"},
                         ],
                         rows=errors,
                         row_key="_row_id",
                     ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
+
+    @ui.page("/programa")
+    def programa() -> None:
+        _render_program("terminaciones", active_key="programa_term", title="Programa - Terminaciones")
+
+    @ui.page("/programa/toma-de-dureza")
+    def programa_toma_de_dureza() -> None:
+        _render_program(
+            "toma_de_dureza",
+            active_key="programa_toma_dureza",
+            title="Programa - Toma de dureza",
+        )
+
+    @ui.page("/programa/mecanizado")
+    def programa_mecanizado() -> None:
+        _render_program("mecanizado", active_key="programa_mecanizado", title="Programa - Mecanizado")
+
+    @ui.page("/programa/mecanizado-externo")
+    def programa_mecanizado_externo() -> None:
+        _render_program(
+            "mecanizado_externo",
+            active_key="programa_mecanizado_externo",
+            title="Programa - Mecanizado Externo",
+        )
+
+    @ui.page("/programa/inspeccion-externa")
+    def programa_inspeccion_externa() -> None:
+        _render_program(
+            "inspeccion_externa",
+            active_key="programa_inspeccion_externa",
+            title="Programa - Inspección Externa",
+        )
+
+    @ui.page("/programa/por-vulcanizar")
+    def programa_por_vulcanizar() -> None:
+        _render_program(
+            "por_vulcanizar",
+            active_key="programa_por_vulcanizar",
+            title="Programa - Por Vulcanizar",
+        )
+
+    @ui.page("/programa/en-vulcanizado")
+    def programa_en_vulcanizado() -> None:
+        _render_program(
+            "en_vulcanizado",
+            active_key="programa_en_vulcanizado",
+            title="Programa - En Vulcanizado",
+        )

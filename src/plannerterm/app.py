@@ -14,7 +14,7 @@ from plannerterm.ui.pages import register_pages
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PlannerTerm - Programación de Terminaciones")
+    parser = argparse.ArgumentParser(description="Planta Rancagua")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     return parser
@@ -47,7 +47,7 @@ def main() -> None:
 
             loop.set_exception_handler(_handler)
 
-    ui.run(host=settings.host, port=settings.port, title="Programa de Terminaciones", reload=False)
+    ui.run(host=settings.host, port=settings.port, title="Planta Rancagua", reload=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
