@@ -17,6 +17,9 @@ ENV/
 *.sqlite3
 db/
 
+# Local sample files
+sample_data/
+
 # OS/editor
 .DS_Store
 Thumbs.db
