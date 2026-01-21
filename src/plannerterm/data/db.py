@@ -227,6 +227,64 @@ class Db:
                     except Exception:
                         pass
 
+            # program_in_progress: locks to keep selected order positions pinned per line.
+            # Keyed by (process, pedido, posicion, is_test).
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS program_in_progress (
+                        process TEXT NOT NULL,
+                        pedido TEXT NOT NULL,
+                        posicion TEXT NOT NULL,
+                        is_test INTEGER NOT NULL DEFAULT 0,
+                        line_id INTEGER NOT NULL,
+                        marked_at TEXT NOT NULL,
+                        PRIMARY KEY (process, pedido, posicion, is_test)
+                    );
+                    """.strip()
+                )
+                con.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_program_in_progress_lookup ON program_in_progress(process, line_id, marked_at)"
+                )
+            except Exception:
+                # Best-effort migrations should not prevent startup.
+                pass
+
+            # program_in_progress_item: split-aware locks.
+            # Multiple rows (split_id) can exist per (process,pedido,posicion,is_test).
+            # qty=0 means "auto" (use full remaining quantity when merging).
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS program_in_progress_item (
+                        process TEXT NOT NULL,
+                        pedido TEXT NOT NULL,
+                        posicion TEXT NOT NULL,
+                        is_test INTEGER NOT NULL DEFAULT 0,
+                        split_id INTEGER NOT NULL,
+                        line_id INTEGER NOT NULL,
+                        qty INTEGER NOT NULL DEFAULT 0,
+                        marked_at TEXT NOT NULL,
+                        PRIMARY KEY (process, pedido, posicion, is_test, split_id)
+                    );
+                    """.strip()
+                )
+                con.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_program_in_progress_item_lookup ON program_in_progress_item(process, line_id, marked_at)"
+                )
+
+                # Best-effort migration from legacy single-lock table.
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at)
+                    SELECT process, pedido, posicion, is_test, 1 AS split_id, line_id, 0 AS qty, marked_at
+                    FROM program_in_progress
+                    """.strip()
+                )
+            except Exception:
+                # Best-effort migrations should not prevent startup.
+                pass
+
             # orders: v4 adds process+almacen.
             row = con.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders'"

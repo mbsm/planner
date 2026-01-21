@@ -1740,9 +1740,453 @@ class Repository:
         ]
 
     # ---------- Program persistence ----------
+    @staticmethod
+    def _row_key_from_program_row(row: dict) -> tuple[str, str, int] | None:
+        try:
+            pedido = str(row.get("pedido") or "").strip()
+            posicion = str(row.get("posicion") or "").strip()
+            if not pedido or not posicion:
+                return None
+            # Tests are encoded as prio_kind='test' in the scheduling output.
+            prio_kind = str(row.get("prio_kind") or "").strip().lower()
+            is_test = 1 if prio_kind == "test" or int(row.get("is_test") or 0) == 1 else 0
+            return (pedido, posicion, int(is_test))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _order_key(*, pedido: str, posicion: str, is_test: int) -> tuple[str, str, int]:
+        return (str(pedido).strip(), str(posicion).strip(), int(is_test or 0))
+
+    def list_in_progress_locks(self, *, process: str = "terminaciones") -> list[dict]:
+        """Rows pinned to a given line, ordered by marked_at.
+
+        Split-aware: returns one row per split_id.
+        """
+        process = self._normalize_process(process)
+        with self.db.connect() as con:
+            try:
+                rows = con.execute(
+                    "SELECT process, pedido, posicion, is_test, split_id, line_id, qty, marked_at FROM program_in_progress_item WHERE process=? ORDER BY marked_at ASC",
+                    (process,),
+                ).fetchall()
+                return [
+                    {
+                        "process": str(r[0]),
+                        "pedido": str(r[1]),
+                        "posicion": str(r[2]),
+                        "is_test": int(r[3] or 0),
+                        "split_id": int(r[4] or 1),
+                        "line_id": int(r[5]),
+                        "qty": int(r[6] or 0),
+                        "marked_at": str(r[7]),
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                # Backward-compatible fallback (older DBs).
+                rows = con.execute(
+                    "SELECT process, pedido, posicion, is_test, line_id, marked_at FROM program_in_progress WHERE process=? ORDER BY marked_at ASC",
+                    (process,),
+                ).fetchall()
+        return [
+            {
+                "process": str(r[0]),
+                "pedido": str(r[1]),
+                "posicion": str(r[2]),
+                "is_test": int(r[3] or 0),
+                "split_id": 1,
+                "line_id": int(r[4]),
+                "qty": 0,
+                "marked_at": str(r[5]),
+            }
+            for r in rows
+        ]
+
+    def mark_in_progress(
+        self,
+        *,
+        process: str = "terminaciones",
+        pedido: str,
+        posicion: str,
+        is_test: int = 0,
+        line_id: int,
+    ) -> None:
+        process = self._normalize_process(process)
+        pedido_s = str(pedido).strip()
+        posicion_s = str(posicion).strip()
+        is_test_i = int(is_test or 0)
+        if not pedido_s or not posicion_s:
+            raise ValueError("Pedido/posición inválidos")
+        marked_at = datetime.now().isoformat(timespec="seconds")
+        with self.db.connect() as con:
+            # Split-aware default: create/update split_id=1 with qty=0 (auto).
+            try:
+                con.execute(
+                    "INSERT INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 1, ?, 0, ?) "
+                    "ON CONFLICT(process, pedido, posicion, is_test, split_id) DO UPDATE SET "
+                    "line_id=excluded.line_id, marked_at=program_in_progress_item.marked_at",
+                    (process, pedido_s, posicion_s, is_test_i, int(line_id), marked_at),
+                )
+            except Exception:
+                # Backward-compatible fallback.
+                con.execute(
+                    "INSERT INTO program_in_progress(process, pedido, posicion, is_test, line_id, marked_at) VALUES(?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(process, pedido, posicion, is_test) DO UPDATE SET "
+                    "line_id=excluded.line_id, marked_at=program_in_progress.marked_at",
+                    (process, pedido_s, posicion_s, is_test_i, int(line_id), marked_at),
+                )
+
+    def unmark_in_progress(
+        self,
+        *,
+        process: str = "terminaciones",
+        pedido: str,
+        posicion: str,
+        is_test: int = 0,
+    ) -> None:
+        process = self._normalize_process(process)
+        with self.db.connect() as con:
+            pedido_s = str(pedido).strip()
+            posicion_s = str(posicion).strip()
+            is_test_i = int(is_test or 0)
+            # Split-aware delete (all split_id rows).
+            try:
+                con.execute(
+                    "DELETE FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    (process, pedido_s, posicion_s, is_test_i),
+                )
+            except Exception:
+                pass
+
+            # Legacy cleanup.
+            try:
+                con.execute(
+                    "DELETE FROM program_in_progress WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    (process, pedido_s, posicion_s, is_test_i),
+                )
+            except Exception:
+                pass
+
+    def move_in_progress(
+        self,
+        *,
+        process: str = "terminaciones",
+        pedido: str,
+        posicion: str,
+        is_test: int = 0,
+        line_id: int,
+        split_id: int | None = None,
+    ) -> None:
+        """Move an in-progress lock to another line.
+
+        If split_id is None, move all splits for the order position.
+        """
+        process = self._normalize_process(process)
+        pedido_s = str(pedido).strip()
+        posicion_s = str(posicion).strip()
+        is_test_i = int(is_test or 0)
+        if not pedido_s or not posicion_s:
+            raise ValueError("Pedido/posición inválidos")
+        with self.db.connect() as con:
+            try:
+                if split_id is None:
+                    con.execute(
+                        "UPDATE program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                        (int(line_id), process, pedido_s, posicion_s, is_test_i),
+                    )
+                else:
+                    con.execute(
+                        "UPDATE program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
+                        (int(line_id), process, pedido_s, posicion_s, is_test_i, int(split_id)),
+                    )
+                return
+            except Exception:
+                # Backward-compatible fallback.
+                con.execute(
+                    "UPDATE program_in_progress SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    (int(line_id), process, pedido_s, posicion_s, is_test_i),
+                )
+
+    def create_balanced_split(
+        self,
+        *,
+        process: str = "terminaciones",
+        pedido: str,
+        posicion: str,
+        is_test: int = 0,
+    ) -> None:
+        """Split an in-progress order position into two balanced parts.
+
+        The split allocates quantities and correlativos sequentially during program merge.
+        This method only persists the split (split_id + qty); line movement is handled
+        separately (UI can move one split to another line).
+        """
+        process = self._normalize_process(process)
+        pedido_s = str(pedido).strip()
+        posicion_s = str(posicion).strip()
+        is_test_i = int(is_test or 0)
+        if not pedido_s or not posicion_s:
+            raise ValueError("Pedido/posición inválidos")
+
+        # Current truth from MB52-derived orders.
+        order = None
+        for o in self.get_orders_model(process=process):
+            if o.pedido == pedido_s and o.posicion == posicion_s and (1 if bool(getattr(o, "is_test", False)) else 0) == is_test_i:
+                order = o
+                break
+        if order is None:
+            raise ValueError("No se encontró la orden en SAP (orders)")
+        qty_total = int(order.cantidad)
+        if qty_total < 2:
+            raise ValueError("No se puede dividir: cantidad < 2")
+
+        qty1 = qty_total // 2
+        qty2 = qty_total - qty1
+        if qty1 <= 0 or qty2 <= 0:
+            raise ValueError("Split inválido")
+
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.db.connect() as con:
+            try:
+                # Ensure there is at least split_id=1 (carry its line_id/marked_at).
+                row = con.execute(
+                    "SELECT line_id, marked_at FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                    (process, pedido_s, posicion_s, is_test_i),
+                ).fetchone()
+                if row is None:
+                    # If not marked, default to line 1 (UI normally marks first).
+                    con.execute(
+                        "INSERT OR IGNORE INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 1, 1, 0, ?)",
+                        (process, pedido_s, posicion_s, is_test_i, now),
+                    )
+                    row = con.execute(
+                        "SELECT line_id, marked_at FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                        (process, pedido_s, posicion_s, is_test_i),
+                    ).fetchone()
+
+                line_id = int(row[0])
+
+                existing = con.execute(
+                    "SELECT COUNT(*) FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    (process, pedido_s, posicion_s, is_test_i),
+                ).fetchone()
+                if int(existing[0] or 0) != 1:
+                    raise ValueError("Ya existe un split (o múltiples partes) para esta fila")
+
+                con.execute(
+                    "UPDATE program_in_progress_item SET qty=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                    (int(qty1), process, pedido_s, posicion_s, is_test_i),
+                )
+                con.execute(
+                    "INSERT INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 2, ?, ?, ?)",
+                    (process, pedido_s, posicion_s, is_test_i, int(line_id), int(qty2), now),
+                )
+            except Exception:
+                # If split table isn't available, we cannot support splits.
+                raise
+
+    def _apply_in_progress_locks(
+        self,
+        *,
+        process: str,
+        program: dict,
+        errors: list[dict] | None = None,
+    ) -> tuple[dict, list[dict]]:
+        """Pin locked rows to their line, keep them at the top by marked_at.
+
+        - Locked rows update quantity and correlativo range from current `orders`.
+        - If a locked row disappears from MB52 (i.e. no longer in `orders`), we delete the lock
+          and remove it from the program.
+        """
+
+        process = self._normalize_process(process)
+        program_in = program or {}
+        errors_in = list(errors or [])
+
+        # Shallow-copy program/rows so we can mutate safely.
+        out: dict = {k: [dict(r) for r in (v or [])] for k, v in dict(program_in).items()}
+
+        # Map of existing rows by (pedido,posicion,is_test) so we can reuse scheduler-computed fields.
+        template_by_key: dict[tuple[str, str, int], dict] = {}
+        for items in out.values():
+            for r in items:
+                r.setdefault("in_progress", 0)
+                key = self._row_key_from_program_row(r)
+                if key is not None and key not in template_by_key:
+                    template_by_key[key] = dict(r)
+
+        # Current truth from MB52-derived orders.
+        order_by_key: dict[tuple[str, str, int], Order] = {}
+        for o in self.get_orders_model(process=process):
+            order_by_key[self._order_key(pedido=o.pedido, posicion=o.posicion, is_test=1 if bool(getattr(o, "is_test", False)) else 0)] = o
+
+        manual_set = self.get_manual_priority_orderpos_set()
+
+        def _prio_kind_for(order: Order) -> str:
+            if bool(getattr(order, "is_test", False)):
+                return "test"
+            if (order.pedido, order.posicion) in set(manual_set or set()):
+                return "priority"
+            return "normal"
+
+        def _find_program_line_key(line_id: int):
+            # Program keys might be ints (fresh) or strings (loaded from JSON).
+            for k in out.keys():
+                try:
+                    if int(k) == int(line_id):
+                        return k
+                except Exception:
+                    continue
+            return int(line_id)
+
+        locks = self.list_in_progress_locks(process=process)
+        locked_keys_present: list[tuple[str, str, int]] = []
+        locked_rows_by_line: dict[object, list[dict]] = {}
+
+        def _remove_key_everywhere(key_to_remove: tuple[str, str, int]) -> None:
+            for line_k in list(out.keys()):
+                out[line_k] = [
+                    r
+                    for r in (out.get(line_k, []) or [])
+                    if (self._row_key_from_program_row(r) != key_to_remove)
+                ]
+
+        # Group locks by (pedido,posicion,is_test) so we can expand splits.
+        locks_by_key: dict[tuple[str, str, int], list[dict]] = {}
+        for lk in locks:
+            key = self._order_key(pedido=lk["pedido"], posicion=lk["posicion"], is_test=int(lk.get("is_test") or 0))
+            locks_by_key.setdefault(key, []).append(dict(lk))
+
+        for key, group in locks_by_key.items():
+            o = order_by_key.get(key)
+            if o is None:
+                # Lock no longer valid: remove it and remove any stale row from the program.
+                try:
+                    self.unmark_in_progress(process=process, pedido=key[0], posicion=key[1], is_test=key[2])
+                except Exception:
+                    pass
+                _remove_key_everywhere(key)
+                continue
+
+            locked_keys_present.append(key)
+
+            base_template = template_by_key.get(key)
+            if base_template is None:
+                base_template = {
+                    "pedido": o.pedido,
+                    "posicion": o.posicion,
+                    "numero_parte": o.numero_parte,
+                    "familia": "Otros",
+                    "fecha_entrega": o.fecha_entrega.isoformat(),
+                    "start_by": o.fecha_entrega.isoformat(),
+                    "prio_kind": _prio_kind_for(o),
+                }
+
+            # Expand split items in a stable order (marked_at, then split_id).
+            items = sorted(group, key=lambda d: (str(d.get("marked_at") or ""), int(d.get("split_id") or 1)))
+            total_qty = int(o.cantidad)
+            start_corr = int(o.primer_correlativo)
+
+            stored_qtys: list[int] = []
+            for it in items:
+                q = int(it.get("qty") or 0)
+                stored_qtys.append(max(0, q))
+
+            # Decide effective qty per split.
+            effective_qtys = list(stored_qtys)
+            if len(effective_qtys) >= 1 and any(q <= 0 for q in effective_qtys):
+                # Legacy/auto semantics: if qty=0, treat as "take remaining" on the last item.
+                pass
+
+            # First, treat qty=0 as unspecified; we'll allocate later.
+            specified = [q for q in effective_qtys[:-1] if q > 0]
+            sum_specified = sum(specified)
+
+            # Start with explicit qty for all but last; last absorbs remaining.
+            remaining = total_qty
+            for i in range(len(items)):
+                is_last = i == (len(items) - 1)
+                q_stored = int(stored_qtys[i] or 0)
+                if is_last:
+                    q_eff = max(0, remaining)
+                else:
+                    q_eff = max(0, min(q_stored, remaining)) if q_stored > 0 else 0
+                effective_qtys[i] = q_eff
+                remaining -= q_eff
+
+            # If we still have remaining > 0, distribute to the last split.
+            if remaining > 0 and effective_qtys:
+                effective_qtys[-1] += remaining
+                remaining = 0
+
+            # If remaining < 0 (order shrank), reduce from the end backwards.
+            if remaining < 0 and effective_qtys:
+                excess = -remaining
+                for i in range(len(effective_qtys) - 1, -1, -1):
+                    if excess <= 0:
+                        break
+                    take = min(effective_qtys[i], excess)
+                    effective_qtys[i] -= take
+                    excess -= take
+                remaining = 0
+
+            corr_cursor = start_corr
+            for it, q_eff in zip(items, effective_qtys):
+                split_id = int(it.get("split_id") or 1)
+                line_key = _find_program_line_key(int(it["line_id"]))
+
+                row = dict(base_template)
+                row["pedido"] = o.pedido
+                row["posicion"] = o.posicion
+                row["numero_parte"] = o.numero_parte
+                row["cantidad"] = int(q_eff)
+                row["prio_kind"] = _prio_kind_for(o)
+                row["is_test"] = 1 if bool(getattr(o, "is_test", False)) else 0
+                row["in_progress"] = 1
+                row["_pt_split_id"] = int(split_id)
+
+                if q_eff > 0:
+                    row["corr_inicio"] = int(corr_cursor)
+                    row["corr_fin"] = int(corr_cursor + q_eff - 1)
+                    corr_cursor += q_eff
+                else:
+                    row["corr_inicio"] = int(o.primer_correlativo)
+                    row["corr_fin"] = int(o.primer_correlativo)
+
+                # Unique per-split row id.
+                row["_row_id"] = (
+                    f"{o.pedido}|{o.posicion}|{o.numero_parte}|split{split_id}|{int(row['corr_inicio'])}-{int(row['corr_fin'])}"
+                )
+
+                locked_rows_by_line.setdefault(line_key, []).append(row)
+
+        # Remove any occurrences of locked rows from all lines (they will be re-inserted pinned).
+        locked_key_set = set(locked_keys_present)
+        if locked_key_set:
+            for line_k in list(out.keys()):
+                filtered: list[dict] = []
+                for r in out.get(line_k, []) or []:
+                    k = self._row_key_from_program_row(r)
+                    if k is None or k not in locked_key_set:
+                        filtered.append(r)
+                out[line_k] = filtered
+
+            # Also remove from errors if present there.
+            if errors_in:
+                errors_in = [e for e in errors_in if (self._row_key_from_program_row(e) not in locked_key_set)]
+
+        # Prepend locked rows per line.
+        for line_k, locked_rows in locked_rows_by_line.items():
+            existing = list(out.get(line_k, []) or [])
+            out[line_k] = list(locked_rows) + existing
+
+        return out, errors_in
+
     def save_last_program(self, *, process: str = "terminaciones", program: dict[int, list[dict]], errors: list[dict] | None = None) -> None:
         process = self._normalize_process(process)
-        payload = json.dumps({"program": program, "errors": list(errors or [])})
+        merged_program, merged_errors = self._apply_in_progress_locks(process=process, program=program, errors=list(errors or []))
+        payload = json.dumps({"program": merged_program, "errors": list(merged_errors or [])})
         generated_on = datetime.now().isoformat(timespec="seconds")
         with self.db.connect() as con:
             con.execute(
@@ -1759,10 +2203,12 @@ class Repository:
             return None
         payload = json.loads(row["program_json"])
         if isinstance(payload, dict) and "program" in payload:
-            return {
-                "generated_on": row["generated_on"],
-                "program": payload.get("program") or {},
-                "errors": payload.get("errors") or [],
-            }
+            merged_program, merged_errors = self._apply_in_progress_locks(
+                process=process,
+                program=payload.get("program") or {},
+                errors=list(payload.get("errors") or []),
+            )
+            return {"generated_on": row["generated_on"], "program": merged_program, "errors": merged_errors}
         # Backward-compatible: older DBs stored only the program dict
-        return {"generated_on": row["generated_on"], "program": payload, "errors": []}
+        merged_program, merged_errors = self._apply_in_progress_locks(process=process, program=payload, errors=[])
+        return {"generated_on": row["generated_on"], "program": merged_program, "errors": merged_errors}

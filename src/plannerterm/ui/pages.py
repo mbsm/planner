@@ -205,6 +205,14 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
             ui.label("Almacenes por proceso").classes("text-lg font-semibold")
             ui.label("Se usan para filtrar MB52 al reconstruir rangos por proceso.").classes("text-sm text-slate-600")
+
+            ui.separator()
+            ui.label("Parámetros UI").classes("text-lg font-semibold")
+            allow_move_line_chk = ui.checkbox(
+                "Habilitar mover filas 'en proceso' de línea",
+                value=str(repo.get_config(key="ui_allow_move_in_progress_line", default="0") or "0").strip() == "1",
+            )
+
             with ui.row().classes("items-end w-full gap-3 flex-wrap"):
                 dura_in = ui.input(
                     "Toma de dureza",
@@ -247,6 +255,10 @@ def register_pages(repo: Repository) -> None:
                     repo.set_config(key="sap_almacen_inspeccion_externa", value=str(insp_ext_in.value or "").strip())
                     repo.set_config(key="sap_almacen_por_vulcanizar", value=str(por_vulc_in.value or "").strip())
                     repo.set_config(key="sap_almacen_en_vulcanizado", value=str(en_vulc_in.value or "").strip())
+                    repo.set_config(
+                        key="ui_allow_move_in_progress_line",
+                        value="1" if bool(allow_move_line_chk.value) else "0",
+                    )
                     ui.notify("Configuración guardada")
                     ui.notify("Actualizando rangos/programas...")
                     kick_refresh_from_sap_all(notify=False)
@@ -1620,7 +1632,14 @@ def register_pages(repo: Repository) -> None:
                     if process == "terminaciones"
                     else None
                 )
-                render_line_tables(last["program"], line_families=line_families, line_names=line_names, grid_classes=grid)
+                render_line_tables(
+                    last["program"],
+                    repo=repo,
+                    process=process,
+                    line_families=line_families,
+                    line_names=line_names,
+                    grid_classes=grid,
+                )
 
                 errors = list((last.get("errors") or []))
                 if errors:
