@@ -288,6 +288,15 @@ def render_line_tables(
 """,
                 )
 
+                total_units = 0
+                for r in rows:
+                    try:
+                        total_units += int(r.get("cantidad") or 0)
+                    except Exception:
+                        continue
+                with ui.row().classes("w-full justify-end mt-2"):
+                    ui.label(f"Total unidades: {total_units:,}").classes("text-sm text-slate-600 font-semibold")
+
                 if repo is not None:
                     if int(line_id_for_table or 0) <= 0:
                         continue

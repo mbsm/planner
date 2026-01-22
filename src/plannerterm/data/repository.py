@@ -74,30 +74,28 @@ class Repository:
         """Coerce MB52 lote into an integer correlativo.
 
         Some SAP exports include alphanumeric lotes (e.g. '0030PD0674').
-        We keep the scheduling logic numeric by extracting all digits.
+        For Terminaciones test lotes, the correlativo is the numeric prefix
+        (digits before letters). We keep the scheduling logic numeric by
+        extracting the first digit group.
         """
         try:
             return int(parse_int_strict(value, field="Lote"))
         except Exception:
             s = "" if value is None else str(value)
-            digits = "".join(re.findall(r"\d+", s))
-            if not digits:
+            m = re.search(r"\d+", s)
+            if not m:
                 raise
-            return int(digits)
+            return int(m.group(0))
 
     @staticmethod
     def _lote_to_int_last4(value) -> int:
-        """Extract last 4 digits from a lote string.
+        """Legacy helper (kept for compatibility).
 
-        Used for 'test' lotes (which may be alphanumeric) to produce stable,
-        compact correlativos/ranges for display.
+        Historically this extracted the last 4 digits, but for Terminaciones
+        test lotes we need the numeric prefix (digits before letters). We now
+        delegate to :meth:`_lote_to_int`.
         """
-        s = "" if value is None else str(value)
-        digits = "".join(re.findall(r"\d+", s))
-        if not digits:
-            raise ValueError("Lote sin dígitos")
-        tail = digits[-4:]
-        return int(tail)
+        return Repository._lote_to_int(value)
 
     def get_sap_rebuild_diagnostics(self, *, process: str = "terminaciones") -> dict:
         """Counters to debug why ranges might be 0."""
@@ -1941,8 +1939,7 @@ class Repository:
 
             try:
                 # Validate it contains digits we can use as correlativo bounds.
-                # For display/physical tracking we always use the last 4 digits.
-                _ = self._lote_to_int_last4(lote_s)
+                _ = self._lote_to_int(lote_s)
             except Exception:
                 if len(bad_lotes) < 20:
                     bad_lotes.append(str(lote_raw))
@@ -1972,7 +1969,7 @@ class Repository:
         for (pedido, posicion, material, is_test), lotes in pieces.items():
             fecha_pedido_iso, _ = vision_by_key[(pedido, posicion)]
             cantidad = int(len(lotes))
-            lote_ints = [self._lote_to_int_last4(ls) for ls in lotes]
+            lote_ints = [self._lote_to_int(ls) for ls in lotes]
             corr_inicio = int(min(lote_ints))
             corr_fin = int(max(lote_ints))
             order_rows.append((pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, None, int(is_test)))
