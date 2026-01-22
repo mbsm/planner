@@ -67,6 +67,12 @@ Luego:
     - Restricción de familias permitidas por línea.
     - Selección de la línea elegible con menor carga (heurística actual).
 
+### Pruebas (lotes alfanuméricos)
+En Terminaciones, si el lote contiene letras se considera **prueba** y se prioriza automáticamente.
+
+El correlativo numérico se obtiene desde el **prefijo numérico** del lote (primer grupo de dígitos). Ejemplo:
+- `0030PD0674` → correlativo `30`
+
 ## Maestro local (se mantiene en la app)
 Estos datos **NO vienen de SAP** y se mantienen localmente en la app (SQLite):
 - **Familia por número de parte**.
@@ -89,4 +95,20 @@ Al subir un archivo SAP:
   - Debe haber **Órdenes** (> 0) para poder programar.
 6. Si aparecen pendientes: completar **Config > Familias** y **Config > Tiempos de proceso**.
 7. Ir a **Programa** y verificar colas por línea.
+
+## Módulos adicionales
+
+### Home: KPI diario (Visión)
+Al subir Visión Planta, la app calcula y guarda un snapshot diario:
+- `tons_por_entregar`: tons pendientes (según solicitado/bodega/despachado)
+- `tons_atrasadas`: subset donde `fecha_entrega` < fecha del snapshot
+
+Se muestra un gráfico histórico y tabla de detalle en Home.
+
+### Avance Producción (MB52)
+Al subir MB52 en modo **replace**, la app compara contra el MB52 anterior (en Terminaciones) y genera un reporte de:
+- **salidas brutas**: piezas/lotes que estaban y ya no están
+- mapeo de salidas al **último programa** por rango de correlativos
+- sección adicional de **salidas no programadas** (no mapeadas)
+
 

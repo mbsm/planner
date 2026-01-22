@@ -1,6 +1,11 @@
 # PlannerTerm (Programación Terminaciones)
 
-App web (NiceGUI) para generar colas de trabajo por línea de terminaciones a partir de stock usable (SAP) + datos maestros locales (familias + tiempos), persistiendo en SQLite.
+App web (NiceGUI) para generar colas de trabajo por línea a partir de **stock usable (SAP MB52)** + **Visión Planta** + maestro local (familias + tiempos), persistiendo en SQLite.
+
+Incluye:
+- **Programas de Producción** por línea (por proceso/almacén)
+- **KPI diario** (Visión): tons por entregar y tons atrasadas + gráfico histórico
+- **Avance Producción** (MB52): reporte de salidas brutas vs MB52 anterior, mapeadas al último programa
 
 ## Requisitos
 - Windows
@@ -17,7 +22,7 @@ Desde la carpeta raíz del workspace (donde está `.venv`):
 ## Ejecutar
 
 ```powershell
-\.venv\Scripts\python.exe run_app.py
+\.venv\Scripts\python.exe run_app.py --port 8080
 ```
 
 Luego abre http://localhost:8080
@@ -26,6 +31,7 @@ Navegación en la app:
 - **Dashboard**: métricas rápidas.
 - **Programa**: colas por línea (se guarda en SQLite como “último programa”).
 - **Actualizar**: carga de MB52 + Visión Planta desde Excel.
+- **Avance Producción**: reporte de salidas (MB52) por línea vs el último programa.
 - **Config** (dropdown): Configuración de líneas / Familias / Tiempos de proceso.
 
 ## Operación rápida
@@ -35,10 +41,15 @@ Navegación en la app:
 4. Si hay pendientes, completar **Familias** y **Tiempos de proceso**.
 5. Ir a **Programa**.
 
+Notas:
+- La app lee **solo la primera hoja** del Excel.
+- La importación es **SAP-driven**: la tabla `orders` se reconstruye uniendo MB52 + Visión.
+- Los lotes alfanuméricos en Terminaciones se tratan como **pruebas** (prioridad) y su correlativo se toma desde el **prefijo numérico**.
+
 ## Tests
 
 ```powershell
-\.venv\Scripts\python.exe -m pytest PlannerTerm
+\.venv\Scripts\python.exe -m pytest
 ```
 
 ## Datos esperados (SAP)
@@ -81,4 +92,9 @@ Al importar pedidos o cambiar configuración (familias/tiempos/líneas), la app 
 - Persistencia en SQLite local (archivo `.db`).
 - El scheduler v1 es heurístico (orden por fecha y asignación a líneas elegibles por familia).
 
-Detalle funcional: ver [docs/descripcion funcionalidadad.md](docs/descripcion%20funcionalidadad.md)
+## Documentación
+- Formatos SAP (MB52/Visión): ver [docs/formato_excel.md](docs/formato_excel.md)
+- Descripción funcional (SAP): ver [docs/descripcion funcionalidadad.md](docs/descripcion%20funcionalidadad.md)
+- Parámetros/configuración: ver [docs/configuracion.md](docs/configuracion.md)
+- Solución de problemas: ver [docs/troubleshooting.md](docs/troubleshooting.md)
+
