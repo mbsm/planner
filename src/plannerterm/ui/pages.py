@@ -139,18 +139,6 @@ def register_pages(repo: Repository) -> None:
                 }
             ).classes("w-full")
 
-            if kpi_rows:
-                ui.table(
-                    columns=[
-                        {"name": "snapshot_date", "label": "Fecha", "field": "snapshot_date"},
-                        {"name": "tons_atrasadas", "label": "Tons atrasadas", "field": "tons_atrasadas_fmt"},
-                        {"name": "tons_por_entregar", "label": "Tons por entregar", "field": "tons_por_entregar_fmt"},
-                        {"name": "snapshot_at", "label": "Actualizado", "field": "snapshot_at"},
-                    ],
-                    rows=kpi_rows,
-                    row_key="snapshot_date",
-                ).classes("w-full").props("dense flat bordered")
-
             ui.separator()
 
             overdue = repo.get_orders_overdue_rows(limit=200)
@@ -191,31 +179,6 @@ def register_pages(repo: Repository) -> None:
                 with ui.card().classes("p-4 w-full"):
                     ui.label(f"Próximas 2 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
                     ui.label("Pedidos con entrega entre hoy y 14 días.").classes("text-sm text-slate-600")
-                    # Chart: tons by delivery date (due soon)
-                    due_by_date: dict[str, float] = {}
-                    for r in due_soon:
-                        fe = str(r.get("fecha_entrega") or "").strip()
-                        if not fe:
-                            continue
-                        due_by_date[fe] = float(due_by_date.get(fe, 0.0)) + float(r.get("tons") or 0.0)
-                    due_dates = sorted(due_by_date.keys())
-                    due_tons_series = [float(due_by_date[d] or 0.0) for d in due_dates]
-                    ui.echart(
-                        {
-                            "tooltip": {"trigger": "axis"},
-                            "grid": {"left": 45, "right": 20, "top": 20, "bottom": 55},
-                            "xAxis": {"type": "category", "data": due_dates, "axisLabel": {"rotate": 45}},
-                            "yAxis": {"type": "value", "name": "tons"},
-                            "series": [
-                                {
-                                    "name": "Tons por entregar",
-                                    "type": "bar",
-                                    "data": due_tons_series,
-                                    "itemStyle": {"color": "#3b82f6"},
-                                }
-                            ],
-                        }
-                    ).classes("w-full")
                     if due_soon:
                         ui.table(
                             columns=[
