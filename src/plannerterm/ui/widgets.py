@@ -71,6 +71,7 @@ def render_nav(active: str | None = None) -> None:
         "programa_por_vulcanizar",
         "programa_en_vulcanizado",
     }
+    production_progress_active = active_key in {"avance"}
     config_active = active_key in {"config", "config_lineas", "config_familias", "config_materiales", "config_pedidos"}
 
     with ui.header().classes("pt-header bg-white text-slate-900"):
@@ -117,6 +118,15 @@ def render_nav(active: str | None = None) -> None:
                         ui.menu_item(
                             "En vulcanizado (4048)",
                             on_click=lambda: ui.navigate.to("/programa/en-vulcanizado"),
+                        )
+
+                prog2_props = "dense no-caps" + (" unelevated" if production_progress_active else " flat")
+                with ui.button("Avance Producción", icon="insights").props(prog2_props) as _prog2_btn:
+                    _prog2_btn.props("color=primary")
+                    with ui.menu().props("auto-close"):
+                        ui.menu_item(
+                            "Terminaciones (4035)",
+                            on_click=lambda: ui.navigate.to("/avance"),
                         )
 
                 cfg_props = "dense no-caps" + (" unelevated" if config_active else " flat")

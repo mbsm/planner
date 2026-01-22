@@ -94,6 +94,65 @@ def register_pages(repo: Repository) -> None:
             ui.label("Home").classes("text-2xl font-semibold")
             ui.separator()
 
+            kpi_rows = repo.get_vision_kpi_daily_rows(limit=180)
+            dates: list[str] = []
+            atrasadas: list[float] = []
+
+            ui.label("Histórico (Visión Planta): toneladas atrasadas").classes("text-lg font-semibold")
+            ui.label("Snapshot diario cuando se sube Visión Planta.").classes("text-sm text-slate-600")
+
+            if kpi_rows:
+                last = kpi_rows[-1]
+                last_at = str(last.get("snapshot_at") or "").strip()
+                last_date = str(last.get("snapshot_date") or "").strip()
+                if last_at or last_date:
+                    ui.label(f"Última actualización Visión Planta: {last_at or last_date}").classes(
+                        "text-sm text-slate-600"
+                    )
+
+                for r in kpi_rows:
+                    r["tons_atrasadas_fmt"] = f"{float(r.get('tons_atrasadas') or 0.0):,.1f}"
+                    r["tons_por_entregar_fmt"] = f"{float(r.get('tons_por_entregar') or 0.0):,.1f}"
+
+                dates = [str(r.get("snapshot_date") or "") for r in kpi_rows]
+                atrasadas = [float(r.get("tons_atrasadas") or 0.0) for r in kpi_rows]
+            else:
+                ui.label("Sin datos aún: sube Visión Planta en /actualizar para comenzar el histórico.").classes(
+                    "text-sm text-slate-500"
+                )
+
+            ui.echart(
+                {
+                    "tooltip": {"trigger": "axis"},
+                    "grid": {"left": 45, "right": 20, "top": 30, "bottom": 45},
+                    "xAxis": {"type": "category", "data": dates},
+                    "yAxis": {"type": "value", "name": "tons"},
+                    "series": [
+                        {
+                            "name": "Tons atrasadas",
+                            "type": "line",
+                            "data": atrasadas,
+                            "smooth": True,
+                            "areaStyle": {},
+                        }
+                    ],
+                }
+            ).classes("w-full")
+
+            if kpi_rows:
+                ui.table(
+                    columns=[
+                        {"name": "snapshot_date", "label": "Fecha", "field": "snapshot_date"},
+                        {"name": "tons_atrasadas", "label": "Tons atrasadas", "field": "tons_atrasadas_fmt"},
+                        {"name": "tons_por_entregar", "label": "Tons por entregar", "field": "tons_por_entregar_fmt"},
+                        {"name": "snapshot_at", "label": "Actualizado", "field": "snapshot_at"},
+                    ],
+                    rows=kpi_rows,
+                    row_key="snapshot_date",
+                ).classes("w-full").props("dense flat bordered")
+
+            ui.separator()
+
             overdue = repo.get_orders_overdue_rows(limit=200)
             due_soon = repo.get_orders_due_soon_rows(days=14, limit=200)
 
@@ -177,6 +236,98 @@ def register_pages(repo: Repository) -> None:
                 ).classes("w-full").props("dense flat bordered")
             else:
                 ui.label("Aún no hay órdenes cargadas.").classes("text-slate-600")
+
+    @ui.page("/avance")
+    def avance() -> None:
+        render_nav(active="avance")
+        with page_container():
+            ui.label("Avance (MB52)").classes("text-2xl font-semibold")
+            ui.label(
+                "Reporte de salidas (brutas) desde MB52 vs la carga anterior, mapeadas al último programa de Terminaciones."
+            ).classes("pt-subtitle")
+            ui.separator()
+
+            rep = repo.load_mb52_progress_last(process="terminaciones")
+            if rep is None:
+                ui.label("Aún no hay reporte. Sube MB52 (modo replace) para generarlo.").classes("text-slate-600")
+                return
+
+            gen = str(rep.get("generated_on") or "").strip()
+            base = str(rep.get("program_generated_on") or "").strip()
+            prev_n = int(rep.get("mb52_prev_count") or 0)
+            curr_n = int(rep.get("mb52_curr_count") or 0)
+            if gen:
+                ui.label(f"Última actualización avance: {gen}").classes("text-slate-600")
+            if base:
+                ui.label(f"Programa base: {base}").classes("text-slate-600")
+            ui.label(f"MB52 usable (prev/curr): {prev_n} / {curr_n}").classes("text-slate-600")
+            ui.separator()
+
+            lines = rep.get("lines") or {}
+
+            def _format_lotes_range(row: dict) -> str:
+                a = row.get("corr_inicio")
+                b = row.get("corr_fin")
+                try:
+                    ai = int(a)
+                    bi = int(b)
+                except Exception:
+                    return ""
+                ai_s = str(ai % 10000).zfill(4)
+                bi_s = str(bi % 10000).zfill(4)
+                if ai_s.startswith("0"):
+                    ai_s = ai_s[1:]
+                if bi_s.startswith("0"):
+                    bi_s = bi_s[1:]
+                return ai_s if ai_s == bi_s else f"{ai_s}-{bi_s}"
+
+            # Render by line, like the program.
+            with ui.element("div").classes("w-full grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 items-stretch"):
+                for raw_line_id, items in sorted(lines.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 10**9):
+                    try:
+                        line_id = int(raw_line_id)
+                    except Exception:
+                        continue
+                    rows = list(items or [])
+                    for r in rows:
+                        r["lotes_rango"] = _format_lotes_range(r)
+
+                    with ui.card().classes("w-full h-full flex flex-col"):
+                        ui.label(f"Línea {line_id}").classes("text-xl font-semibold")
+                        if not rows:
+                            ui.label("(sin salidas)").classes("text-gray-500")
+                            continue
+                        ui.table(
+                            columns=[
+                                {"name": "prio_kind", "label": "", "field": "prio_kind"},
+                                {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                                {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                                {"name": "lotes_rango", "label": "Lotes", "field": "lotes_rango"},
+                                {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
+                                {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
+                                {"name": "salio", "label": "Salió", "field": "salio"},
+                                {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                            ],
+                            rows=rows,
+                            row_key="_row_id",
+                        ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
+
+            unplanned = list(rep.get("unplanned") or [])
+            if unplanned:
+                ui.separator()
+                ui.label("Salidas no programadas").classes("text-xl font-semibold")
+                ui.label(
+                    "Salidas MB52 que no calzan con ningún rango del programa (por pedido/posición)."
+                ).classes("text-slate-600")
+                ui.table(
+                    columns=[
+                        {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                        {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                        {"name": "salio", "label": "Salió", "field": "salio"},
+                    ],
+                    rows=unplanned,
+                    row_key="_row_id",
+                ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
 
     @ui.page("/config")
     def config_lines() -> None:
@@ -553,6 +704,15 @@ def register_pages(repo: Repository) -> None:
                             ui.notify(f"Importado: {kind}{extra}")
 
                         await refresh_from_sap_all(notify=False)
+
+                        if kind in {"vision", "vision_planta", "sap_vision"}:
+                            try:
+                                snap = repo.upsert_vision_kpi_daily()
+                                ui.notify(
+                                    f"KPI guardado ({snap['snapshot_date']}): {float(snap['tons_atrasadas']):,.1f} tons atrasadas / {float(snap['tons_por_entregar']):,.1f} tons por entregar"
+                                )
+                            except Exception as ex:
+                                ui.notify(f"No se pudo guardar KPI: {ex}", color="warning")
 
                         missing = repo.count_missing_parts_from_orders()
                         if missing:

@@ -642,6 +642,97 @@ class Repository:
         return [dict(r) for r in rows]
 
     # ---------- Dashboard helpers ----------
+    def upsert_vision_kpi_daily(self, *, snapshot_date: date | None = None) -> dict:
+        """Persist a daily KPI snapshot based on current Orders + Visión.
+
+        Metrics:
+        - tons_por_entregar: pending tons across all (pedido,posicion) present in `orders`
+        - tons_atrasadas: subset of pending tons where `fecha_entrega` < snapshot_date
+
+        One row per day (upsert by `snapshot_date`).
+        """
+
+        d0 = snapshot_date or date.today()
+        d0_iso = d0.isoformat()
+        now_iso = datetime.now().isoformat(timespec="seconds")
+
+        with self.db.connect() as con:
+            row = con.execute(
+                """
+                WITH orderpos AS (
+                    SELECT pedido, posicion, MIN(fecha_entrega) AS fecha_entrega
+                    FROM orders
+                    GROUP BY pedido, posicion
+                ), v AS (
+                    SELECT
+                        pedido,
+                        posicion,
+                        MAX(COALESCE(cod_material, '')) AS cod_material,
+                        MAX(COALESCE(solicitado, 0)) AS solicitado,
+                        MAX(COALESCE(bodega, 0)) AS bodega,
+                        MAX(COALESCE(despachado, 0)) AS despachado,
+                        MAX(peso_unitario_ton) AS peso_unitario_ton
+                    FROM sap_vision
+                    GROUP BY pedido, posicion
+                ), joined AS (
+                    SELECT
+                        op.fecha_entrega AS fecha_entrega,
+                        CASE
+                            WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
+                            ELSE (v.solicitado - v.bodega - v.despachado)
+                        END AS pendientes,
+                        COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0) AS peso_ton
+                    FROM orderpos op
+                    LEFT JOIN v
+                      ON v.pedido = op.pedido
+                     AND v.posicion = op.posicion
+                    LEFT JOIN parts p
+                      ON p.numero_parte = v.cod_material
+                )
+                SELECT
+                    COALESCE(SUM(pendientes * peso_ton), 0.0) AS tons_por_entregar,
+                    COALESCE(SUM(CASE WHEN fecha_entrega < ? THEN (pendientes * peso_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
+                FROM joined
+                """,
+                (d0_iso,),
+            ).fetchone()
+
+            tons_por_entregar = float(row["tons_por_entregar"] or 0.0) if row is not None else 0.0
+            tons_atrasadas = float(row["tons_atrasadas"] or 0.0) if row is not None else 0.0
+
+            con.execute(
+                """
+                INSERT INTO vision_kpi_daily(snapshot_date, snapshot_at, tons_por_entregar, tons_atrasadas)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(snapshot_date) DO UPDATE SET
+                    snapshot_at = excluded.snapshot_at,
+                    tons_por_entregar = excluded.tons_por_entregar,
+                    tons_atrasadas = excluded.tons_atrasadas
+                """,
+                (d0_iso, now_iso, tons_por_entregar, tons_atrasadas),
+            )
+
+        return {
+            "snapshot_date": d0_iso,
+            "snapshot_at": now_iso,
+            "tons_por_entregar": tons_por_entregar,
+            "tons_atrasadas": tons_atrasadas,
+        }
+
+    def get_vision_kpi_daily_rows(self, *, limit: int = 120) -> list[dict]:
+        lim = max(1, min(int(limit or 120), 2000))
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT snapshot_date, snapshot_at, tons_por_entregar, tons_atrasadas
+                FROM vision_kpi_daily
+                ORDER BY snapshot_date ASC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_orders_overdue_rows(self, *, today: date | None = None, limit: int = 200) -> list[dict]:
         """Orders with fecha_entrega < today across all processes."""
         d0 = today or date.today()
@@ -1343,7 +1434,52 @@ class Repository:
             qc = to_int01(r.get("en_control_calidad"))
             rows.append((material, texto_breve, centro, almacen, lote, libre, doc, pos, qc))
 
+        # Progress report (Terminaciones): compute salidas brutas vs previous MB52 when replacing.
+        # We compute it BEFORE invalidating cached programs.
+        last_program_term = None
+        try:
+            last_program_term = self.load_last_program(process="terminaciones")
+        except Exception:
+            last_program_term = None
+
         with self.db.connect() as con:
+            prev_keys_term: set[tuple[str, str, str]] | None = None
+            prev_items_term: list[tuple[str, str, str, int]] | None = None
+            if mode == "replace":
+                try:
+                    centro_term = (self.get_config(key="sap_centro", default="4000") or "").strip()
+                    almacen_term = (self.get_config(key="sap_almacen_terminaciones", default="4035") or "").strip()
+                    centro_term = self._normalize_sap_key(centro_term) or centro_term
+                    almacen_term = self._normalize_sap_key(almacen_term) or almacen_term
+                    avail_sql = self._mb52_availability_predicate_sql(process="terminaciones")
+                    rows_prev = con.execute(
+                        f"""
+                        SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
+                        FROM sap_mb52
+                        WHERE centro = ?
+                          AND almacen = ?
+                          AND {avail_sql}
+                          AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
+                          AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
+                          AND lote IS NOT NULL AND TRIM(lote) <> ''
+                        """.strip(),
+                        (str(centro_term), str(almacen_term)),
+                    ).fetchall()
+
+                    prev_items_term = []
+                    for r in rows_prev:
+                        pedido = str(r["pedido"] or "").strip()
+                        posicion = str(r["posicion"] or "").strip()
+                        lote = str(r["lote"] or "").strip()
+                        if not pedido or not posicion or not lote:
+                            continue
+                        corr = self._lote_to_int(lote)
+                        prev_items_term.append((pedido, posicion, lote, int(corr)))
+                    prev_keys_term = {(p, pos, lote) for (p, pos, lote, _) in prev_items_term}
+                except Exception:
+                    prev_keys_term = None
+                    prev_items_term = None
+
             if mode == "replace":
                 con.execute("DELETE FROM sap_mb52")
             else:
@@ -1357,9 +1493,202 @@ class Repository:
                 """,
                 rows,
             )
+
+            if mode == "replace" and last_program_term and prev_keys_term is not None and prev_items_term is not None:
+                try:
+                    centro_term = (self.get_config(key="sap_centro", default="4000") or "").strip()
+                    almacen_term = (self.get_config(key="sap_almacen_terminaciones", default="4035") or "").strip()
+                    centro_term = self._normalize_sap_key(centro_term) or centro_term
+                    almacen_term = self._normalize_sap_key(almacen_term) or almacen_term
+                    avail_sql = self._mb52_availability_predicate_sql(process="terminaciones")
+                    rows_curr = con.execute(
+                        f"""
+                        SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
+                        FROM sap_mb52
+                        WHERE centro = ?
+                          AND almacen = ?
+                          AND {avail_sql}
+                          AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
+                          AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
+                          AND lote IS NOT NULL AND TRIM(lote) <> ''
+                        """.strip(),
+                        (str(centro_term), str(almacen_term)),
+                    ).fetchall()
+                    curr_keys_term: set[tuple[str, str, str]] = set()
+                    for r in rows_curr:
+                        pedido = str(r["pedido"] or "").strip()
+                        posicion = str(r["posicion"] or "").strip()
+                        lote = str(r["lote"] or "").strip()
+                        if not pedido or not posicion or not lote:
+                            continue
+                        curr_keys_term.add((pedido, posicion, lote))
+
+                    report = self._build_mb52_progress_report_terminaciones(
+                        last_program=last_program_term,
+                        prev_items=prev_items_term,
+                        prev_keys=prev_keys_term,
+                        curr_keys=curr_keys_term,
+                    )
+                    self._save_mb52_progress_last(con=con, process="terminaciones", report=report)
+                except Exception:
+                    # Best-effort: never block MB52 import.
+                    pass
+
             # Imported SAP data invalidates all derived orders/programs.
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
+
+    def _save_mb52_progress_last(self, *, con, process: str, report: dict) -> None:
+        payload = json.dumps(report)
+        generated_on = str(report.get("generated_on") or datetime.now().isoformat(timespec="seconds"))
+        con.execute(
+            "INSERT INTO mb52_progress_last(process, generated_on, report_json) VALUES(?, ?, ?) "
+            "ON CONFLICT(process) DO UPDATE SET generated_on=excluded.generated_on, report_json=excluded.report_json",
+            (process, generated_on, payload),
+        )
+
+    def load_mb52_progress_last(self, *, process: str = "terminaciones") -> dict | None:
+        process = self._normalize_process(process)
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT generated_on, report_json FROM mb52_progress_last WHERE process=?",
+                (process,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["report_json"])
+        if isinstance(payload, dict):
+            payload.setdefault("generated_on", row["generated_on"])
+        return payload
+
+    def _build_mb52_progress_report_terminaciones(
+        self,
+        *,
+        last_program: dict,
+        prev_items: list[tuple[str, str, str, int]],
+        prev_keys: set[tuple[str, str, str]],
+        curr_keys: set[tuple[str, str, str]],
+    ) -> dict:
+        """Build a progress report for Terminaciones.
+
+        Salidas brutas: items present in prev MB52 but not present in current MB52.
+        Items are identified by (pedido,posicion,lote). We map each salida to a program row
+        if its correlativo (digits extracted from lote) falls within corr_inicio..corr_fin.
+        Unmatched salidas are reported in a separate table.
+        """
+
+        program_generated_on = str(last_program.get("generated_on") or "")
+        program = last_program.get("program") or {}
+
+        # Index program rows by (pedido,posicion)
+        by_orderpos: dict[tuple[str, str], list[dict]] = {}
+        row_by_row_id: dict[str, dict] = {}
+        line_by_row_id: dict[str, int] = {}
+
+        for raw_line_id, items in (program or {}).items():
+            try:
+                line_id = int(raw_line_id)
+            except Exception:
+                continue
+            for r in list(items or []):
+                try:
+                    if int(r.get("is_test") or 0) == 1:
+                        continue
+                except Exception:
+                    pass
+
+                pedido = str(r.get("pedido") or "").strip()
+                posicion = str(r.get("posicion") or "").strip()
+                if not pedido or not posicion:
+                    continue
+                try:
+                    a = int(r.get("corr_inicio"))
+                    b = int(r.get("corr_fin"))
+                except Exception:
+                    continue
+                row_id = str(r.get("_row_id") or f"{pedido}|{posicion}|{a}-{b}|line{line_id}")
+                rec = {
+                    "_row_id": row_id,
+                    "pedido": pedido,
+                    "posicion": posicion,
+                    "numero_parte": str(r.get("numero_parte") or "").strip(),
+                    "familia": str(r.get("familia") or "").strip(),
+                    "cantidad": int(r.get("cantidad") or 0),
+                    "fecha_entrega": str(r.get("fecha_entrega") or "").strip(),
+                    "corr_inicio": a,
+                    "corr_fin": b,
+                    "prio_kind": str(r.get("prio_kind") or "").strip(),
+                    "is_test": 0,
+                }
+                by_orderpos.setdefault((pedido, posicion), []).append(rec)
+                row_by_row_id[row_id] = rec
+                line_by_row_id[row_id] = int(line_id)
+
+        # Sort ranges to speed up matching
+        for k in list(by_orderpos.keys()):
+            by_orderpos[k].sort(key=lambda rr: (int(rr.get("corr_inicio") or 0), int(rr.get("corr_fin") or 0)))
+
+        exited = []
+        for pedido, posicion, lote, corr in prev_items:
+            if (pedido, posicion, lote) not in curr_keys:
+                exited.append((pedido, posicion, lote, int(corr)))
+
+        # Count salidas per program row
+        salio_by_row_id: dict[str, int] = {}
+        unplanned_by_orderpos: dict[tuple[str, str], int] = {}
+
+        for pedido, posicion, _lote, corr in exited:
+            if corr <= 0:
+                # Cannot map to a correlativo range reliably
+                unplanned_by_orderpos[(pedido, posicion)] = unplanned_by_orderpos.get((pedido, posicion), 0) + 1
+                continue
+
+            candidates = by_orderpos.get((pedido, posicion)) or []
+            matched_row_id: str | None = None
+            for rr in candidates:
+                if int(rr["corr_inicio"]) <= corr <= int(rr["corr_fin"]):
+                    matched_row_id = str(rr["_row_id"])
+                    break
+
+            if matched_row_id is None:
+                unplanned_by_orderpos[(pedido, posicion)] = unplanned_by_orderpos.get((pedido, posicion), 0) + 1
+            else:
+                salio_by_row_id[matched_row_id] = salio_by_row_id.get(matched_row_id, 0) + 1
+
+        # Build per-line report rows
+        lines_out: dict[int, list[dict]] = {}
+        for row_id, salio in salio_by_row_id.items():
+            if salio <= 0:
+                continue
+            base = dict(row_by_row_id.get(row_id) or {"_row_id": row_id})
+            base["salio"] = int(salio)
+            line_id = int(line_by_row_id.get(row_id) or 0)
+            lines_out.setdefault(line_id, []).append(base)
+
+        for line_id in list(lines_out.keys()):
+            lines_out[line_id].sort(key=lambda r: (str(r.get("pedido") or ""), str(r.get("posicion") or ""), int(r.get("corr_inicio") or 0)))
+
+        # Unplanned rows (aggregate by orderpos)
+        unplanned_rows: list[dict] = []
+        for (pedido, posicion), n in sorted(unplanned_by_orderpos.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            unplanned_rows.append(
+                {
+                    "_row_id": f"{pedido}|{posicion}",
+                    "pedido": pedido,
+                    "posicion": posicion,
+                    "salio": int(n),
+                }
+            )
+
+        return {
+            "process": "terminaciones",
+            "generated_on": datetime.now().isoformat(timespec="seconds"),
+            "program_generated_on": program_generated_on,
+            "mb52_prev_count": int(len(prev_keys)),
+            "mb52_curr_count": int(len(curr_keys)),
+            "lines": lines_out,
+            "unplanned": unplanned_rows,
+        }
 
     def get_sap_mb52_almacen_counts(self, *, centro: str | None = None, limit: int = 50) -> list[dict]:
         """Return counts per almacen in sap_mb52 (optionally filtered by centro)."""

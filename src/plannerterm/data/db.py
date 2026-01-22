@@ -65,6 +65,19 @@ class Db:
                     despachado INTEGER
                 );
 
+                CREATE TABLE IF NOT EXISTS vision_kpi_daily (
+                    snapshot_date TEXT PRIMARY KEY,
+                    snapshot_at TEXT NOT NULL,
+                    tons_por_entregar REAL NOT NULL,
+                    tons_atrasadas REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS mb52_progress_last (
+                    process TEXT PRIMARY KEY,
+                    generated_on TEXT NOT NULL,
+                    report_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS order_priority (
                     pedido TEXT PRIMARY KEY,
                     is_priority INTEGER NOT NULL DEFAULT 0
