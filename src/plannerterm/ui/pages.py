@@ -233,6 +233,24 @@ def register_pages(repo: Repository) -> None:
                                         row_key="_row_id",
                                     ).classes("w-full").props("dense flat bordered")
 
+                                    # Tabla de Calidad (separada)
+                                    quality_stages = list(data.get("quality_stages") or [])
+                                    if quality_stages:
+                                        ui.separator().classes("my-3")
+                                        ui.label("Calidad").classes("text-lg font-semibold mt-2")
+                                        for r in quality_stages:
+                                            v = r.get("piezas")
+                                            r["piezas_fmt"] = str(int(v or 0))
+
+                                        ui.table(
+                                            columns=[
+                                                {"name": "estado", "label": "Estado", "field": "estado"},
+                                                {"name": "piezas", "label": "Piezas", "field": "piezas_fmt"},
+                                            ],
+                                            rows=quality_stages,
+                                            row_key="_row_id",
+                                        ).classes("w-full").props("dense flat bordered")
+
                                 with ui.row().classes("w-full justify-end mt-2"):
                                     ui.button("Cerrar", on_click=dialog.close).props("flat")
 

@@ -1772,6 +1772,9 @@ class Repository:
             ("mecanizado_externo", "Mecanizado Externo"),
             ("bodega", "Bodega"),
             ("despachado", "Despachado"),
+        ]
+
+        quality_stages = [
             ("rechazo", "Rechazo"),
             ("rech_insp_externa", "Rech. Insp. Externa"),
         ]
@@ -1796,6 +1799,16 @@ class Repository:
                     }
                 )
 
+        quality_rows: list[dict] = []
+        for key, label in quality_stages:
+            quality_rows.append(
+                {
+                    "_row_id": key,
+                    "estado": label,
+                    "piezas": _opt_int(row[key]) if key in row.keys() else None,
+                }
+            )
+
         return {
             "pedido": str(row["pedido"]),
             "posicion": str(row["posicion"]),
@@ -1806,6 +1819,7 @@ class Repository:
             "solicitado": _opt_int(row["solicitado"]),
             "found": 1,
             "stages": out_rows,
+            "quality_stages": quality_rows,
         }
 
     def import_sap_vision_bytes(self, *, content: bytes) -> None:
