@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from nicegui import ui
 
@@ -142,7 +142,7 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
 
             overdue = repo.get_orders_overdue_rows(limit=200)
-            due_soon = repo.get_orders_due_soon_rows(days=42, limit=200)
+            due_soon = repo.get_orders_due_soon_rows(days=49, limit=200)
 
             overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
@@ -330,34 +330,84 @@ def register_pages(repo: Repository) -> None:
 
                 with ui.card().classes("p-4 w-full"):
                     ui.label(f"Entrega Pedidos próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
-                    ui.label("Pedidos con entrega entre hoy y 42 días.").classes("text-sm text-slate-600")
+                    ui.label("Pedidos agrupados por semana ISO (lunes a domingo).").classes("text-sm text-slate-600")
                     
                     if due_soon or overdue:
-                        # Dividir pedidos por semana
-                        # Semana en curso incluye pedidos atrasados con menos de 7 días de atraso
-                        week_0_overdue = [r for r in overdue if r.get("dias", 999) < 7]
-                        week_0_due = [r for r in due_soon if r.get("dias", 0) <= 6]
+                        # Obtener la semana ISO actual (año, número de semana)
+                        today = date.today()
+                        current_iso = today.isocalendar()  # (year, week, weekday)
+                        current_year = current_iso[0]
+                        current_week = current_iso[1]
                         
-                        # Marcar los atrasados con un campo especial
-                        for r in week_0_overdue:
-                            r["is_overdue"] = True
-                        for r in week_0_due:
-                            r["is_overdue"] = False
+                        # Función helper para obtener semana ISO relativa
+                        def get_week_offset(fecha_str: str) -> int | None:
+                            """Devuelve el offset de semana respecto a la semana actual.
+                            0 = semana actual, 1 = siguiente semana, etc.
+                            Retorna None si no se puede parsear la fecha."""
+                            try:
+                                if isinstance(fecha_str, str):
+                                    fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+                                elif isinstance(fecha_str, date):
+                                    fecha = fecha_str
+                                else:
+                                    return None
+                                
+                                fecha_iso = fecha.isocalendar()
+                                fecha_year = fecha_iso[0]
+                                fecha_week = fecha_iso[1]
+                                
+                                # Calcular diferencia de semanas considerando cambio de año
+                                if fecha_year == current_year:
+                                    return fecha_week - current_week
+                                elif fecha_year > current_year:
+                                    # Obtener última semana del año actual
+                                    last_day_current = date(current_year, 12, 31)
+                                    last_week_current = last_day_current.isocalendar()[1]
+                                    weeks_left_in_current = last_week_current - current_week
+                                    return weeks_left_in_current + fecha_week
+                                else:  # fecha_year < current_year
+                                    # Fecha está en año anterior
+                                    last_day_prev = date(fecha_year, 12, 31)
+                                    last_week_prev = last_day_prev.isocalendar()[1]
+                                    return -(current_week + (last_week_prev - fecha_week))
+                            except:
+                                return None
                         
-                        # Combinar atrasados y próximos en semana en curso
-                        week_0 = week_0_overdue + week_0_due
+                        # Dividir pedidos por semana usando número de semana ISO
+                        week_0 = []
+                        week_1 = []
+                        week_2 = []
+                        week_3 = []
+                        week_4 = []
+                        week_5 = []
                         
-                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Semana + 1
-                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 20]  # Semana + 2
-                        week_3 = [r for r in due_soon if 21 <= r.get("dias", 0) <= 27]  # Semana + 3
-                        week_4 = [r for r in due_soon if 28 <= r.get("dias", 0) <= 34]  # Semana + 4
-                        week_5 = [r for r in due_soon if 35 <= r.get("dias", 0) <= 42]  # Semana + 5
+                        # Procesar pedidos atrasados (pueden pertenecer a la semana actual)
+                        for r in overdue:
+                            week_offset = get_week_offset(r.get("fecha_entrega", ""))
+                            if week_offset is not None and week_offset == 0:
+                                # Pedido atrasado pero en la semana actual
+                                r["is_overdue"] = True
+                                r["completo"] = int(r.get("pendientes", 1)) == 0
+                                week_0.append(r)
                         
-                        # Agregar campo completo (check si pendientes == 0)
+                        # Procesar pedidos próximos
                         for r in due_soon:
+                            week_offset = get_week_offset(r.get("fecha_entrega", ""))
+                            r["is_overdue"] = False
                             r["completo"] = int(r.get("pendientes", 1)) == 0
-                        for r in week_0:
-                            r["completo"] = int(r.get("pendientes", 1)) == 0
+                            
+                            if week_offset == 0:
+                                week_0.append(r)
+                            elif week_offset == 1:
+                                week_1.append(r)
+                            elif week_offset == 2:
+                                week_2.append(r)
+                            elif week_offset == 3:
+                                week_3.append(r)
+                            elif week_offset == 4:
+                                week_4.append(r)
+                            elif week_offset == 5:
+                                week_5.append(r)
                         
                         columns_due = [
                             {"name": "is_overdue", "label": "", "field": "is_overdue"},
