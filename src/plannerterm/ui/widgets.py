@@ -88,14 +88,11 @@ def render_nav(active: str | None = None) -> None:
                     is_active = key == active_key
                     props = "dense no-caps" + (" unelevated" if is_active else " flat")
                     btn = ui.button(label, on_click=lambda p=path: ui.navigate.to(p)).props(props)
-                    if is_active:
-                        btn.props("color=primary")
-                    else:
-                        btn.props("color=primary")
+                    btn.style("background-color: rgb(0, 120, 190); color: white;")
 
                 prog_props = "dense no-caps" + (" unelevated" if production_program_active else " flat")
                 with ui.button("Programas Producción", icon="factory").props(prog_props) as _prog_btn:
-                    _prog_btn.props("color=primary")
+                    _prog_btn.style("background-color: rgb(0, 120, 190); color: white;")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
                             "Toma de dureza (4035)",
@@ -122,7 +119,7 @@ def render_nav(active: str | None = None) -> None:
 
                 prog2_props = "dense no-caps" + (" unelevated" if production_progress_active else " flat")
                 with ui.button("Avance Producción", icon="insights").props(prog2_props) as _prog2_btn:
-                    _prog2_btn.props("color=primary")
+                    _prog2_btn.style("background-color: rgb(0, 120, 190); color: white;")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
                             "Terminaciones (MB52 - 4035)",
@@ -135,7 +132,7 @@ def render_nav(active: str | None = None) -> None:
 
                 cfg_props = "dense no-caps" + (" unelevated" if config_active else " flat")
                 with ui.button("Config", icon="settings").props(cfg_props) as _cfg_btn:
-                    _cfg_btn.props("color=primary")
+                    _cfg_btn.style("background-color: rgb(0, 120, 190); color: white;")
                     with ui.menu().props("auto-close"):
                         label_lineas = (
                             "✓ Parámetros"
@@ -266,7 +263,7 @@ def render_line_tables(
                     r"""
 <q-td
         :props="props"
-        :class="Number(props.row.in_progress) === 1 ? 'bg-green-10 text-white' : ''"
+        :style="Number(props.row.in_progress) === 1 ? 'background-color: rgb(0, 120, 190); color: white;' : ''"
 >
     {{ props.value }}
 </q-td>
@@ -277,7 +274,7 @@ def render_line_tables(
                     r"""
 <q-td
         :props="props"
-        :class="Number(props.row.in_progress) === 1 ? 'bg-green-10 text-white' : ''"
+        :style="Number(props.row.in_progress) === 1 ? 'background-color: rgb(0, 120, 190); color: white;' : ''"
 >
     <q-icon v-if="props.value === 'test'" name="science" color="warning" size="18px">
         <q-tooltip>Prueba (lote con letras)</q-tooltip>
@@ -365,14 +362,16 @@ def render_line_tables(
                                 )
                                 with ui.row().classes("justify-end gap-2"):
                                     btn_split = ui.button("Crear split balanceado", icon="call_split").props(
-                                        "unelevated color=primary"
+                                        "unelevated"
                                     )
+                                    btn_split.style("background-color: rgb(0, 120, 190); color: white;")
 
                             ui.separator()
                             with ui.row().classes("justify-end gap-2"):
                                 ui.button("Cancelar", on_click=dialog.close).props("flat")
                                 btn_unmark = ui.button("Quitar en proceso").props("unelevated color=grey-7")
-                                btn_mark = ui.button("Marcar en proceso").props("unelevated color=primary")
+                                btn_mark = ui.button("Marcar en proceso").props("unelevated")
+                                btn_mark.style("background-color: rgb(0, 120, 190); color: white;")
 
                     def _pick_row(args) -> dict | None:
                         def _walk(obj):
