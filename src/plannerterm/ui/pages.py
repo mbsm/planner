@@ -290,33 +290,87 @@ def register_pages(repo: Repository) -> None:
                 with ui.card().classes("p-4 w-full"):
                     ui.label(f"Próximas 3 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
                     ui.label("Pedidos con entrega entre hoy y 21 días.").classes("text-sm text-slate-600")
+                    
                     if due_soon:
-                        tbl_due_soon = ui.table(
-                            columns=[
-                                {"name": "cliente", "label": "Cliente", "field": "cliente"},
-                                {"name": "pedido", "label": "Pedido", "field": "pedido"},
-                                {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                                {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
-                                {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
-                                {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
-                                {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
-                                {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
-                                {"name": "dias", "label": "Días restantes", "field": "dias"},
-                            ],
-                            rows=due_soon,
-                            row_key="_row_id",
-                        ).classes("w-full").props("dense flat bordered")
-
-                        # Double click to show Visión Planta breakdown by stage.
-                        def _on_due_soon_dblclick(e) -> None:
-                            r = _pick_row(getattr(e, "args", None))
-                            if r is not None:
-                                _open_vision_breakdown(r)
-                            else:
-                                ui.notify("No se pudo leer la fila seleccionada", color="negative")
-
-                        tbl_due_soon.on("rowDblClick", _on_due_soon_dblclick)
-                        tbl_due_soon.on("rowDblclick", _on_due_soon_dblclick)
+                        # Dividir pedidos por semana
+                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana en curso (0-6 días)
+                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Próxima semana (7-13 días)
+                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 21]  # Siguiente semana (14-21 días)
+                        
+                        columns_due = [
+                            {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                            {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                            {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                            {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
+                            {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
+                            {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
+                            {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
+                            {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                            {"name": "dias", "label": "Días restantes", "field": "dias"},
+                        ]
+                        
+                        # Semana en curso
+                        if week_0:
+                            ui.separator()
+                            week_0_tons = sum(float(r.get("tons") or 0.0) for r in week_0)
+                            ui.label(f"Semana en curso (0-6 días) — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_0 = ui.table(
+                                columns=columns_due,
+                                rows=week_0,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            def _on_week_0_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_0.on("rowDblClick", _on_week_0_dblclick)
+                            tbl_week_0.on("rowDblclick", _on_week_0_dblclick)
+                        
+                        # Próxima semana
+                        if week_1:
+                            ui.separator()
+                            week_1_tons = sum(float(r.get("tons") or 0.0) for r in week_1)
+                            ui.label(f"Próxima semana (7-13 días) — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_1 = ui.table(
+                                columns=columns_due,
+                                rows=week_1,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            def _on_week_1_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_1.on("rowDblClick", _on_week_1_dblclick)
+                            tbl_week_1.on("rowDblclick", _on_week_1_dblclick)
+                        
+                        # Siguiente semana
+                        if week_2:
+                            ui.separator()
+                            week_2_tons = sum(float(r.get("tons") or 0.0) for r in week_2)
+                            ui.label(f"Siguiente semana (14-21 días) — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_2 = ui.table(
+                                columns=columns_due,
+                                rows=week_2,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            def _on_week_2_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_2.on("rowDblClick", _on_week_2_dblclick)
+                            tbl_week_2.on("rowDblclick", _on_week_2_dblclick)
                     else:
                         ui.label("No hay pedidos dentro de las próximas 3 semanas.").classes("text-slate-600")
 
