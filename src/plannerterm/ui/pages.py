@@ -332,9 +332,21 @@ def register_pages(repo: Repository) -> None:
                     ui.label(f"Entrega Pedidos próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
                     ui.label("Pedidos con entrega entre hoy y 42 días.").classes("text-sm text-slate-600")
                     
-                    if due_soon:
+                    if due_soon or overdue:
                         # Dividir pedidos por semana
-                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana en curso
+                        # Semana en curso incluye pedidos atrasados con menos de 7 días de atraso
+                        week_0_overdue = [r for r in overdue if r.get("dias", 999) < 7]
+                        week_0_due = [r for r in due_soon if r.get("dias", 0) <= 6]
+                        
+                        # Marcar los atrasados con un campo especial
+                        for r in week_0_overdue:
+                            r["is_overdue"] = True
+                        for r in week_0_due:
+                            r["is_overdue"] = False
+                        
+                        # Combinar atrasados y próximos en semana en curso
+                        week_0 = week_0_overdue + week_0_due
+                        
                         week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Semana + 1
                         week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 20]  # Semana + 2
                         week_3 = [r for r in due_soon if 21 <= r.get("dias", 0) <= 27]  # Semana + 3
@@ -344,8 +356,11 @@ def register_pages(repo: Repository) -> None:
                         # Agregar campo completo (check si pendientes == 0)
                         for r in due_soon:
                             r["completo"] = int(r.get("pendientes", 1)) == 0
+                        for r in week_0:
+                            r["completo"] = int(r.get("pendientes", 1)) == 0
                         
                         columns_due = [
+                            {"name": "is_overdue", "label": "", "field": "is_overdue"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -374,6 +389,15 @@ def register_pages(repo: Repository) -> None:
                                 r"""
 <q-td :props="props">
     <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
+                            
+                            tbl_week_0.add_slot(
+                                "body-cell-is_overdue",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="close" color="negative" size="20px"></q-icon>
 </q-td>
 """,
                             )
