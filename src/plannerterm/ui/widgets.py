@@ -125,8 +125,12 @@ def render_nav(active: str | None = None) -> None:
                     _prog2_btn.props("color=primary")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
-                            "Terminaciones (4035)",
+                            "Terminaciones (MB52 - 4035)",
                             on_click=lambda: ui.navigate.to("/avance"),
+                        )
+                        ui.menu_item(
+                            "Salidas Visión Planta",
+                            on_click=lambda: ui.navigate.to("/avance_vision"),
                         )
 
                 cfg_props = "dense no-caps" + (" unelevated" if config_active else " flat")

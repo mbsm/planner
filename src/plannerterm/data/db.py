@@ -89,6 +89,12 @@ class Db:
                     report_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS vision_progress_last (
+                    id INTEGER PRIMARY KEY,
+                    generated_on TEXT NOT NULL,
+                    report_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS order_priority (
                     pedido TEXT PRIMARY KEY,
                     is_priority INTEGER NOT NULL DEFAULT 0

@@ -1559,6 +1559,82 @@ class Repository:
             payload.setdefault("generated_on", row["generated_on"])
         return payload
 
+    def _save_vision_progress_last(self, *, con, report: dict) -> None:
+        payload = json.dumps(report)
+        generated_on = str(report.get("generated_on") or datetime.now().isoformat(timespec="seconds"))
+        con.execute(
+            "INSERT INTO vision_progress_last(id, generated_on, report_json) VALUES(1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET generated_on=excluded.generated_on, report_json=excluded.report_json",
+            (generated_on, payload),
+        )
+
+    def load_vision_progress_last(self) -> dict | None:
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT generated_on, report_json FROM vision_progress_last WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["report_json"])
+        if isinstance(payload, dict):
+            payload.setdefault("generated_on", row["generated_on"])
+        return payload
+
+    def _load_prev_vision_snapshot(self, con) -> list[tuple]:
+        """Load previous Visión Planta snapshot from vision_progress_last."""
+        row = con.execute("SELECT report_json FROM vision_progress_last WHERE id=1").fetchone()
+        if row is None:
+            return []
+        try:
+            report = json.loads(row["report_json"])
+            return report.get("snapshot", [])
+        except Exception:
+            return []
+
+    def _build_vision_progress_report(self, *, prev_snapshot: list[tuple], curr_rows: list[tuple]) -> dict:
+        """Build a progress report for Visión Planta salidas.
+
+        Salidas: pedido/posición present in previous snapshot but not in current import.
+        These are orders that were dispatched or removed from Visión Planta.
+        """
+        # Convert to sets of (pedido, posicion) for comparison
+        prev_set = {(str(row[0]), str(row[1])) for row in prev_snapshot}
+        curr_set = {(str(row[0]), str(row[1])) for row in curr_rows}
+
+        # Find orders that exited (were in prev but not in curr)
+        exited_keys = prev_set - curr_set
+
+        # Build details for exited orders from previous snapshot
+        exited_orders = []
+        for row in prev_snapshot:
+            pedido = str(row[0])
+            posicion = str(row[1])
+            if (pedido, posicion) in exited_keys:
+                # Extract relevant fields from snapshot row
+                # Row structure: pedido, posicion, cod_material, desc, fecha_pedido, fecha_entrega,
+                # solicitado, x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
+                # mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                # en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
+                # cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo
+                exited_orders.append({
+                    "pedido": pedido,
+                    "posicion": posicion,
+                    "cod_material": str(row[2] or ""),
+                    "descripcion_material": str(row[3] or ""),
+                    "cliente": str(row[21] or ""),
+                    "fecha_entrega": str(row[5] or ""),
+                    "solicitado": int(row[6]) if row[6] is not None else None,
+                    "despachado": int(row[26]) if row[26] is not None else None,
+                    "bodega": int(row[25]) if row[25] is not None else None,
+                })
+
+        return {
+            "generated_on": datetime.now().isoformat(timespec="seconds"),
+            "exited_count": len(exited_orders),
+            "exited_orders": exited_orders,
+            "snapshot": curr_rows,  # Save current snapshot for next comparison
+        }
+
     def _build_mb52_progress_report_terminaciones(
         self,
         *,
@@ -2045,6 +2121,16 @@ class Repository:
                 )
                 """
             )
+
+            # Build progress report for Visión Planta salidas (dispatched/removed orders)
+            try:
+                prev_vision = self._load_prev_vision_snapshot(con)
+                report = self._build_vision_progress_report(prev_snapshot=prev_vision, curr_rows=rows)
+                self._save_vision_progress_last(con=con, report=report)
+            except Exception:
+                # Best-effort: never block Visión import.
+                pass
+
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
 

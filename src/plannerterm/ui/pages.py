@@ -439,6 +439,54 @@ def register_pages(repo: Repository) -> None:
                     row_key="_row_id",
                 ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
 
+    @ui.page("/avance_vision")
+    def avance_vision() -> None:
+        render_nav(active="avance")
+        with page_container():
+            ui.label("Salidas Visión Planta").classes("text-2xl font-semibold")
+            ui.label(
+                "Pedidos que salieron de Visión Planta desde la última actualización (despachados o eliminados)."
+            ).classes("pt-subtitle")
+            ui.separator()
+
+            rep = repo.load_vision_progress_last()
+            if rep is None:
+                ui.label("Aún no hay reporte. Sube Visión Planta para generarlo.").classes("text-slate-600")
+                return
+
+            gen = str(rep.get("generated_on") or "").strip()
+            exited_count = int(rep.get("exited_count") or 0)
+            
+            if gen:
+                ui.label(f"Última actualización: {gen}").classes("text-slate-600")
+            ui.label(f"Pedidos que salieron: {exited_count}").classes("text-slate-600")
+            ui.separator()
+
+            exited_orders = list(rep.get("exited_orders") or [])
+            if not exited_orders:
+                ui.label("No hay pedidos que hayan salido desde la última actualización.").classes("text-slate-600")
+                return
+
+            # Add row IDs for table
+            for i, row in enumerate(exited_orders):
+                row["_row_id"] = f"{row['pedido']}|{row['posicion']}|{i}"
+
+            ui.table(
+                columns=[
+                    {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                    {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                    {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                    {"name": "cod_material", "label": "Material", "field": "cod_material"},
+                    {"name": "descripcion_material", "label": "Descripción", "field": "descripcion_material"},
+                    {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
+                    {"name": "despachado", "label": "Despachado", "field": "despachado"},
+                    {"name": "bodega", "label": "Bodega", "field": "bodega"},
+                    {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                ],
+                rows=exited_orders,
+                row_key="_row_id",
+            ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
+
     @ui.page("/config")
     def config_lines() -> None:
         render_nav(active="config_lineas")
