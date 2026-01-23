@@ -712,7 +712,7 @@ def register_pages(repo: Repository) -> None:
                             missing_master = [missing_by_material[k] for k in sorted(missing_by_material.keys())]
                             if missing_master:
                                 families = repo.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
-                                dialog = ui.dialog()
+                                dialog = ui.dialog().props("persistent")
                                 entries: dict[str, dict] = {}
                                 with dialog:
                                     with ui.card().classes("w-[min(1100px,95vw)]"):
