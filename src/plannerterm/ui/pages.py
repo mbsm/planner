@@ -262,7 +262,23 @@ def register_pages(repo: Repository) -> None:
                         ready_to_dispatch = [r for r in overdue if int(r.get("pendientes") or 0) == 0]
                         to_manufacture = [r for r in overdue if int(r.get("pendientes") or 0) > 0]
                         
-                        columns_overdue = [
+                        # Pre-format tons_dispatch for display
+                        for r in ready_to_dispatch:
+                            r["tons_dispatch_fmt"] = f"{float(r.get('tons_dispatch') or 0.0):,.1f}"
+                        
+                        columns_ready = [
+                            {"name": "cliente", "label": "Cliente", "field": "cliente"},
+                            {"name": "pedido", "label": "Pedido", "field": "pedido"},
+                            {"name": "posicion", "label": "Pos.", "field": "posicion"},
+                            {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
+                            {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
+                            {"name": "bodega", "label": "Bodega", "field": "bodega"},
+                            {"name": "tons", "label": "Tons por Despachar", "field": "tons_dispatch_fmt"},
+                            {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                            {"name": "dias", "label": "Días atraso", "field": "dias"},
+                        ]
+                        
+                        columns_to_mfg = [
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -286,7 +302,7 @@ def register_pages(repo: Repository) -> None:
                         if ready_to_dispatch:
                             ui.label(f"Por despachar — {len(ready_to_dispatch)} pedidos").classes("text-md font-semibold mt-4")
                             tbl_ready = ui.table(
-                                columns=columns_overdue,
+                                columns=columns_ready,
                                 rows=ready_to_dispatch,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
@@ -297,7 +313,7 @@ def register_pages(repo: Repository) -> None:
                         if to_manufacture:
                             ui.label(f"Por fabricar — {len(to_manufacture)} pedidos").classes("text-md font-semibold mt-4")
                             tbl_to_mfg = ui.table(
-                                columns=columns_overdue,
+                                columns=columns_to_mfg,
                                 rows=to_manufacture,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")

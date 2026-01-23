@@ -740,6 +740,7 @@ class Repository:
                     v.posicion AS posicion,
                     COALESCE(v.cod_material, '') AS numero_parte,
                     COALESCE(v.solicitado, 0) AS solicitado,
+                    COALESCE(v.bodega, 0) AS bodega,
                     v.fecha_pedido AS fecha_entrega,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
@@ -752,7 +753,8 @@ class Repository:
                             ELSE (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0))
                         END
                         * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)
-                    ) AS tons
+                    ) AS tons,
+                    (COALESCE(v.bodega, 0) * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)) AS tons_dispatch
                 FROM (
                     SELECT
                         pedido,
@@ -792,11 +794,13 @@ class Repository:
                     "posicion": str(r["posicion"]),
                     "numero_parte": str(r["numero_parte"]),
                     "solicitado": int(r["solicitado"] or 0),
+                    "bodega": int(r["bodega"] or 0),
                     "pendientes": int(r["pendientes"] or 0),
                     "fecha_entrega": fe.isoformat(),
                     "dias": int(atraso),
                     "cliente": str(r["cliente"] or "").strip(),
                     "tons": float(r["tons"] or 0.0),
+                    "tons_dispatch": float(r["tons_dispatch"] or 0.0),
                 }
             )
         return out
