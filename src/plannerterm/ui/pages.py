@@ -297,7 +297,12 @@ def register_pages(repo: Repository) -> None:
                         week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Próxima semana (7-13 días)
                         week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 21]  # Siguiente semana (14-21 días)
                         
+                        # Agregar campo completo (check si pendientes == 0)
+                        for r in due_soon:
+                            r["completo"] = "✓" if int(r.get("pendientes", 1)) == 0 else ""
+                        
                         columns_due = [
+                            {"name": "completo", "label": "✓", "field": "completo"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
