@@ -1709,6 +1709,89 @@ class Repository:
                 ).fetchall()
         return [{"almacen": str(r[0] or ""), "count": int(r[1] or 0)} for r in rows]
 
+    def get_vision_stage_breakdown(self, *, pedido: str, posicion: str) -> dict:
+        """Return Visión Planta stage counts for a pedido/posición.
+
+        This is a best-effort reader: if a column is missing or NULL, it will be
+        returned as None.
+        """
+        ped = self._normalize_sap_key(pedido) or str(pedido or "").strip()
+        pos = self._normalize_sap_key(posicion) or str(posicion or "").strip()
+        if not ped or not pos:
+            raise ValueError("pedido/posición vacío")
+
+        with self.db.connect() as con:
+            row = con.execute(
+                """
+                SELECT
+                    pedido, posicion,
+                    COALESCE(cliente, '') AS cliente,
+                    COALESCE(cod_material, '') AS cod_material,
+                    COALESCE(descripcion_material, '') AS descripcion_material,
+                    COALESCE(fecha_entrega, '') AS fecha_entrega,
+                    solicitado,
+                    x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
+                    mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                    bodega, despachado, rechazo
+                FROM sap_vision
+                WHERE pedido = ? AND posicion = ?
+                LIMIT 1
+                """,
+                (ped, pos),
+            ).fetchone()
+
+        if row is None:
+            return {
+                "pedido": ped,
+                "posicion": pos,
+                "found": 0,
+                "stages": [],
+            }
+
+        def _opt_int(v) -> int | None:
+            try:
+                return int(v) if v is not None else None
+            except Exception:
+                return None
+
+        stages = [
+            ("x_programar", "x programar"),
+            ("programado", "programado"),
+            ("por_fundir", "por fundir"),
+            ("desmoldeo", "desmoldeo"),
+            ("tt", "TT"),
+            ("terminaciones", "Terminaciones"),
+            ("mecanizado_interno", "mecanizado interno"),
+            ("mecanizado_externo", "mecanizado externo"),
+            ("vulcanizado", "vulcanizado"),
+            ("insp_externa", "insp externa"),
+            ("bodega", "bodega"),
+            ("despachado", "despachado"),
+            ("rechazo", "rechazo"),
+        ]
+
+        out_rows: list[dict] = []
+        for key, label in stages:
+            out_rows.append(
+                {
+                    "_row_id": key,
+                    "estado": label,
+                    "piezas": _opt_int(row[key]) if key in row.keys() else None,
+                }
+            )
+
+        return {
+            "pedido": str(row["pedido"]),
+            "posicion": str(row["posicion"]),
+            "cliente": str(row["cliente"] or ""),
+            "cod_material": str(row["cod_material"] or ""),
+            "descripcion_material": str(row["descripcion_material"] or ""),
+            "fecha_entrega": str(row["fecha_entrega"] or ""),
+            "solicitado": _opt_int(row["solicitado"]),
+            "found": 1,
+            "stages": out_rows,
+        }
+
     def import_sap_vision_bytes(self, *, content: bytes) -> None:
         df_raw = read_excel_bytes(content)
         df = normalize_columns(df_raw)
@@ -1741,6 +1824,28 @@ class Repository:
                     df = df.rename(columns={c: "despachado"})
                     break
 
+        # Optional per-stage piece count columns (normalize common variants)
+        stage_aliases: dict[str, list[str]] = {
+            "x_programar": ["x_programar", "por_programar", "a_programar", "sin_programar"],
+            "programado": ["programado"],
+            "por_fundir": ["por_fundir", "porfundir"],
+            "desmoldeo": ["desmoldeo"],
+            "tt": ["tt", "tratamiento_termico", "tratamiento_termico_tt"],
+            "terminaciones": ["terminaciones", "terminacion"],
+            "mecanizado_interno": ["mecanizado_interno", "mec_interno", "mecanizado_int"],
+            "mecanizado_externo": ["mecanizado_externo", "mec_externo", "mecanizado_ext"],
+            "vulcanizado": ["vulcanizado"],
+            "insp_externa": ["insp_externa", "inspeccion_externa", "insp_ext"],
+            "rechazo": ["rechazo", "rechazado"],
+        }
+        for canonical, candidates in stage_aliases.items():
+            if canonical in df.columns:
+                continue
+            for cand in candidates:
+                if cand in df.columns:
+                    df = df.rename(columns={cand: canonical})
+                    break
+
         self._validate_columns(df.columns, {"pedido", "posicion", "cod_material", "fecha_de_pedido"})
 
         rows: list[tuple] = []
@@ -1767,6 +1872,27 @@ class Repository:
                     solicitado = int(float(raw)) if raw is not None and str(raw).strip() and str(raw).strip().lower() != "nan" else None
                 except Exception:
                     solicitado = None
+
+            def _coerce_opt_int(col: str) -> int | None:
+                if col not in df.columns:
+                    return None
+                raw = r.get(col)
+                try:
+                    return int(float(raw)) if raw is not None and str(raw).strip() and str(raw).strip().lower() != "nan" else None
+                except Exception:
+                    return None
+
+            x_programar = _coerce_opt_int("x_programar")
+            programado = _coerce_opt_int("programado")
+            por_fundir = _coerce_opt_int("por_fundir")
+            desmoldeo = _coerce_opt_int("desmoldeo")
+            tt = _coerce_opt_int("tt")
+            terminaciones = _coerce_opt_int("terminaciones")
+            mecanizado_interno = _coerce_opt_int("mecanizado_interno")
+            mecanizado_externo = _coerce_opt_int("mecanizado_externo")
+            vulcanizado = _coerce_opt_int("vulcanizado")
+            insp_externa = _coerce_opt_int("insp_externa")
+            rechazo = _coerce_opt_int("rechazo")
 
             bodega = None
             if "bodega" in df.columns:
@@ -1813,12 +1939,23 @@ class Repository:
                     fecha_pedido,
                     fecha_entrega,
                     solicitado,
+                    x_programar,
+                    programado,
+                    por_fundir,
+                    desmoldeo,
+                    tt,
+                    terminaciones,
+                    mecanizado_interno,
+                    mecanizado_externo,
+                    vulcanizado,
+                    insp_externa,
                     cliente,
                     oc_cliente,
                     peso_neto,
                     peso_unitario_ton,
                     bodega,
                     despachado,
+                    rechazo,
                 )
             )
 
@@ -1828,9 +1965,12 @@ class Repository:
                 """
                 INSERT INTO sap_vision(
                     pedido, posicion, cod_material, descripcion_material, fecha_pedido, fecha_entrega,
-                    solicitado, cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado
+                    solicitado,
+                    x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
+                    mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

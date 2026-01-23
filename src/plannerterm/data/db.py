@@ -57,12 +57,23 @@ class Db:
                     fecha_pedido TEXT NOT NULL,
                     fecha_entrega TEXT,
                     solicitado INTEGER,
+                    x_programar INTEGER,
+                    programado INTEGER,
+                    por_fundir INTEGER,
+                    desmoldeo INTEGER,
+                    tt INTEGER,
+                    terminaciones INTEGER,
+                    mecanizado_interno INTEGER,
+                    mecanizado_externo INTEGER,
+                    vulcanizado INTEGER,
+                    insp_externa INTEGER,
                     cliente TEXT,
                     oc_cliente TEXT,
                     peso_neto REAL,
                     peso_unitario_ton REAL,
                     bodega INTEGER,
-                    despachado INTEGER
+                    despachado INTEGER,
+                    rechazo INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS vision_kpi_daily (
@@ -121,6 +132,28 @@ class Db:
             if "despachado" not in vision_cols:
                 try:
                     con.execute("ALTER TABLE sap_vision ADD COLUMN despachado INTEGER")
+                except Exception:
+                    pass
+
+            # sap_vision v4: optional per-stage piece counts
+            vision_cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision)").fetchall()]
+            for col in (
+                "x_programar",
+                "programado",
+                "por_fundir",
+                "desmoldeo",
+                "tt",
+                "terminaciones",
+                "mecanizado_interno",
+                "mecanizado_externo",
+                "vulcanizado",
+                "insp_externa",
+                "rechazo",
+            ):
+                if col in vision_cols:
+                    continue
+                try:
+                    con.execute(f"ALTER TABLE sap_vision ADD COLUMN {col} INTEGER")
                 except Exception:
                     pass
 
