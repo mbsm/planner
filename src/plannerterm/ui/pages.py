@@ -159,12 +159,27 @@ def register_pages(repo: Repository) -> None:
                     ui.label("Fecha de entrega anterior a hoy.").classes("text-sm text-slate-600")
 
                     def _pick_row(args) -> dict | None:
-                        if isinstance(args, dict) and isinstance(args.get("row"), dict):
-                            return args.get("row")
-                        # Some NiceGUI/Quasar payloads nest the row under args.
-                        if isinstance(args, dict) and isinstance(args.get("args"), dict) and isinstance(args["args"].get("row"), dict):
-                            return args["args"].get("row")
-                        return None
+                        # Recursive search for 'row' dict in nested event args.
+                        def _walk(obj):
+                            if isinstance(obj, dict):
+                                yield obj
+                                for v_ in obj.values():
+                                    yield from _walk(v_)
+                            elif isinstance(obj, (list, tuple)):
+                                for it in obj:
+                                    yield from _walk(it)
+
+                        row_found: dict | None = None
+                        if isinstance(args, dict):
+                            for d in _walk(args):
+                                if isinstance(d.get("row"), dict):
+                                    row_found = d.get("row")
+                                    break
+                                # Also check if this dict itself is the row (has pedido/posicion).
+                                if row_found is None and "pedido" in d and "posicion" in d:
+                                    row_found = d
+                                    break
+                        return row_found
 
                     def _open_vision_breakdown(row: dict) -> None:
                         pedido = str(row.get("pedido") or "").strip()
@@ -243,6 +258,8 @@ def register_pages(repo: Repository) -> None:
                             r = _pick_row(getattr(e, "args", None))
                             if r is not None:
                                 _open_vision_breakdown(r)
+                            else:
+                                ui.notify("No se pudo leer la fila seleccionada", color="negative")
 
                         tbl_overdue.on("rowDblClick", _on_overdue_dblclick)
                         tbl_overdue.on("rowDblclick", _on_overdue_dblclick)
