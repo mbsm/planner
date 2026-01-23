@@ -142,7 +142,7 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
 
             overdue = repo.get_orders_overdue_rows(limit=200)
-            due_soon = repo.get_orders_due_soon_rows(days=35, limit=200)
+            due_soon = repo.get_orders_due_soon_rows(days=42, limit=200)
 
             overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
@@ -323,16 +323,17 @@ def register_pages(repo: Repository) -> None:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
                 with ui.card().classes("p-4 w-full"):
-                    ui.label(f"Próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
-                    ui.label("Pedidos con entrega entre hoy y 35 días.").classes("text-sm text-slate-600")
+                    ui.label(f"Próximas 6 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label("Pedidos con entrega entre hoy y 42 días.").classes("text-sm text-slate-600")
                     
                     if due_soon:
                         # Dividir pedidos por semana
-                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana + 1
-                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Semana + 2
-                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 20]  # Semana + 3
-                        week_3 = [r for r in due_soon if 21 <= r.get("dias", 0) <= 27]  # Semana + 4
-                        week_4 = [r for r in due_soon if 28 <= r.get("dias", 0) <= 35]  # Semana + 5
+                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana en curso
+                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Semana + 1
+                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 20]  # Semana + 2
+                        week_3 = [r for r in due_soon if 21 <= r.get("dias", 0) <= 27]  # Semana + 3
+                        week_4 = [r for r in due_soon if 28 <= r.get("dias", 0) <= 34]  # Semana + 4
+                        week_5 = [r for r in due_soon if 35 <= r.get("dias", 0) <= 42]  # Semana + 5
                         
                         # Agregar campo completo (check si pendientes == 0)
                         for r in due_soon:
@@ -500,8 +501,38 @@ def register_pages(repo: Repository) -> None:
                             
                             tbl_week_4.on("rowDblClick", _on_week_4_dblclick)
                             tbl_week_4.on("rowDblclick", _on_week_4_dblclick)
+                        
+                        # Semana + 5
+                        if week_5:
+                            ui.separator()
+                            week_5_tons = sum(float(r.get("tons") or 0.0) for r in week_5)
+                            ui.label(f"Semana + 5 — {week_5_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_5 = ui.table(
+                                columns=columns_due,
+                                rows=week_5,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            tbl_week_5.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
+                            
+                            def _on_week_5_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_5.on("rowDblClick", _on_week_5_dblclick)
+                            tbl_week_5.on("rowDblclick", _on_week_5_dblclick)
                     else:
-                        ui.label("No hay pedidos dentro de las próximas 5 semanas.").classes("text-slate-600")
+                        ui.label("No hay pedidos dentro de las próximas 6 semanas.").classes("text-slate-600")
 
     @ui.page("/avance")
     def avance() -> None:
