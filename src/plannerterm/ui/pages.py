@@ -323,7 +323,7 @@ def register_pages(repo: Repository) -> None:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
                 with ui.card().classes("p-4 w-full"):
-                    ui.label(f"Próximas 6 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label(f"Entrega Pedidos próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
                     ui.label("Pedidos con entrega entre hoy y 42 días.").classes("text-sm text-slate-600")
                     
                     if due_soon:
