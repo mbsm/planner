@@ -194,7 +194,7 @@ def register_pages(repo: Repository) -> None:
                             ui.notify(f"No se pudo leer Visión: {ex}", color="negative")
                             return
 
-                        dialog = ui.dialog()
+                        dialog = ui.dialog().props("persistent")
                         with dialog:
                             with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 720px"):
                                 title = f"Pedido {pedido} / {posicion}"
