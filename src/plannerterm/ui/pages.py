@@ -197,7 +197,8 @@ def register_pages(repo: Repository) -> None:
                         dialog = ui.dialog().props("persistent")
                         with dialog:
                             with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 720px"):
-                                title = f"Pedido {pedido} / {posicion}"
+                                solicitado = int(data.get("solicitado") or 0)
+                                title = f"Pedido {pedido} / {posicion} — Solicitado: {solicitado}"
                                 ui.label(title).classes("text-xl font-semibold")
                                 if int(data.get("found") or 0) == 0:
                                     ui.label("No hay datos de Visión Planta para este pedido/posición.").classes(
