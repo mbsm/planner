@@ -662,19 +662,19 @@ class Repository:
                         pedido,
                         posicion,
                         MAX(COALESCE(cod_material, '')) AS cod_material,
-                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
+                        MAX(COALESCE(fecha_pedido, '')) AS fecha_pedido,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_entrega > '2016-12-31'
+                      AND fecha_pedido > '2016-12-31'
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
-                        v.fecha_entrega AS fecha_entrega,
+                        v.fecha_pedido AS fecha_pedido,
                         CASE
                             WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
                             ELSE (v.solicitado - v.bodega - v.despachado)
@@ -686,7 +686,7 @@ class Repository:
                 )
                 SELECT
                     COALESCE(SUM(pendientes * peso_ton), 0.0) AS tons_por_entregar,
-                    COALESCE(SUM(CASE WHEN fecha_entrega < ? THEN (pendientes * peso_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
+                    COALESCE(SUM(CASE WHEN fecha_pedido < ? THEN (pendientes * peso_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
                 FROM joined
                 """,
                 (d0_iso,),
@@ -740,7 +740,7 @@ class Repository:
                     v.posicion AS posicion,
                     COALESCE(v.cod_material, '') AS numero_parte,
                     COALESCE(v.solicitado, 0) AS solicitado,
-                    v.fecha_entrega AS fecha_entrega,
+                    v.fecha_pedido AS fecha_entrega,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
                         WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
@@ -759,21 +759,21 @@ class Repository:
                         posicion,
                         MAX(cliente) AS cliente,
                         MAX(cod_material) AS cod_material,
-                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
+                        MAX(COALESCE(fecha_pedido, '')) AS fecha_pedido,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_entrega > '2016-12-31'
-                      AND fecha_entrega < ?
+                      AND fecha_pedido > '2016-12-31'
+                      AND fecha_pedido < ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ) v
                 LEFT JOIN parts p
                   ON p.numero_parte = v.cod_material
-                ORDER BY v.fecha_entrega ASC, v.pedido, v.posicion
+                ORDER BY v.fecha_pedido ASC, v.pedido, v.posicion
                 LIMIT ?
                 """,
                 (d0.isoformat(), lim),
@@ -816,11 +816,11 @@ class Repository:
             rows = con.execute(
                 """
                 WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(fecha_entrega) AS fecha_entrega
+                    SELECT pedido, posicion, MIN(fecha_pedido) AS fecha_entrega
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_entrega > '2016-12-31'
-                      AND fecha_entrega >= ? AND fecha_entrega <= ?
+                      AND fecha_pedido > '2016-12-31'
+                      AND fecha_pedido >= ? AND fecha_pedido <= ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 )
