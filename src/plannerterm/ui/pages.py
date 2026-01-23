@@ -142,7 +142,7 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
 
             overdue = repo.get_orders_overdue_rows(limit=200)
-            due_soon = repo.get_orders_due_soon_rows(days=14, limit=200)
+            due_soon = repo.get_orders_due_soon_rows(days=21, limit=200)
 
             overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
@@ -288,10 +288,10 @@ def register_pages(repo: Repository) -> None:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
                 with ui.card().classes("p-4 w-full"):
-                    ui.label(f"Próximas 2 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
-                    ui.label("Pedidos con entrega entre hoy y 14 días.").classes("text-sm text-slate-600")
+                    ui.label(f"Próximas 3 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label("Pedidos con entrega entre hoy y 21 días.").classes("text-sm text-slate-600")
                     if due_soon:
-                        ui.table(
+                        tbl_due_soon = ui.table(
                             columns=[
                                 {"name": "cliente", "label": "Cliente", "field": "cliente"},
                                 {"name": "pedido", "label": "Pedido", "field": "pedido"},
@@ -306,8 +306,19 @@ def register_pages(repo: Repository) -> None:
                             rows=due_soon,
                             row_key="_row_id",
                         ).classes("w-full").props("dense flat bordered")
+
+                        # Double click to show Visión Planta breakdown by stage.
+                        def _on_due_soon_dblclick(e) -> None:
+                            r = _pick_row(getattr(e, "args", None))
+                            if r is not None:
+                                _open_vision_breakdown(r)
+                            else:
+                                ui.notify("No se pudo leer la fila seleccionada", color="negative")
+
+                        tbl_due_soon.on("rowDblClick", _on_due_soon_dblclick)
+                        tbl_due_soon.on("rowDblclick", _on_due_soon_dblclick)
                     else:
-                        ui.label("No hay pedidos dentro de las próximas 2 semanas.").classes("text-slate-600")
+                        ui.label("No hay pedidos dentro de las próximas 3 semanas.").classes("text-slate-600")
 
             ui.separator()
             ui.label("Carga por almacén (proceso)").classes("text-lg font-semibold")
