@@ -669,7 +669,7 @@ class Repository:
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2016-12-31'
+                      AND fecha_pedido > '2023-12-31'
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ), joined AS (
@@ -766,7 +766,7 @@ class Repository:
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2016-12-31'
+                      AND fecha_pedido > '2023-12-31'
                       AND fecha_pedido < ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
@@ -819,7 +819,7 @@ class Repository:
                     SELECT pedido, posicion, MIN(fecha_pedido) AS fecha_entrega
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2016-12-31'
+                      AND fecha_pedido > '2023-12-31'
                       AND fecha_pedido >= ? AND fecha_pedido <= ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
