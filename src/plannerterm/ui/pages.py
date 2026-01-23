@@ -219,6 +219,7 @@ def register_pages(repo: Repository) -> None:
                                     if meta:
                                         ui.label(meta).classes("text-sm text-slate-600")
 
+                                    ui.label("Producción").classes("text-lg font-semibold mt-2")
                                     stages = list(data.get("stages") or [])
                                     for r in stages:
                                         v = r.get("piezas")
