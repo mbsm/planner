@@ -88,11 +88,11 @@ def render_nav(active: str | None = None) -> None:
                     is_active = key == active_key
                     props = "dense no-caps" + (" unelevated" if is_active else " flat")
                     btn = ui.button(label, on_click=lambda p=path: ui.navigate.to(p)).props(props)
-                    btn.style("background-color: rgb(0, 120, 190); color: white;")
+                    btn.style("color: rgb(0, 120, 190);")
 
                 prog_props = "dense no-caps" + (" unelevated" if production_program_active else " flat")
                 with ui.button("Programas Producción", icon="factory").props(prog_props) as _prog_btn:
-                    _prog_btn.style("background-color: rgb(0, 120, 190); color: white;")
+                    _prog_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
                             "Toma de dureza (4035)",
@@ -119,7 +119,7 @@ def render_nav(active: str | None = None) -> None:
 
                 prog2_props = "dense no-caps" + (" unelevated" if production_progress_active else " flat")
                 with ui.button("Avance Producción", icon="insights").props(prog2_props) as _prog2_btn:
-                    _prog2_btn.style("background-color: rgb(0, 120, 190); color: white;")
+                    _prog2_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
                             "Terminaciones (MB52 - 4035)",
@@ -132,7 +132,7 @@ def render_nav(active: str | None = None) -> None:
 
                 cfg_props = "dense no-caps" + (" unelevated" if config_active else " flat")
                 with ui.button("Config", icon="settings").props(cfg_props) as _cfg_btn:
-                    _cfg_btn.style("background-color: rgb(0, 120, 190); color: white;")
+                    _cfg_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         label_lineas = (
                             "✓ Parámetros"
