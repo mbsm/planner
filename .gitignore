@@ -20,6 +20,11 @@ db/
 # Local sample files
 sample_data/
 
+# Wheel packages
+*.whl
+wheelhouse/
+wheelhouse_*/
+
 # OS/editor
 .DS_Store
 Thumbs.db
