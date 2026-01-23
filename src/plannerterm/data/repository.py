@@ -797,7 +797,6 @@ class Repository:
                     "dias": int(atraso),
                     "cliente": str(r["cliente"] or "").strip(),
                     "tons": float(r["tons"] or 0.0),
-                    "completo": int(r["pendientes"] or 0) == 0,
                 }
             )
         return out
