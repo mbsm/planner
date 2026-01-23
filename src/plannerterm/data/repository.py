@@ -657,33 +657,28 @@ class Repository:
         with self.db.connect() as con:
             row = con.execute(
                 """
-                WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(fecha_entrega) AS fecha_entrega
-                    FROM orders
-                    GROUP BY pedido, posicion
-                ), v AS (
+                WITH v AS (
                     SELECT
                         pedido,
                         posicion,
                         MAX(COALESCE(cod_material, '')) AS cod_material,
+                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
+                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
-                        op.fecha_entrega AS fecha_entrega,
+                        v.fecha_entrega AS fecha_entrega,
                         CASE
                             WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
                             ELSE (v.solicitado - v.bodega - v.despachado)
                         END AS pendientes,
                         COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0) AS peso_ton
-                    FROM orderpos op
-                    LEFT JOIN v
-                      ON v.pedido = op.pedido
-                     AND v.posicion = op.posicion
+                    FROM v
                     LEFT JOIN parts p
                       ON p.numero_parte = v.cod_material
                 )
@@ -738,18 +733,12 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(fecha_entrega) AS fecha_entrega
-                    FROM orders
-                    WHERE fecha_entrega < ?
-                    GROUP BY pedido, posicion
-                )
                 SELECT
-                    op.pedido AS pedido,
-                    op.posicion AS posicion,
+                    v.pedido AS pedido,
+                    v.posicion AS posicion,
                     COALESCE(v.cod_material, '') AS numero_parte,
                     COALESCE(v.solicitado, 0) AS solicitado,
-                    op.fecha_entrega AS fecha_entrega,
+                    v.fecha_entrega AS fecha_entrega,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
                         WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
@@ -762,25 +751,25 @@ class Repository:
                         END
                         * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)
                     ) AS tons
-                FROM orderpos op
-                LEFT JOIN (
+                FROM (
                     SELECT
                         pedido,
                         posicion,
                         MAX(cliente) AS cliente,
                         MAX(cod_material) AS cod_material,
+                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision
+                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
+                      AND fecha_entrega < ?
                     GROUP BY pedido, posicion
                 ) v
-                  ON v.pedido = op.pedido
-                 AND v.posicion = op.posicion
                 LEFT JOIN parts p
                   ON p.numero_parte = v.cod_material
-                ORDER BY op.fecha_entrega ASC, op.pedido, op.posicion
+                ORDER BY v.fecha_entrega ASC, v.pedido, v.posicion
                 LIMIT ?
                 """,
                 (d0.isoformat(), lim),
@@ -824,8 +813,9 @@ class Repository:
                 """
                 WITH orderpos AS (
                     SELECT pedido, posicion, MIN(fecha_entrega) AS fecha_entrega
-                    FROM orders
-                    WHERE fecha_entrega >= ? AND fecha_entrega <= ?
+                    FROM sap_vision
+                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
+                      AND fecha_entrega >= ? AND fecha_entrega <= ?
                     GROUP BY pedido, posicion
                 )
                 SELECT
