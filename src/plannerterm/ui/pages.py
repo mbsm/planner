@@ -300,7 +300,7 @@ def register_pages(repo: Repository) -> None:
                         
                         # Pedidos por despachar (sin pendientes)
                         if ready_to_dispatch:
-                            ui.label(f"Por despachar — {len(ready_to_dispatch)} pedidos").classes("text-md font-semibold mt-4")
+                            ui.label(f"Pendiente por Despachar — {len(ready_to_dispatch)} pedidos").classes("text-md font-semibold mt-4")
                             tbl_ready = ui.table(
                                 columns=columns_ready,
                                 rows=ready_to_dispatch,
@@ -311,7 +311,7 @@ def register_pages(repo: Repository) -> None:
                         
                         # Por fabricar (con pendientes)
                         if to_manufacture:
-                            ui.label(f"Por fabricar — {len(to_manufacture)} pedidos").classes("text-md font-semibold mt-4")
+                            ui.label(f"Pendiente por Fabricar — {len(to_manufacture)} pedidos").classes("text-md font-semibold mt-4")
                             tbl_to_mfg = ui.table(
                                 columns=columns_to_mfg,
                                 rows=to_manufacture,
