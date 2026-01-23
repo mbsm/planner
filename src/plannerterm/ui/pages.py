@@ -351,11 +351,11 @@ def register_pages(repo: Repository) -> None:
                             {"name": "completo", "label": "", "field": "completo"},
                         ]
                         
-                        # Semana + 1
+                        # Semana en curso
                         if week_0:
                             ui.separator()
                             week_0_tons = sum(float(r.get("tons") or 0.0) for r in week_0)
-                            ui.label(f"Semana + 1 — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana en curso — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_0 = ui.table(
                                 columns=columns_due,
                                 rows=week_0,
@@ -381,11 +381,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_0.on("rowDblClick", _on_week_0_dblclick)
                             tbl_week_0.on("rowDblclick", _on_week_0_dblclick)
                         
-                        # Semana + 2
+                        # Semana + 1
                         if week_1:
                             ui.separator()
                             week_1_tons = sum(float(r.get("tons") or 0.0) for r in week_1)
-                            ui.label(f"Semana + 2 — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 1 — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_1 = ui.table(
                                 columns=columns_due,
                                 rows=week_1,
@@ -411,11 +411,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_1.on("rowDblClick", _on_week_1_dblclick)
                             tbl_week_1.on("rowDblclick", _on_week_1_dblclick)
                         
-                        # Semana + 3
+                        # Semana + 2
                         if week_2:
                             ui.separator()
                             week_2_tons = sum(float(r.get("tons") or 0.0) for r in week_2)
-                            ui.label(f"Semana + 3 — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 2 — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_2 = ui.table(
                                 columns=columns_due,
                                 rows=week_2,
@@ -441,11 +441,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_2.on("rowDblClick", _on_week_2_dblclick)
                             tbl_week_2.on("rowDblclick", _on_week_2_dblclick)
                         
-                        # Semana + 4
+                        # Semana + 3
                         if week_3:
                             ui.separator()
                             week_3_tons = sum(float(r.get("tons") or 0.0) for r in week_3)
-                            ui.label(f"Semana + 4 — {week_3_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 3 — {week_3_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_3 = ui.table(
                                 columns=columns_due,
                                 rows=week_3,
@@ -471,11 +471,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_3.on("rowDblClick", _on_week_3_dblclick)
                             tbl_week_3.on("rowDblclick", _on_week_3_dblclick)
                         
-                        # Semana + 5
+                        # Semana + 4
                         if week_4:
                             ui.separator()
                             week_4_tons = sum(float(r.get("tons") or 0.0) for r in week_4)
-                            ui.label(f"Semana + 5 — {week_4_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 4 — {week_4_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_4 = ui.table(
                                 columns=columns_due,
                                 rows=week_4,
