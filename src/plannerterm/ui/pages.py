@@ -269,10 +269,20 @@ def register_pages(repo: Repository) -> None:
                                 {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
                                 {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
                                 {"name": "dias", "label": "Días atraso", "field": "dias"},
+                                {"name": "completo", "label": "Completo", "field": "completo"},
                             ],
                             rows=overdue,
                             row_key="_row_id",
                         ).classes("w-full").props("dense flat bordered")
+                        
+                        tbl_overdue.add_slot(
+                            "body-cell-completo",
+                            r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                        )
 
                         # Double click to show Visión Planta breakdown by stage.
                         def _on_overdue_dblclick(e) -> None:
