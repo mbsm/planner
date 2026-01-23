@@ -1760,14 +1760,13 @@ class Repository:
 
         stages = [
             ("x_programar", "Por programar en la planta"),
-            ("programado", "Programado"),
+            ("programado", "Por Moldear"),
             ("por_fundir", "Por Fundir"),
             ("desmoldeo", "En enfriamiento"),
             ("tt", "En Tratamientos Térmicos"),
-            ("terminaciones", "Terminaciones"),
+            ("terminaciones", "En Terminaciones"),
             ("pend_vulcanizado", "Por Vulcanizar"),
             ("en_vulcanizado_computed", "En Vulcanizado"),
-            ("vulcanizado", "Vulcanizado"),
             ("insp_externa", "Insp. Externa"),
             ("mecanizado_interno", "Mecanizado Interno"),
             ("mecanizado_externo", "Mecanizado Externo"),
