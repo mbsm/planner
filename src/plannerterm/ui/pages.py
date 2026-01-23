@@ -142,7 +142,7 @@ def register_pages(repo: Repository) -> None:
             ui.separator()
 
             overdue = repo.get_orders_overdue_rows(limit=200)
-            due_soon = repo.get_orders_due_soon_rows(days=21, limit=200)
+            due_soon = repo.get_orders_due_soon_rows(days=35, limit=200)
 
             overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
@@ -323,14 +323,16 @@ def register_pages(repo: Repository) -> None:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
                 with ui.card().classes("p-4 w-full"):
-                    ui.label(f"Próximas 3 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
-                    ui.label("Pedidos con entrega entre hoy y 21 días.").classes("text-sm text-slate-600")
+                    ui.label(f"Próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
+                    ui.label("Pedidos con entrega entre hoy y 35 días.").classes("text-sm text-slate-600")
                     
                     if due_soon:
                         # Dividir pedidos por semana
-                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana en curso (0-6 días)
-                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Próxima semana (7-13 días)
-                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 21]  # Siguiente semana (14-21 días)
+                        week_0 = [r for r in due_soon if r.get("dias", 0) <= 6]  # Semana + 1
+                        week_1 = [r for r in due_soon if 7 <= r.get("dias", 0) <= 13]  # Semana + 2
+                        week_2 = [r for r in due_soon if 14 <= r.get("dias", 0) <= 20]  # Semana + 3
+                        week_3 = [r for r in due_soon if 21 <= r.get("dias", 0) <= 27]  # Semana + 4
+                        week_4 = [r for r in due_soon if 28 <= r.get("dias", 0) <= 35]  # Semana + 5
                         
                         # Agregar campo completo (check si pendientes == 0)
                         for r in due_soon:
@@ -349,11 +351,11 @@ def register_pages(repo: Repository) -> None:
                             {"name": "completo", "label": "", "field": "completo"},
                         ]
                         
-                        # Semana en curso
+                        # Semana + 1
                         if week_0:
                             ui.separator()
                             week_0_tons = sum(float(r.get("tons") or 0.0) for r in week_0)
-                            ui.label(f"Semana en curso (0-6 días) — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 1 — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_0 = ui.table(
                                 columns=columns_due,
                                 rows=week_0,
@@ -379,11 +381,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_0.on("rowDblClick", _on_week_0_dblclick)
                             tbl_week_0.on("rowDblclick", _on_week_0_dblclick)
                         
-                        # Próxima semana
+                        # Semana + 2
                         if week_1:
                             ui.separator()
                             week_1_tons = sum(float(r.get("tons") or 0.0) for r in week_1)
-                            ui.label(f"Próxima semana (7-13 días) — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 2 — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_1 = ui.table(
                                 columns=columns_due,
                                 rows=week_1,
@@ -409,11 +411,11 @@ def register_pages(repo: Repository) -> None:
                             tbl_week_1.on("rowDblClick", _on_week_1_dblclick)
                             tbl_week_1.on("rowDblclick", _on_week_1_dblclick)
                         
-                        # Siguiente semana
+                        # Semana + 3
                         if week_2:
                             ui.separator()
                             week_2_tons = sum(float(r.get("tons") or 0.0) for r in week_2)
-                            ui.label(f"Siguiente semana (14-21 días) — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            ui.label(f"Semana + 3 — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
                             tbl_week_2 = ui.table(
                                 columns=columns_due,
                                 rows=week_2,
@@ -438,35 +440,68 @@ def register_pages(repo: Repository) -> None:
                             
                             tbl_week_2.on("rowDblClick", _on_week_2_dblclick)
                             tbl_week_2.on("rowDblclick", _on_week_2_dblclick)
+                        
+                        # Semana + 4
+                        if week_3:
+                            ui.separator()
+                            week_3_tons = sum(float(r.get("tons") or 0.0) for r in week_3)
+                            ui.label(f"Semana + 4 — {week_3_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_3 = ui.table(
+                                columns=columns_due,
+                                rows=week_3,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            tbl_week_3.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
+                            
+                            def _on_week_3_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_3.on("rowDblClick", _on_week_3_dblclick)
+                            tbl_week_3.on("rowDblclick", _on_week_3_dblclick)
+                        
+                        # Semana + 5
+                        if week_4:
+                            ui.separator()
+                            week_4_tons = sum(float(r.get("tons") or 0.0) for r in week_4)
+                            ui.label(f"Semana + 5 — {week_4_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                            tbl_week_4 = ui.table(
+                                columns=columns_due,
+                                rows=week_4,
+                                row_key="_row_id",
+                            ).classes("w-full").props("dense flat bordered")
+                            
+                            tbl_week_4.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
+                            
+                            def _on_week_4_dblclick(e) -> None:
+                                r = _pick_row(getattr(e, "args", None))
+                                if r is not None:
+                                    _open_vision_breakdown(r)
+                                else:
+                                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                            
+                            tbl_week_4.on("rowDblClick", _on_week_4_dblclick)
+                            tbl_week_4.on("rowDblclick", _on_week_4_dblclick)
                     else:
-                        ui.label("No hay pedidos dentro de las próximas 3 semanas.").classes("text-slate-600")
-
-            ui.separator()
-            ui.label("Carga por almacén (proceso)").classes("text-lg font-semibold")
-            ui.label(
-                "Piezas desde órdenes derivadas; tons desde Visión Planta ((peso neto kg / 1000) / solicitado)."
-            ).classes(
-                "text-sm text-slate-600"
-            )
-
-            load_rows = repo.get_process_load_rows()
-            if load_rows:
-                for r in load_rows:
-                    r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
-                ui.table(
-                    columns=[
-                        {"name": "proceso", "label": "Proceso", "field": "proceso"},
-                        {"name": "almacen", "label": "Almacén", "field": "almacen"},
-                        {"name": "orderpos", "label": "Pedidos/Pos", "field": "orderpos"},
-                        {"name": "piezas", "label": "Piezas", "field": "piezas"},
-                        {"name": "tons", "label": "Tons", "field": "tons_fmt"},
-                        {"name": "piezas_sin_peso", "label": "Piezas sin peso", "field": "piezas_sin_peso"},
-                    ],
-                    rows=load_rows,
-                    row_key="_row_id",
-                ).classes("w-full").props("dense flat bordered")
-            else:
-                ui.label("Aún no hay órdenes cargadas.").classes("text-slate-600")
+                        ui.label("No hay pedidos dentro de las próximas 5 semanas.").classes("text-slate-600")
 
     @ui.page("/avance")
     def avance() -> None:
