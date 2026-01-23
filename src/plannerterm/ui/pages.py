@@ -150,8 +150,14 @@ def register_pages(repo: Repository) -> None:
             # Pre-format tons for display (1 decimal) while keeping numeric `tons` for calculations.
             for r in overdue:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+                # Show only last 5 digits of plano
+                plano = str(r.get("numero_parte") or "")
+                r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
             for r in due_soon:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+                # Show only last 5 digits of plano
+                plano = str(r.get("numero_parte") or "")
+                r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
 
             with ui.row().classes("w-full gap-4 items-stretch"):
                 with ui.card().classes("p-4 w-full"):
@@ -270,7 +276,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte"},
+                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte_fmt"},
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "bodega", "label": "En Bodega", "field": "bodega"},
                             {"name": "tons", "label": "Tons por Despachar", "field": "tons_dispatch_fmt"},
@@ -282,7 +288,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte"},
+                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte_fmt"},
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
                             {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
@@ -343,7 +349,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte"},
+                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte_fmt"},
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
                             {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
