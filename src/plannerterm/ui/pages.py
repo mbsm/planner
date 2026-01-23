@@ -170,15 +170,16 @@ def register_pages(repo: Repository) -> None:
                                     yield from _walk(it)
 
                         row_found: dict | None = None
-                        if isinstance(args, dict):
+                        if args is not None:
                             for d in _walk(args):
-                                if isinstance(d.get("row"), dict):
-                                    row_found = d.get("row")
-                                    break
-                                # Also check if this dict itself is the row (has pedido/posicion).
-                                if row_found is None and "pedido" in d and "posicion" in d:
-                                    row_found = d
-                                    break
+                                if isinstance(d, dict):
+                                    if isinstance(d.get("row"), dict):
+                                        row_found = d.get("row")
+                                        break
+                                    # Also check if this dict itself is the row (has pedido/posicion).
+                                    if row_found is None and "pedido" in d and "posicion" in d:
+                                        row_found = d
+                                        break
                         return row_found
 
                     def _open_vision_breakdown(row: dict) -> None:
