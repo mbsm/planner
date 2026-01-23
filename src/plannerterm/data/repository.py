@@ -769,6 +769,7 @@ class Repository:
                       AND fecha_pedido > '2023-12-31'
                       AND fecha_pedido < ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
+                      AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
                 ) v
                 LEFT JOIN parts p
@@ -822,6 +823,7 @@ class Repository:
                       AND fecha_pedido > '2023-12-31'
                       AND fecha_pedido >= ? AND fecha_pedido <= ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
+                      AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
                 )
                 SELECT
@@ -1914,6 +1916,13 @@ class Repository:
                     df = df.rename(columns={c: "tipo_posicion"})
                     break
 
+        # Status comercial variants
+        if "status_comercial" not in df.columns:
+            for c in list(df.columns):
+                if str(c).lower() in ["status_comercial", "status_comerc", "statuscomercial", "stat_comerc"]:
+                    df = df.rename(columns={c: "status_comercial"})
+                    break
+
         # Weight column variants (optional)
         if "peso_neto" not in df.columns:
             for c in list(df.columns):
@@ -2048,6 +2057,7 @@ class Repository:
             cliente = str(r.get("cliente", "")).strip() or None
             oc_cliente = str(r.get("n_oc_cliente", "") or "").strip() or None
             tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
+            status_comercial = str(r.get("status_comercial", "") or "").strip() or None
             rows.append(
                 (
                     pedido,
@@ -2079,6 +2089,7 @@ class Repository:
                     despachado,
                     rechazo,
                     tipo_posicion,
+                    status_comercial,
                 )
             )
 
@@ -2092,9 +2103,9 @@ class Repository:
                     x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                     en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
-                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion
+                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion, status_comercial
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

@@ -174,6 +174,14 @@ class Db:
                 except Exception:
                     pass
 
+            # sap_vision v6: add status_comercial field
+            vision_cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision)").fetchall()]
+            if "status_comercial" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN status_comercial TEXT")
+                except Exception:
+                    pass
+
             # parts table v2: add optional post-process lead times (days)
             part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
             if "vulcanizado_dias" not in part_cols:
