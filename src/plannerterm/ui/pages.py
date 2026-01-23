@@ -157,8 +157,72 @@ def register_pages(repo: Repository) -> None:
                 with ui.card().classes("p-4 w-full"):
                     ui.label(f"Pedidos atrasados — Total: {overdue_tons:,.1f} tons").classes("text-lg font-semibold")
                     ui.label("Fecha de entrega anterior a hoy.").classes("text-sm text-slate-600")
+
+                    def _pick_row(args) -> dict | None:
+                        if isinstance(args, dict) and isinstance(args.get("row"), dict):
+                            return args.get("row")
+                        # Some NiceGUI/Quasar payloads nest the row under args.
+                        if isinstance(args, dict) and isinstance(args.get("args"), dict) and isinstance(args["args"].get("row"), dict):
+                            return args["args"].get("row")
+                        return None
+
+                    def _open_vision_breakdown(row: dict) -> None:
+                        pedido = str(row.get("pedido") or "").strip()
+                        posicion = str(row.get("posicion") or "").strip()
+                        if not pedido or not posicion:
+                            ui.notify("Fila inválida (sin pedido/posición)", color="warning")
+                            return
+                        try:
+                            data = repo.get_vision_stage_breakdown(pedido=pedido, posicion=posicion)
+                        except Exception as ex:
+                            ui.notify(f"No se pudo leer Visión: {ex}", color="negative")
+                            return
+
+                        dialog = ui.dialog()
+                        with dialog:
+                            with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 720px"):
+                                title = f"Pedido {pedido} / {posicion}"
+                                ui.label(title).classes("text-xl font-semibold")
+                                if int(data.get("found") or 0) == 0:
+                                    ui.label("No hay datos de Visión Planta para este pedido/posición.").classes(
+                                        "text-slate-600"
+                                    )
+                                else:
+                                    meta = " · ".join(
+                                        [
+                                            p
+                                            for p in [
+                                                (str(data.get("cliente") or "").strip() or None),
+                                                (str(data.get("cod_material") or "").strip() or None),
+                                                (str(data.get("fecha_entrega") or "").strip() or None),
+                                            ]
+                                            if p
+                                        ]
+                                    )
+                                    if meta:
+                                        ui.label(meta).classes("text-sm text-slate-600")
+
+                                    stages = list(data.get("stages") or [])
+                                    for r in stages:
+                                        v = r.get("piezas")
+                                        r["piezas_fmt"] = str(int(v or 0))
+
+                                    ui.table(
+                                        columns=[
+                                            {"name": "estado", "label": "Estado", "field": "estado"},
+                                            {"name": "piezas", "label": "Piezas", "field": "piezas_fmt"},
+                                        ],
+                                        rows=stages,
+                                        row_key="_row_id",
+                                    ).classes("w-full").props("dense flat bordered")
+
+                                with ui.row().classes("w-full justify-end mt-2"):
+                                    ui.button("Cerrar", on_click=dialog.close).props("flat")
+
+                        dialog.open()
+
                     if overdue:
-                        ui.table(
+                        tbl_overdue = ui.table(
                             columns=[
                                 {"name": "cliente", "label": "Cliente", "field": "cliente"},
                                 {"name": "pedido", "label": "Pedido", "field": "pedido"},
@@ -173,6 +237,15 @@ def register_pages(repo: Repository) -> None:
                             rows=overdue,
                             row_key="_row_id",
                         ).classes("w-full").props("dense flat bordered")
+
+                        # Double click to show Visión Planta breakdown by stage.
+                        def _on_overdue_dblclick(e) -> None:
+                            r = _pick_row(getattr(e, "args", None))
+                            if r is not None:
+                                _open_vision_breakdown(r)
+
+                        tbl_overdue.on("rowDblClick", _on_overdue_dblclick)
+                        tbl_overdue.on("rowDblclick", _on_overdue_dblclick)
                     else:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
