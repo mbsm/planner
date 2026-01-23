@@ -670,6 +670,7 @@ class Repository:
                     FROM sap_vision
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                       AND fecha_entrega > '2016-12-31'
+                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
@@ -767,6 +768,7 @@ class Repository:
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                       AND fecha_entrega > '2016-12-31'
                       AND fecha_entrega < ?
+                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ) v
                 LEFT JOIN parts p
@@ -819,6 +821,7 @@ class Repository:
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                       AND fecha_entrega > '2016-12-31'
                       AND fecha_entrega >= ? AND fecha_entrega <= ?
+                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 )
                 SELECT
@@ -1904,6 +1907,13 @@ class Repository:
         if "fecha_de_pedido" not in df.columns and "fecha_pedido" in df.columns:
             df = df.rename(columns={"fecha_pedido": "fecha_de_pedido"})
 
+        # Tipo posicion variants
+        if "tipo_posicion" not in df.columns:
+            for c in list(df.columns):
+                if str(c).lower() in ["tip_pos", "tippos", "tipo_pos"]:
+                    df = df.rename(columns={c: "tipo_posicion"})
+                    break
+
         # Weight column variants (optional)
         if "peso_neto" not in df.columns:
             for c in list(df.columns):
@@ -2037,6 +2047,7 @@ class Repository:
 
             cliente = str(r.get("cliente", "")).strip() or None
             oc_cliente = str(r.get("n_oc_cliente", "") or "").strip() or None
+            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
             rows.append(
                 (
                     pedido,
@@ -2067,6 +2078,7 @@ class Repository:
                     bodega,
                     despachado,
                     rechazo,
+                    tipo_posicion,
                 )
             )
 
@@ -2080,9 +2092,9 @@ class Repository:
                     x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                     en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
-                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo
+                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

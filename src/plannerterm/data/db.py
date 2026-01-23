@@ -167,6 +167,13 @@ class Db:
                 except Exception:
                     pass
 
+            # sap_vision v5: add tipo_posicion field
+            if "tipo_posicion" not in vision_cols:
+                try:
+                    con.execute("ALTER TABLE sap_vision ADD COLUMN tipo_posicion TEXT")
+                except Exception:
+                    pass
+
             # parts table v2: add optional post-process lead times (days)
             part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
             if "vulcanizado_dias" not in part_cols:
