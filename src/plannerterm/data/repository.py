@@ -1755,35 +1755,47 @@ class Repository:
             except Exception:
                 return None
 
+        # Sumar Lib. Vulcanizado (DE) a En Vulcanizado
+        en_vulcanizado_total = (_opt_int(row["en_vulcanizado"]) or 0) + (_opt_int(row["lib_vulcanizado_de"]) or 0) if "en_vulcanizado" in row.keys() and "lib_vulcanizado_de" in row.keys() else (_opt_int(row.get("en_vulcanizado")) if "en_vulcanizado" in row.keys() else None)
+
         stages = [
-            ("x_programar", "X Programar"),
+            ("x_programar", "Por programar en la planta"),
             ("programado", "Programado"),
-            ("por_fundir", "X Fundir"),
-            ("desmoldeo", "Desmoldeo"),
-            ("tt", "TT"),
+            ("por_fundir", "Por Fundir"),
+            ("desmoldeo", "En enfriamiento"),
+            ("tt", "En Tratamientos Térmicos"),
             ("terminaciones", "Terminaciones"),
-            ("rechazo", "Rechazo"),
-            ("en_vulcanizado", "En Vulcanizado"),
-            ("pend_vulcanizado", "Pend. Vulcanizado"),
-            ("rech_insp_externa", "Rech. Insp. Externa"),
+            ("pend_vulcanizado", "Por Vulcanizar"),
+            ("en_vulcanizado_computed", "En Vulcanizado"),
+            ("vulcanizado", "Vulcanizado"),
             ("insp_externa", "Insp. Externa"),
-            ("lib_vulcanizado_de", "Lib. Vulcanizado (DE)"),
             ("mecanizado_interno", "Mecanizado Interno"),
             ("mecanizado_externo", "Mecanizado Externo"),
-            ("vulcanizado", "Vulcanizado"),
             ("bodega", "Bodega"),
             ("despachado", "Despachado"),
+            ("rechazo", "Rechazo"),
+            ("rech_insp_externa", "Rech. Insp. Externa"),
         ]
 
         out_rows: list[dict] = []
         for key, label in stages:
-            out_rows.append(
-                {
-                    "_row_id": key,
-                    "estado": label,
-                    "piezas": _opt_int(row[key]) if key in row.keys() else None,
-                }
-            )
+            if key == "en_vulcanizado_computed":
+                # Usar el total sumado
+                out_rows.append(
+                    {
+                        "_row_id": "en_vulcanizado",
+                        "estado": label,
+                        "piezas": en_vulcanizado_total,
+                    }
+                )
+            else:
+                out_rows.append(
+                    {
+                        "_row_id": key,
+                        "estado": label,
+                        "piezas": _opt_int(row[key]) if key in row.keys() else None,
+                    }
+                )
 
         return {
             "pedido": str(row["pedido"]),
