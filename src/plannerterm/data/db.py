@@ -149,6 +149,10 @@ class Db:
                 "vulcanizado",
                 "insp_externa",
                 "rechazo",
+                "en_vulcanizado",
+                "pend_vulcanizado",
+                "rech_insp_externa",
+                "lib_vulcanizado_de",
             ):
                 if col in vision_cols:
                     continue

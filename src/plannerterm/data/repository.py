@@ -1732,6 +1732,7 @@ class Repository:
                     solicitado,
                     x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                    en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
                     bodega, despachado, rechazo
                 FROM sap_vision
                 WHERE pedido = ? AND posicion = ?
@@ -1755,19 +1756,23 @@ class Repository:
                 return None
 
         stages = [
-            ("x_programar", "x programar"),
-            ("programado", "programado"),
-            ("por_fundir", "por fundir"),
-            ("desmoldeo", "desmoldeo"),
+            ("x_programar", "X Programar"),
+            ("programado", "Programado"),
+            ("por_fundir", "X Fundir"),
+            ("desmoldeo", "Desmoldeo"),
             ("tt", "TT"),
             ("terminaciones", "Terminaciones"),
-            ("mecanizado_interno", "mecanizado interno"),
-            ("mecanizado_externo", "mecanizado externo"),
-            ("vulcanizado", "vulcanizado"),
-            ("insp_externa", "insp externa"),
-            ("bodega", "bodega"),
-            ("despachado", "despachado"),
-            ("rechazo", "rechazo"),
+            ("rechazo", "Rechazo"),
+            ("en_vulcanizado", "En Vulcanizado"),
+            ("pend_vulcanizado", "Pend. Vulcanizado"),
+            ("rech_insp_externa", "Rech. Insp. Externa"),
+            ("insp_externa", "Insp. Externa"),
+            ("lib_vulcanizado_de", "Lib. Vulcanizado (DE)"),
+            ("mecanizado_interno", "Mecanizado Interno"),
+            ("mecanizado_externo", "Mecanizado Externo"),
+            ("vulcanizado", "Vulcanizado"),
+            ("bodega", "Bodega"),
+            ("despachado", "Despachado"),
         ]
 
         out_rows: list[dict] = []
@@ -1828,7 +1833,7 @@ class Repository:
         stage_aliases: dict[str, list[str]] = {
             "x_programar": ["x_programar", "por_programar", "a_programar", "sin_programar"],
             "programado": ["programado"],
-            "por_fundir": ["por_fundir", "porfundir"],
+            "por_fundir": ["por_fundir", "porfundir", "x_fundir"],
             "desmoldeo": ["desmoldeo"],
             "tt": ["tt", "tratamiento_termico", "tratamiento_termico_tt"],
             "terminaciones": ["terminaciones", "terminacion"],
@@ -1836,6 +1841,10 @@ class Repository:
             "mecanizado_externo": ["mecanizado_externo", "mec_externo", "mecanizado_ext"],
             "vulcanizado": ["vulcanizado"],
             "insp_externa": ["insp_externa", "inspeccion_externa", "insp_ext"],
+            "en_vulcanizado": ["en_vulcanizado", "en_vulc", "vulc"],
+            "pend_vulcanizado": ["pend_vulcanizado", "pend_vulc", "pendiente_vulcanizado"],
+            "rech_insp_externa": ["rech_insp_externa", "rech_insp_ext", "rechazo_insp_externa"],
+            "lib_vulcanizado_de": ["lib_vulcanizado_de", "lib_vulc_de", "liberado_vulcanizado"],
             "rechazo": ["rechazo", "rechazado"],
         }
         for canonical, candidates in stage_aliases.items():
@@ -1892,6 +1901,10 @@ class Repository:
             mecanizado_externo = _coerce_opt_int("mecanizado_externo")
             vulcanizado = _coerce_opt_int("vulcanizado")
             insp_externa = _coerce_opt_int("insp_externa")
+            en_vulcanizado = _coerce_opt_int("en_vulcanizado")
+            pend_vulcanizado = _coerce_opt_int("pend_vulcanizado")
+            rech_insp_externa = _coerce_opt_int("rech_insp_externa")
+            lib_vulcanizado_de = _coerce_opt_int("lib_vulcanizado_de")
             rechazo = _coerce_opt_int("rechazo")
 
             bodega = None
@@ -1949,6 +1962,10 @@ class Repository:
                     mecanizado_externo,
                     vulcanizado,
                     insp_externa,
+                    en_vulcanizado,
+                    pend_vulcanizado,
+                    rech_insp_externa,
+                    lib_vulcanizado_de,
                     cliente,
                     oc_cliente,
                     peso_neto,
@@ -1968,9 +1985,10 @@ class Repository:
                     solicitado,
                     x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                    en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
                     cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
