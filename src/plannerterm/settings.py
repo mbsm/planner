@@ -9,6 +9,7 @@ class Settings:
     db_path: Path
     host: str = "0.0.0.0"
     port: int = 8080
+    planta: str = "Planta Rancagua"
 
 
 def default_db_path() -> Path:

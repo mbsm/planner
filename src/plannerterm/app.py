@@ -17,12 +17,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Planta Rancagua")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--planta", type=str, default="Planta Rancagua", help="Nombre de la planta")
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    settings = Settings(db_path=default_db_path(), host=args.host, port=args.port)
+    settings = Settings(db_path=default_db_path(), host=args.host, port=args.port, planta=args.planta)
 
     db = Db(settings.db_path)
     db.ensure_schema()
@@ -47,7 +48,7 @@ def main() -> None:
 
             loop.set_exception_handler(_handler)
 
-    ui.run(host=settings.host, port=settings.port, title="Planta Rancagua", reload=False)
+    ui.run(host=settings.host, port=settings.port, title=settings.planta, reload=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
