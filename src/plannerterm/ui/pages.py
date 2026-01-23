@@ -299,10 +299,9 @@ def register_pages(repo: Repository) -> None:
                         
                         # Agregar campo completo (check si pendientes == 0)
                         for r in due_soon:
-                            r["completo"] = "✓" if int(r.get("pendientes", 1)) == 0 else ""
+                            r["completo"] = int(r.get("pendientes", 1)) == 0
                         
                         columns_due = [
-                            {"name": "completo", "label": "✓", "field": "completo"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -312,6 +311,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
                             {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
                             {"name": "dias", "label": "Días restantes", "field": "dias"},
+                            {"name": "completo", "label": "", "field": "completo"},
                         ]
                         
                         # Semana en curso
@@ -324,6 +324,15 @@ def register_pages(repo: Repository) -> None:
                                 rows=week_0,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
+                            
+                            tbl_week_0.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
                             
                             def _on_week_0_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
@@ -346,6 +355,15 @@ def register_pages(repo: Repository) -> None:
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
+                            tbl_week_1.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
+                            
                             def _on_week_1_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
@@ -366,6 +384,15 @@ def register_pages(repo: Repository) -> None:
                                 rows=week_2,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
+                            
+                            tbl_week_2.add_slot(
+                                "body-cell-completo",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="props.value === true" name="check_circle" color="positive" size="20px"></q-icon>
+</q-td>
+""",
+                            )
                             
                             def _on_week_2_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
