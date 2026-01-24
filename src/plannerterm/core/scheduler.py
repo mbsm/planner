@@ -26,9 +26,9 @@ def generate_program(
     part_by_num = {p.numero_parte: p for p in parts}
 
     # lines sorted by id for deterministic output
-    lines_sorted = sorted(lines, key=lambda l: l.line_id)
-    loads: dict[int, int] = {l.line_id: 0 for l in lines_sorted}
-    out: dict[int, list[dict]] = {l.line_id: [] for l in lines_sorted}
+    lines_sorted = sorted(lines, key=lambda line: line.line_id)
+    loads: dict[int, int] = {line.line_id: 0 for line in lines_sorted}
+    out: dict[int, list[dict]] = {line.line_id: [] for line in lines_sorted}
     errors: list[dict] = []
 
     def extra_days(numero_parte: str) -> int:
@@ -65,7 +65,7 @@ def generate_program(
         numero_parte = o.numero_parte
         familia = (part_by_num.get(numero_parte).familia if numero_parte in part_by_num else "Otros")
 
-        eligible = [l for l in lines_sorted if familia in l.allowed_families]
+        eligible = [line for line in lines_sorted if familia in line.allowed_families]
         if not eligible:
             errors.append(
                 {
@@ -83,7 +83,7 @@ def generate_program(
             )
             continue
 
-        chosen = min(eligible, key=lambda l: loads[l.line_id])
+        chosen = min(eligible, key=lambda line: loads[line.line_id])
 
         out[chosen.line_id].append(
             {

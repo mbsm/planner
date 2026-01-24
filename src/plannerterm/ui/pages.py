@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from nicegui import ui
 
@@ -89,7 +89,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/")
     def dashboard() -> None:
-        render_nav()
+        render_nav(repo=repo)
         with page_container():
             ui.label("Home").classes("text-2xl font-semibold")
             ui.separator()
@@ -115,7 +115,7 @@ def register_pages(repo: Repository) -> None:
                     r["tons_por_entregar_fmt"] = f"{float(r.get('tons_por_entregar') or 0.0):,.1f}"
 
                 dates = [str(r.get("snapshot_date") or "") for r in kpi_rows]
-                atrasadas = [float(r.get("tons_atrasadas") or 0.0) for r in kpi_rows]
+                atrasadas = [round(float(r.get("tons_atrasadas") or 0.0), 1) for r in kpi_rows]
             else:
                 ui.label("Sin datos aún: sube Visión Planta en /actualizar para comenzar el histórico.").classes(
                     "text-sm text-slate-500"
@@ -130,21 +130,34 @@ def register_pages(repo: Repository) -> None:
                     "series": [
                         {
                             "name": "Tons atrasadas",
-                            "type": "line",
+                            "type": "bar",
                             "data": atrasadas,
-                            "smooth": True,
-                            "areaStyle": {},
+                            "label": {
+                                "show": True,
+                                "position": "top",
+                                "formatter": "{c}",
+                            },
                         }
                     ],
                 }
             ).classes("w-full")
 
-            ui.separator()
-
-            overdue = repo.get_orders_overdue_rows(limit=200)
+            overdue = repo.get_orders_overdue_rows(limit=2000)
             due_soon = repo.get_orders_due_soon_rows(days=49, limit=200)
 
-            overdue_tons = sum(float(r.get("tons") or 0.0) for r in overdue)
+            # Para alinear el título con el último valor del gráfico (KPI diario),
+            # usamos la última muestra de `tons_atrasadas` si existe.
+            if 'atrasadas' in locals() and isinstance(atrasadas, list) and atrasadas:
+                overdue_tons = float(atrasadas[-1] or 0.0)
+            else:
+                # Fallback: suma de categorías calculadas desde las filas
+                ready_tons_total = sum(
+                    float(r.get("tons_dispatch") or 0.0) for r in overdue if int(r.get("pendientes") or 0) == 0
+                )
+                to_mfg_tons_total = sum(
+                    float(r.get("tons") or 0.0) for r in overdue if int(r.get("pendientes") or 0) > 0
+                )
+                overdue_tons = ready_tons_total + to_mfg_tons_total
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
 
             # Pre-format tons for display (1 decimal) while keeping numeric `tons` for calculations.
@@ -258,12 +271,46 @@ def register_pages(repo: Repository) -> None:
                                             row_key="_row_id",
                                         ).classes("w-full").props("dense flat bordered")
 
+                                ui.separator().classes("my-3")
+                                prio_set_current = repo.get_priority_orderpos_set()
+                                test_set_current = repo.get_test_orderpos_set()
+                                is_prio = (pedido, posicion) in prio_set_current
+                                is_test = (pedido, posicion) in test_set_current
+                                priority_chk = ui.checkbox("Marcar como prioridad", value=is_prio)
+                                if is_test:
+                                    priority_chk.props("disable")
+                                    ui.label("Prioridad fija por prueba (lote con letras)").classes("text-sm text-slate-600")
+
+                                def _save_priority() -> None:
+                                    try:
+                                        repo.set_pedido_priority(pedido=pedido, posicion=posicion, is_priority=bool(priority_chk.value))
+                                        ui.notify("Guardado")
+                                        dialog.close()
+                                    except Exception as ex:
+                                        ui.notify(f"Error guardando: {ex}", color="negative")
+
                                 with ui.row().classes("w-full justify-end mt-2"):
                                     ui.button("Cerrar", on_click=dialog.close).props("flat")
+                                    ui.button("Guardar", on_click=_save_priority).props("color=primary")
 
                         dialog.open()
 
                     if overdue:
+                        # Annotate overdue rows with priority flags
+                        prio_set = repo.get_priority_orderpos_set()
+                        test_set = repo.get_test_orderpos_set()
+                        for r in overdue:
+                            key = (str(r.get("pedido", "")).strip(), str(r.get("posicion", "")).strip())
+                            if key in test_set:
+                                r["is_priority"] = 1
+                                r["priority_kind"] = "test"
+                            elif key in prio_set:
+                                r["is_priority"] = 1
+                                r["priority_kind"] = "priority"
+                            else:
+                                r["is_priority"] = 0
+                                r["priority_kind"] = ""
+
                         # Separate overdue orders by pending status
                         ready_to_dispatch = [r for r in overdue if int(r.get("pendientes") or 0) == 0]
                         to_manufacture = [r for r in overdue if int(r.get("pendientes") or 0) > 0]
@@ -271,8 +318,12 @@ def register_pages(repo: Repository) -> None:
                         # Pre-format tons_dispatch for display
                         for r in ready_to_dispatch:
                             r["tons_dispatch_fmt"] = f"{float(r.get('tons_dispatch') or 0.0):,.1f}"
+                        # Calculate tons for each category
+                        ready_tons = sum(float(r.get("tons_dispatch") or 0.0) for r in ready_to_dispatch)
+                        to_mfg_tons = sum(float(r.get("tons") or 0.0) for r in to_manufacture)
                         
                         columns_ready = [
+                            {"name": "is_priority", "label": "", "field": "is_priority"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -285,6 +336,7 @@ def register_pages(repo: Repository) -> None:
                         ]
                         
                         columns_to_mfg = [
+                            {"name": "is_priority", "label": "", "field": "is_priority"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -306,23 +358,43 @@ def register_pages(repo: Repository) -> None:
                         
                         # Pedidos por despachar (sin pendientes)
                         if ready_to_dispatch:
-                            ui.label(f"Pendiente por Despachar — {len(ready_to_dispatch)} pedidos").classes("text-md font-semibold mt-4")
+                            ui.label(f"Pendiente por Despachar — {len(ready_to_dispatch)} pedidos, {ready_tons:,.1f} tons").classes("text-md font-semibold mt-4")
                             tbl_ready = ui.table(
                                 columns=columns_ready,
                                 rows=ready_to_dispatch,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
+                            tbl_ready.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
                             tbl_ready.on("rowDblClick", _on_overdue_dblclick)
                             tbl_ready.on("rowDblclick", _on_overdue_dblclick)
                         
                         # Por fabricar (con pendientes)
                         if to_manufacture:
-                            ui.label(f"Pendiente por Fabricar — {len(to_manufacture)} pedidos").classes("text-md font-semibold mt-4")
+                            ui.label(f"Pendiente por Fabricar — {len(to_manufacture)} pedidos, {to_mfg_tons:,.1f} tons").classes("text-md font-semibold mt-4")
                             tbl_to_mfg = ui.table(
                                 columns=columns_to_mfg,
                                 rows=to_manufacture,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
+                            tbl_to_mfg.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
                             tbl_to_mfg.on("rowDblClick", _on_overdue_dblclick)
                             tbl_to_mfg.on("rowDblclick", _on_overdue_dblclick)
                     else:
@@ -370,7 +442,7 @@ def register_pages(repo: Repository) -> None:
                                     last_day_prev = date(fecha_year, 12, 31)
                                     last_week_prev = last_day_prev.isocalendar()[1]
                                     return -(current_week + (last_week_prev - fecha_week))
-                            except:
+                            except Exception:  # noqa: E722
                                 return None
                         
                         # Dividir pedidos por semana usando número de semana ISO
@@ -381,6 +453,10 @@ def register_pages(repo: Repository) -> None:
                         week_4 = []
                         week_5 = []
                         
+                        # Marcar prioridades (manual y pruebas) para mostrar icono en tablas
+                        prio_set = repo.get_priority_orderpos_set()
+                        test_set = repo.get_test_orderpos_set()
+
                         # Procesar pedidos atrasados (pueden pertenecer a la semana actual)
                         for r in overdue:
                             week_offset = get_week_offset(r.get("fecha_entrega", ""))
@@ -388,6 +464,16 @@ def register_pages(repo: Repository) -> None:
                                 # Pedido atrasado pero en la semana actual
                                 r["is_overdue"] = True
                                 r["completo"] = int(r.get("pendientes", 1)) == 0
+                                key = (str(r.get("pedido", "")).strip(), str(r.get("posicion", "")).strip())
+                                if key in test_set:
+                                    r["is_priority"] = 1
+                                    r["priority_kind"] = "test"
+                                elif key in prio_set:
+                                    r["is_priority"] = 1
+                                    r["priority_kind"] = "priority"
+                                else:
+                                    r["is_priority"] = 0
+                                    r["priority_kind"] = ""
                                 week_0.append(r)
                         
                         # Procesar pedidos próximos
@@ -395,6 +481,16 @@ def register_pages(repo: Repository) -> None:
                             week_offset = get_week_offset(r.get("fecha_entrega", ""))
                             r["is_overdue"] = False
                             r["completo"] = int(r.get("pendientes", 1)) == 0
+                            key = (str(r.get("pedido", "")).strip(), str(r.get("posicion", "")).strip())
+                            if key in test_set:
+                                r["is_priority"] = 1
+                                r["priority_kind"] = "test"
+                            elif key in prio_set:
+                                r["is_priority"] = 1
+                                r["priority_kind"] = "priority"
+                            else:
+                                r["is_priority"] = 0
+                                r["priority_kind"] = ""
                             
                             if week_offset == 0:
                                 week_0.append(r)
@@ -410,7 +506,7 @@ def register_pages(repo: Repository) -> None:
                                 week_5.append(r)
                         
                         columns_due = [
-                            {"name": "is_overdue", "label": "", "field": "is_overdue"},
+                            {"name": "is_priority", "label": "", "field": "is_priority"},
                             {"name": "cliente", "label": "Cliente", "field": "cliente"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
@@ -423,18 +519,30 @@ def register_pages(repo: Repository) -> None:
                             {"name": "completo", "label": "", "field": "completo"},
                         ]
                         
-                        # Semana en curso
-                        if week_0:
-                            ui.separator()
-                            week_0_tons = sum(float(r.get("tons") or 0.0) for r in week_0)
-                            ui.label(f"Semana en curso — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_0 = ui.table(
+                        # Semana en curso (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_0_tons = sum(float(r.get("tons") or 0.0) for r in week_0)
+                        ui.label(f"Semana en curso — {week_0_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_0:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_0 = ui.table(
                                 columns=columns_due,
                                 rows=week_0,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_0.add_slot(
+                        tbl_week_0.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_0.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -443,37 +551,50 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            tbl_week_0.add_slot(
-                                "body-cell-is_overdue",
+                        tbl_week_0.add_slot(
+                                "body-cell-cliente",
                                 r"""
 <q-td :props="props">
-    <q-icon v-if="props.value === true" name="close" color="negative" size="20px"></q-icon>
+    <q-icon v-if="props.row.is_overdue === true" name="close" color="negative" size="20px" class="q-mr-xs"></q-icon>
+    {{ props.value }}
 </q-td>
 """,
                             )
                             
-                            def _on_week_0_dblclick(e) -> None:
+                        def _on_week_0_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_0.on("rowDblClick", _on_week_0_dblclick)
-                            tbl_week_0.on("rowDblclick", _on_week_0_dblclick)
+                        tbl_week_0.on("rowDblClick", _on_week_0_dblclick)
+                        tbl_week_0.on("rowDblclick", _on_week_0_dblclick)
                         
-                        # Semana + 1
-                        if week_1:
-                            ui.separator()
-                            week_1_tons = sum(float(r.get("tons") or 0.0) for r in week_1)
-                            ui.label(f"Semana + 1 — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_1 = ui.table(
+                        # Semana + 1 (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_1_tons = sum(float(r.get("tons") or 0.0) for r in week_1)
+                        ui.label(f"Semana + 1 — {week_1_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_1:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_1 = ui.table(
                                 columns=columns_due,
                                 rows=week_1,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_1.add_slot(
+                        tbl_week_1.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_1.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -482,28 +603,40 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            def _on_week_1_dblclick(e) -> None:
+                        def _on_week_1_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_1.on("rowDblClick", _on_week_1_dblclick)
-                            tbl_week_1.on("rowDblclick", _on_week_1_dblclick)
+                        tbl_week_1.on("rowDblClick", _on_week_1_dblclick)
+                        tbl_week_1.on("rowDblclick", _on_week_1_dblclick)
                         
-                        # Semana + 2
-                        if week_2:
-                            ui.separator()
-                            week_2_tons = sum(float(r.get("tons") or 0.0) for r in week_2)
-                            ui.label(f"Semana + 2 — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_2 = ui.table(
+                        # Semana + 2 (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_2_tons = sum(float(r.get("tons") or 0.0) for r in week_2)
+                        ui.label(f"Semana + 2 — {week_2_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_2:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_2 = ui.table(
                                 columns=columns_due,
                                 rows=week_2,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_2.add_slot(
+                        tbl_week_2.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_2.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -512,28 +645,40 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            def _on_week_2_dblclick(e) -> None:
+                        def _on_week_2_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_2.on("rowDblClick", _on_week_2_dblclick)
-                            tbl_week_2.on("rowDblclick", _on_week_2_dblclick)
+                        tbl_week_2.on("rowDblClick", _on_week_2_dblclick)
+                        tbl_week_2.on("rowDblclick", _on_week_2_dblclick)
                         
-                        # Semana + 3
-                        if week_3:
-                            ui.separator()
-                            week_3_tons = sum(float(r.get("tons") or 0.0) for r in week_3)
-                            ui.label(f"Semana + 3 — {week_3_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_3 = ui.table(
+                        # Semana + 3 (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_3_tons = sum(float(r.get("tons") or 0.0) for r in week_3)
+                        ui.label(f"Semana + 3 — {week_3_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_3:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_3 = ui.table(
                                 columns=columns_due,
                                 rows=week_3,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_3.add_slot(
+                        tbl_week_3.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_3.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -542,28 +687,40 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            def _on_week_3_dblclick(e) -> None:
+                        def _on_week_3_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_3.on("rowDblClick", _on_week_3_dblclick)
-                            tbl_week_3.on("rowDblclick", _on_week_3_dblclick)
+                        tbl_week_3.on("rowDblClick", _on_week_3_dblclick)
+                        tbl_week_3.on("rowDblclick", _on_week_3_dblclick)
                         
-                        # Semana + 4
-                        if week_4:
-                            ui.separator()
-                            week_4_tons = sum(float(r.get("tons") or 0.0) for r in week_4)
-                            ui.label(f"Semana + 4 — {week_4_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_4 = ui.table(
+                        # Semana + 4 (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_4_tons = sum(float(r.get("tons") or 0.0) for r in week_4)
+                        ui.label(f"Semana + 4 — {week_4_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_4:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_4 = ui.table(
                                 columns=columns_due,
                                 rows=week_4,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_4.add_slot(
+                        tbl_week_4.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_4.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -572,28 +729,40 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            def _on_week_4_dblclick(e) -> None:
+                        def _on_week_4_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_4.on("rowDblClick", _on_week_4_dblclick)
-                            tbl_week_4.on("rowDblclick", _on_week_4_dblclick)
+                        tbl_week_4.on("rowDblClick", _on_week_4_dblclick)
+                        tbl_week_4.on("rowDblclick", _on_week_4_dblclick)
                         
-                        # Semana + 5
-                        if week_5:
-                            ui.separator()
-                            week_5_tons = sum(float(r.get("tons") or 0.0) for r in week_5)
-                            ui.label(f"Semana + 5 — {week_5_tons:,.1f} tons").classes("text-md font-semibold mt-2")
-                            tbl_week_5 = ui.table(
+                        # Semana + 5 (si no hay pedidos, mostrar tabla vacía con 0.0 tons)
+                        ui.separator()
+                        week_5_tons = sum(float(r.get("tons") or 0.0) for r in week_5)
+                        ui.label(f"Semana + 5 — {week_5_tons:,.1f} tons").classes("text-md font-semibold mt-2")
+                        if not week_5:
+                            ui.label("Sin Pedidos").classes("text-slate-600")
+                        tbl_week_5 = ui.table(
                                 columns=columns_due,
                                 rows=week_5,
                                 row_key="_row_id",
                             ).classes("w-full").props("dense flat bordered")
                             
-                            tbl_week_5.add_slot(
+                        tbl_week_5.add_slot(
+                                "body-cell-is_priority",
+                                r"""
+<q-td :props="props">
+    <q-icon v-if="Number(props.value) === 1 && String(props.row.priority_kind || '').toLowerCase() === 'test'" name="science" color="warning" size="18px"></q-icon>
+    <q-icon v-else-if="Number(props.value) === 1" name="priority_high" color="negative" size="18px"></q-icon>
+    <q-icon v-else name="remove" color="grey-5" size="18px"></q-icon>
+</q-td>
+""",
+                            )
+
+                        tbl_week_5.add_slot(
                                 "body-cell-completo",
                                 r"""
 <q-td :props="props">
@@ -602,21 +771,21 @@ def register_pages(repo: Repository) -> None:
 """,
                             )
                             
-                            def _on_week_5_dblclick(e) -> None:
+                        def _on_week_5_dblclick(e) -> None:
                                 r = _pick_row(getattr(e, "args", None))
                                 if r is not None:
                                     _open_vision_breakdown(r)
                                 else:
                                     ui.notify("No se pudo leer la fila seleccionada", color="negative")
                             
-                            tbl_week_5.on("rowDblClick", _on_week_5_dblclick)
-                            tbl_week_5.on("rowDblclick", _on_week_5_dblclick)
+                        tbl_week_5.on("rowDblClick", _on_week_5_dblclick)
+                        tbl_week_5.on("rowDblclick", _on_week_5_dblclick)
                     else:
                         ui.label("No hay pedidos dentro de las próximas 6 semanas.").classes("text-slate-600")
 
     @ui.page("/avance")
     def avance() -> None:
-        render_nav(active="avance")
+        render_nav(active="avance", repo=repo)
         with page_container():
             ui.label("Avance (MB52)").classes("text-2xl font-semibold")
             ui.label(
@@ -708,7 +877,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/avance_vision")
     def avance_vision() -> None:
-        render_nav(active="avance")
+        render_nav(active="avance", repo=repo)
         with page_container():
             ui.label("Salidas Visión Planta").classes("text-2xl font-semibold")
             ui.label(
@@ -756,10 +925,17 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/config")
     def config_lines() -> None:
-        render_nav(active="config_lineas")
+        render_nav(active="config_lineas", repo=repo)
         with page_container():
             ui.label("Parámetros").classes("text-2xl font-semibold")
             ui.label("Configura Centro/Almacén (SAP) y las familias permitidas por línea.").classes("pt-subtitle")
+
+            ui.separator()
+            ui.label("Identificación").classes("text-lg font-semibold")
+            planta_in = ui.input(
+                "Planta",
+                value=repo.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua",
+            ).classes("w-80")
 
             ui.separator()
             ui.label("Parámetros SAP").classes("text-lg font-semibold")
@@ -822,6 +998,7 @@ def register_pages(repo: Repository) -> None:
                 ).classes("w-56")
 
                 def save_cfg() -> None:
+                    repo.set_config(key="planta", value=str(planta_in.value or "").strip())
                     repo.set_config(key="sap_centro", value=str(centro_in.value or "").strip())
                     repo.set_config(key="sap_almacen_terminaciones", value=str(almacen_in.value or "").strip())
                     repo.set_config(key="sap_material_prefixes", value=str(prefixes_in.value or "").strip())
@@ -1015,7 +1192,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/actualizar")
     def actualizar_data() -> None:
-        render_nav(active="actualizar")
+        render_nav(active="actualizar", repo=repo)
         with page_container():
             ui.label("Actualizar datos SAP").classes("text-2xl font-semibold")
             ui.label("Sube MB52 y Visión Planta. Centro/Almacén se configuran en Parámetros.").classes("pt-subtitle")
@@ -1277,7 +1454,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/familias")
     def familias() -> None:
-        render_nav(active="config_familias")
+        render_nav(active="config_familias", repo=repo)
         with page_container():
             ui.label("Familias").classes("text-2xl font-semibold")
             ui.label("Mantén el catálogo de familias.").classes("pt-subtitle")
@@ -1468,7 +1645,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/config/tiempos")
     def config_tiempos() -> None:
-        render_nav(active="config_materiales")
+        render_nav(active="config_materiales", repo=repo)
         with page_container():
             ui.label("Tiempos de proceso").classes("text-2xl font-semibold")
             ui.label("Esta pantalla fue reemplazada por 'Config > Maestro materiales'.").classes("pt-subtitle")
@@ -1481,7 +1658,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/config/materiales")
     def config_materiales() -> None:
-        render_nav(active="config_materiales")
+        render_nav(active="config_materiales", repo=repo)
         with page_container():
             ui.label("Maestro de materiales").classes("text-2xl font-semibold")
             ui.label("Edita familia y tiempos por material, o elimina materiales del maestro.").classes("pt-subtitle")
@@ -1852,7 +2029,7 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/config/pedidos")
     def config_pedidos() -> None:
-        render_nav(active="config_pedidos")
+        render_nav(active="config_pedidos", repo=repo)
         with page_container():
             ui.label("Pedidos").classes("text-2xl font-semibold")
             ui.label(
@@ -2097,7 +2274,7 @@ def register_pages(repo: Repository) -> None:
 
     def _render_program(process: str, *, active_key: str, title: str) -> None:
         process = str(process or "terminaciones").strip().lower()
-        render_nav(active=active_key)
+        render_nav(active=active_key, repo=repo)
         with page_container():
             ui.label(title).classes("text-2xl font-semibold")
 
@@ -2295,3 +2472,9 @@ def register_pages(repo: Repository) -> None:
             active_key="programa_en_vulcanizado",
             title="Programa - En Vulcanizado",
         )
+
+
+
+
+
+

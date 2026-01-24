@@ -55,11 +55,19 @@ def page_container():
         yield
 
 
-def render_nav(active: str | None = None) -> None:
+def render_nav(active: str | None = None, repo: Repository | None = None) -> None:
     ensure_theme()
     active_key = active or "dashboard"
+    # Read plant name from configuration, fallback to default
+    planta = "Planta Rancagua"
+    try:
+        if repo is not None:
+            val = repo.get_config(key="planta", default="Planta Rancagua")
+            planta = val or planta
+    except Exception:
+        pass
     sections: list[tuple[str, str, str]] = [
-        ("dashboard", "Home", "/"),
+        ("dashboard", "Pedidos", "/"),
         ("actualizar", "Actualizar", "/actualizar"),
     ]
     production_program_active = active_key in {
@@ -82,7 +90,7 @@ def render_nav(active: str | None = None) -> None:
                 ui.element("img").props('src="/assets/elecmetal.png" alt="Elecmetal"').style(
                     "height: 34px; width: auto; display: block;"
                 )
-                ui.label("Planta Rancagua").classes("text-xl md:text-2xl font-semibold leading-none")
+                ui.label(planta).classes("text-xl md:text-2xl font-semibold leading-none")
             with ui.row().classes("items-center gap-1"):
                 for key, label, path in sections:
                     is_active = key == active_key

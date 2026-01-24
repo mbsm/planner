@@ -1358,7 +1358,7 @@ class Repository:
 
     # ---------- Import ----------
     def import_excel_bytes(self, *, kind: str, content: bytes) -> None:
-        df = read_excel_bytes(content)
+        read_excel_bytes(content)
 
         # The app currently supports SAP-driven imports only.
         # Orders are rebuilt by joining MB52 + Visión.
@@ -2715,8 +2715,7 @@ class Repository:
                 pass
 
             # First, treat qty=0 as unspecified; we'll allocate later.
-            specified = [q for q in effective_qtys[:-1] if q > 0]
-            sum_specified = sum(specified)
+            # specified = [q for q in effective_qtys[:-1] if q > 0]
 
             # Start with explicit qty for all but last; last absorbs remaining.
             remaining = total_qty
