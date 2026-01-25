@@ -46,8 +46,8 @@ class StrategyOrchestrator:
             db_path = str(self.repo.db.path.resolve())
             
             # Get solver options from config
-            time_limit = int(self.repo.get_config("strategy_time_limit_seconds", default="300") or 300)
-            mip_gap = float(self.repo.get_config("strategy_mip_gap", default="0.01") or 0.01)
+            time_limit = int(self.repo.get_config(key="strategy_time_limit_seconds", default="300") or 300)
+            mip_gap = float(self.repo.get_config(key="strategy_mip_gap", default="0.01") or 0.01)
             
             options = {
                 "time_limit_seconds": time_limit,

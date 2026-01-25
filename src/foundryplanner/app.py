@@ -45,8 +45,8 @@ def main() -> None:
     async def schedule_weekly_solve() -> None:
         """Schedule weekly strategic solve at configured day/hour (UTC)."""
 
-        day_raw = repo.get_config("strategy_solve_day", default="0") or "0"
-        hour_raw = repo.get_config("strategy_solve_hour", default="0") or "0"
+        day_raw = repo.get_config(key="strategy_solve_day", default="0") or "0"
+        hour_raw = repo.get_config(key="strategy_solve_hour", default="0") or "0"
         day = max(0, min(6, int(day_raw)))
         hour = max(0, min(23, int(hour_raw)))
 
