@@ -124,7 +124,7 @@ def register_pages(repo: Repository) -> None:
                 ui.label(f"Última planificación semanal: {last_solve}").classes("text-sm text-slate-600")
                 ui.button(
                     "Forzar planificación",
-                    on_click=lambda: asyncio.create_task(force_replan(ui.get_client())),
+                    on_click=lambda e: asyncio.create_task(force_replan(e.client)),
                 ).props("color=primary")
             ui.label(
                 "Esta vista mostrará el plan semanal generado por foundry_planner_engine. "
