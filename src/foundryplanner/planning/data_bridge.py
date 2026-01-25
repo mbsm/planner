@@ -111,7 +111,7 @@ class StrategyDataBridge:
 
         Maps configured lines (from line_config table) to engine input schema.
         """
-        lines = self.repo.get_lines(process=process)
+        lines = self.repo.get_lines_model(process=process)
         
         # Default capacity values (can be overridden via app_config later)
         default_hours_per_week = 80.0
@@ -166,7 +166,7 @@ class StrategyDataBridge:
 
         Default: uniform capacity across all weeks and lines (can be extended for holidays/maintenance).
         """
-        lines = self.repo.get_lines(process=process)
+        lines = self.repo.get_lines_model(process=process)
         default_hours = 80.0
         default_molds_capacity = 125  # Placeholder
         
