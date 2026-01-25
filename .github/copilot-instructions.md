@@ -3,7 +3,7 @@
 ## What this repo is
 - FoundryPlanner is a cross-platform production planning platform (Windows primary, macOS dev) with **two optimization layers**:
   1. **Strategic (Weekly):** Facility-wide MIP-based planning using [foundry_planner_engine](https://github.com/mbsm/foundry_planner_engine) — respects global constraints (flask capacity, melt deck tonnage, line hours), minimizes weighted lateness.
-  2. **Tactical (Hourly/On-demand):** Dispatch queues per line, derived from weekly plan + SAP stock (MB52) + master data (families, post-process times).
+  2. **Tactical (Hourly/On-demand):** Dispatch queues per line/process using SAP stock (MB52) + master data (families, post-process times). **Today it is independent of the weekly plan**.
 - Persists to local SQLite; UI via NiceGUI.
 
 ## Key entrypoints / dev commands
@@ -28,11 +28,11 @@
 
 ## Data flow (how the app actually works)
 - **Sources (SAP):** Only Visión + MB52 (no MB51). Orders are built once from these and shared between MIP and dispatcher. Parts/master remain the internal GUI-managed table shared by both layers.
-- **Layer 1 (Strategic):** SAP uploads → ETL (Visión + MB52 + internal master) → `plan_orders_weekly`, `plan_capacities_weekly`, etc. → `foundry_planner_engine.solve()` → `plan_molding`, `order_results` (weekly MIP plan).
+- **Layer 1 (Strategic):** SAP uploads → ETL (Visión + MB52 + internal master) → write engine inputs into **separate** `engine.db` → `foundry_planner_engine.solve()` → engine outputs (e.g., `plan_molding`, `order_results`) in `engine.db`.
 - **Layer 2 (Tactical):** Existing heuristic using MB52 data; sorts by priority asc, then `due_date - process_time`. It does **not** consume the weekly plan today. Only the **future molding dispatcher** will consume `plan_molding` to sequence per pattern slot. Dispatch refresh triggers: MB52 upload, dispatch parameter/config updates, or orders flagged as urgent (manual priority).
 - **Data pathway:**
   1. Upload MB52 + Visión in UI (`/actualizar`) → `Repository.import_excel_bytes()` → `sap_mb52`, `sap_vision` tables.
-   2. Triggering: `StrategyOrchestrator.solve_weekly_plan()` runs only via scheduled job or explicit manual call (no auto-run on SAP upload) → populate strategic input tables → `foundry_planner_engine.solve()` → persist plan tables.
+  2. Triggering: `StrategyOrchestrator.solve_weekly_plan()` runs only via scheduled job or explicit manual call (no auto-run on SAP upload) → populate engine input tables in `engine.db` → `foundry_planner_engine.solve()` → outputs in `engine.db`.
   3. Tactical dispatch stays MB52-driven; weekly plan is only for the molding dispatcher (to be implemented).
   4. UI renders both layers: dashboard (KPIs), `/plano-semanal` (strategic view), `/programa` (tactical dispatch).
 - **Multi-process support** (Layer 2 only): 7 processes (terminaciones, toma_de_dureza, mecanizado, etc.) each maintain separate dispatch queues per almacen/process.
@@ -46,8 +46,8 @@
 
 ## Scheduling contract (keep tests in sync)
 - **Layer 1 (Strategic/Weekly):** MIP solver minimizes weighted lateness. Respects plant-wide constraints: flask capacity per line, global melt deck tonnage, line working hours, pattern wear limits, pouring delays, post-process lead times.
-  - Inputs: `plan_orders_weekly`, `plan_parts_routing`, `plan_capacities_weekly`, `plan_flasks_inventory`, etc.
-  - Outputs: `plan_molding[order_id, week_id, molds_planned]`, `order_results[order_id, start_week, delivery_week, is_late, weeks_late]`.
+  - Inputs (engine-owned tables in `engine.db`): `orders`, `parts`, `capacities_weekly`, `global_capacities_weekly`, `flasks_inventory`, etc.
+  - Outputs (engine-owned tables in `engine.db`): `plan_molding`, `order_results`, etc.
 - **Layer 2 (Tactical/Hourly):** Unconstrained heuristic scheduler (independent of weekly plan).
   - Priority sorting key: **tests first** (`is_test=True`), then **manual priority / urgent flag**, then **`start_by = fecha_entrega - post_process_days`**.
   - Assignment: choose among eligible lines (family allowed) the one with **lowest current load**.
@@ -65,5 +65,5 @@
 - Engine is a **pure library** (no UI, no database logic).
 - Called via `StrategyOrchestrator.solve_weekly_plan()` (orchestrator pattern).
 - Inputs populated by `StrategyDataBridge` (ETL from SAP + config).
-- Outputs read by `StrategyResultReader` (for UI + Layer 2 triggering).
+- Outputs are written into `engine.db`. UI may read directly from there, or (future) copy outputs back into the app DB for history/reporting.
 - See [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md) for detailed design and phased rollout.

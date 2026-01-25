@@ -548,6 +548,7 @@ class Repository:
         mecanizado_dias: int | None = None,
         inspeccion_externa_dias: int | None = None,
         peso_ton: float | None = None,
+        caja_moldeo: str | None = None,
         mec_perf_inclinada: bool = False,
         sobre_medida: bool = False,
     ) -> None:
@@ -580,22 +581,27 @@ class Repository:
         mec_perf = 1 if bool(mec_perf_inclinada) else 0
         sm = 1 if bool(sobre_medida) else 0
 
+        caja = str(caja_moldeo).strip() if caja_moldeo is not None else None
+        if caja is not None and not caja:
+            caja = None
+
         # Ensure family exists in catalog
         self.add_family(name=familia)
 
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO parts(numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO parts(numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, caja_moldeo, mec_perf_inclinada, sobre_medida) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(numero_parte) DO UPDATE SET "
                 "familia=excluded.familia, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
                 "mecanizado_dias=excluded.mecanizado_dias, "
                 "inspeccion_externa_dias=excluded.inspeccion_externa_dias, "
                 "peso_ton=excluded.peso_ton, "
+                "caja_moldeo=excluded.caja_moldeo, "
                 "mec_perf_inclinada=excluded.mec_perf_inclinada, "
                 "sobre_medida=excluded.sobre_medida",
-                (numero_parte, familia, v, m, i, pt, mec_perf, sm),
+                (numero_parte, familia, v, m, i, pt, caja, mec_perf, sm),
             )
 
             # Invalidate any previously generated program
@@ -652,9 +658,153 @@ class Repository:
         """Return the part master as UI-friendly dict rows."""
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida FROM parts ORDER BY numero_parte"
+                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, caja_moldeo, mec_perf_inclinada, sobre_medida FROM parts ORDER BY numero_parte"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- Planner: plant configuration ----------
+    def list_molding_centers(self) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT center_id, COALESCE(name, '') AS name FROM molding_centers ORDER BY center_id"
+            ).fetchall()
+        return [{"center_id": int(r[0]), "name": str(r[1] or "")} for r in rows]
+
+    def upsert_molding_center(self, *, center_id: int, name: str | None = None) -> None:
+        cid = int(center_id)
+        if cid <= 0:
+            raise ValueError("center_id inválido")
+        nm = str(name or "").strip() or None
+        with self.db.connect() as con:
+            con.execute(
+                "INSERT INTO molding_centers(center_id, name) VALUES(?, ?) "
+                "ON CONFLICT(center_id) DO UPDATE SET name=excluded.name",
+                (cid, nm),
+            )
+
+    def delete_molding_center(self, *, center_id: int) -> None:
+        cid = int(center_id)
+        with self.db.connect() as con:
+            con.execute("DELETE FROM molding_centers WHERE center_id = ?", (cid,))
+            con.execute("DELETE FROM molding_center_boxes WHERE center_id = ?", (cid,))
+            con.execute("DELETE FROM order_molding_center WHERE center_id = ?", (cid,))
+
+    def list_molding_box_types(self) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT box_code, COALESCE(name, '') AS name FROM molding_box_types ORDER BY box_code"
+            ).fetchall()
+        return [{"box_code": str(r[0]), "name": str(r[1] or "")} for r in rows]
+
+    def upsert_molding_box_type(self, *, box_code: str, name: str | None = None) -> None:
+        code = str(box_code or "").strip()
+        if not code:
+            raise ValueError("box_code vacío")
+        nm = str(name or "").strip() or None
+        with self.db.connect() as con:
+            con.execute(
+                "INSERT INTO molding_box_types(box_code, name) VALUES(?, ?) "
+                "ON CONFLICT(box_code) DO UPDATE SET name=excluded.name",
+                (code, nm),
+            )
+
+    def delete_molding_box_type(self, *, box_code: str) -> None:
+        code = str(box_code or "").strip()
+        if not code:
+            return
+        with self.db.connect() as con:
+            con.execute("DELETE FROM molding_box_types WHERE box_code = ?", (code,))
+            con.execute("DELETE FROM molding_center_boxes WHERE box_code = ?", (code,))
+
+    def get_molding_center_boxes(self, *, center_id: int) -> list[dict]:
+        cid = int(center_id)
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT b.box_code, COALESCE(t.name, '') AS box_name, b.quantity
+                FROM molding_center_boxes b
+                LEFT JOIN molding_box_types t ON t.box_code = b.box_code
+                WHERE b.center_id = ?
+                ORDER BY b.box_code
+                """,
+                (cid,),
+            ).fetchall()
+        return [{"box_code": str(r[0]), "box_name": str(r[1] or ""), "quantity": int(r[2])} for r in rows]
+
+    def set_molding_center_box_qty(self, *, center_id: int, box_code: str, quantity: int) -> None:
+        cid = int(center_id)
+        if cid <= 0:
+            raise ValueError("center_id inválido")
+        code = str(box_code or "").strip()
+        if not code:
+            raise ValueError("box_code vacío")
+        q = int(quantity)
+        if q < 0:
+            raise ValueError("quantity no puede ser negativo")
+        with self.db.connect() as con:
+            con.execute(
+                "INSERT INTO molding_center_boxes(center_id, box_code, quantity) VALUES(?, ?, ?) "
+                "ON CONFLICT(center_id, box_code) DO UPDATE SET quantity=excluded.quantity",
+                (cid, code, q),
+            )
+
+    def set_order_molding_center(self, *, pedido: str, posicion: str, center_id: int) -> None:
+        ped = str(self._normalize_sap_key(pedido) or str(pedido or "").strip())
+        pos = str(self._normalize_sap_key(posicion) or str(posicion or "").strip())
+        cid = int(center_id)
+        if not ped or not pos:
+            raise ValueError("pedido/posicion vacío")
+        if cid <= 0:
+            raise ValueError("center_id inválido")
+        with self.db.connect() as con:
+            con.execute(
+                "INSERT INTO order_molding_center(pedido, posicion, center_id) VALUES(?, ?, ?) "
+                "ON CONFLICT(pedido, posicion) DO UPDATE SET center_id=excluded.center_id",
+                (ped, pos, cid),
+            )
+
+    def get_order_molding_center_id(self, *, pedido: str, posicion: str) -> int | None:
+        ped = str(self._normalize_sap_key(pedido) or str(pedido or "").strip())
+        pos = str(self._normalize_sap_key(posicion) or str(posicion or "").strip())
+        if not ped or not pos:
+            return None
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT center_id FROM order_molding_center WHERE pedido = ? AND posicion = ?",
+                (ped, pos),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
+
+    def get_missing_order_molding_centers(self, *, limit: int = 200) -> list[dict]:
+        lim = max(1, min(int(limit or 200), 5000))
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT v.pedido, v.posicion, COALESCE(v.cod_material, '') AS cod_material, COALESCE(v.descripcion_material, '') AS descripcion_material
+                FROM sap_vision v
+                LEFT JOIN order_molding_center om
+                  ON om.pedido = v.pedido AND om.posicion = v.posicion
+                WHERE om.pedido IS NULL
+                GROUP BY v.pedido, v.posicion
+                ORDER BY v.fecha_pedido ASC, v.pedido ASC, v.posicion ASC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+        return [
+            {
+                "pedido": str(r[0]),
+                "posicion": str(r[1]),
+                "cod_material": str(r[2] or ""),
+                "descripcion_material": str(r[3] or ""),
+            }
+            for r in rows
+        ]
 
     # ---------- Dashboard helpers ----------
     def upsert_vision_kpi_daily(self, *, snapshot_date: date | None = None) -> dict:
@@ -2355,7 +2505,7 @@ class Repository:
     def get_parts_model(self) -> list[Part]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida FROM parts"
+                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, caja_moldeo, mec_perf_inclinada, sobre_medida FROM parts"
             ).fetchall()
         return [
             Part(
@@ -2365,8 +2515,9 @@ class Repository:
                 mecanizado_dias=r[3],
                 inspeccion_externa_dias=r[4],
                 peso_ton=(float(r[5]) if r[5] is not None else None),
-                mec_perf_inclinada=bool(int(r[6] or 0)),
-                sobre_medida=bool(int(r[7] or 0)),
+                caja_moldeo=(str(r[6]) if r[6] is not None else None),
+                mec_perf_inclinada=bool(int(r[7] or 0)),
+                sobre_medida=bool(int(r[8] or 0)),
             )
             for r in rows
         ]

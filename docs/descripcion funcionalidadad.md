@@ -2,7 +2,9 @@
 # FoundryPlanner – Descripción funcional (SAP)
 
 ## Objetivo
-El planificador genera el **programa (secuencia/colas de trabajo)** por cada línea productiva de terminaciones.
+El sistema genera el **programa (secuencia/colas de trabajo)** por proceso y por línea (Terminaciones, Toma de dureza, Mecanizado, etc.).
+
+Nota: este documento detalla principalmente el flujo de **Terminaciones** (por ser el caso base), pero los demás procesos siguen el mismo patrón (almacén por proceso + líneas/familias por proceso).
 
 La diferencia clave con la versión anterior es que el programa se construye **solo con piezas que realmente existen** en stock (SAP), no desde un Excel de “pedidos”.
 

@@ -213,6 +213,59 @@ class Db:
                 except Exception:
                     pass
 
+            # parts table v5: caja/flask used for molding (planner input)
+            part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
+            if "caja_moldeo" not in part_cols:
+                try:
+                    con.execute("ALTER TABLE parts ADD COLUMN caja_moldeo TEXT")
+                except Exception:
+                    pass
+
+            # ----- Planner plant configuration -----
+            # Molding centers (similar to dispatcher lines, but for weekly planner)
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS molding_centers (
+                    center_id INTEGER PRIMARY KEY,
+                    name TEXT
+                )
+                """
+            )
+
+            # Box/Flask types catalog (shared across centers)
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS molding_box_types (
+                    box_code TEXT PRIMARY KEY,
+                    name TEXT
+                )
+                """
+            )
+
+            # Inventory per center + box type
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS molding_center_boxes (
+                    center_id INTEGER NOT NULL,
+                    box_code TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    PRIMARY KEY (center_id, box_code)
+                )
+                """
+            )
+
+            # Order (pedido/posicion) -> molding center mapping
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS order_molding_center (
+                    pedido TEXT NOT NULL,
+                    posicion TEXT NOT NULL,
+                    center_id INTEGER NOT NULL,
+                    PRIMARY KEY (pedido, posicion)
+                )
+                """
+            )
+
             # Seed default catalog entries only if catalog is empty.
             families_count = int(con.execute("SELECT COUNT(*) FROM families").fetchone()[0])
             if families_count == 0:

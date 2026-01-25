@@ -17,7 +17,8 @@ def register_pages(repo: Repository) -> None:
     async def force_replan() -> None:
         """Manually trigger weekly plan solve (no auto-run on SAP uploads)."""
         try:
-            result = await orchestrator.solve_weekly_plan()
+            ui.notify("Resolviendo plan semanal… (esto puede tardar)")
+            result = await orchestrator.solve_weekly_plan(force=True)
             if result.get("status") == "success":
                 repo.set_config(key="strategy_last_solve_at", value=datetime.utcnow().isoformat())
                 ui.notify("Plan semanal generado")
@@ -965,277 +966,431 @@ def register_pages(repo: Repository) -> None:
 
     @ui.page("/config")
     def config_lines() -> None:
-        render_nav(active="config_lineas", repo=repo)
+        render_nav(active="config_dispatcher", repo=repo)
         with page_container():
-            ui.label("Parámetros").classes("text-2xl font-semibold")
-            ui.label("Configura Centro/Almacén (SAP) y las familias permitidas por línea.").classes("pt-subtitle")
-
-            ui.separator()
-            ui.label("Identificación").classes("text-lg font-semibold")
-            planta_in = ui.input(
-                "Planta",
-                value=repo.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua",
-            ).classes("w-80")
-
-            ui.separator()
-            ui.label("Parámetros SAP").classes("text-lg font-semibold")
-            with ui.row().classes("items-end w-full gap-3"):
-                centro_in = ui.input(
-                    "Centro",
-                    value=repo.get_config(key="sap_centro", default="4000") or "4000",
-                ).classes("w-40")
-                almacen_in = ui.input(
-                    "Almacén terminaciones",
-                    value=repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035",
-                ).classes("w-64")
-                prefixes_in = ui.input(
-                    "Prefijos material (MB52)",
-                    value=repo.get_config(key="sap_material_prefixes", default="436") or "436",
-                    placeholder="Ej: 436  | o '436,437' | o '*' (sin filtro)",
-                ).classes("w-80")
-
-            ui.separator()
-            ui.label("Almacenes por proceso").classes("text-lg font-semibold")
-            ui.label("Se usan para filtrar MB52 al reconstruir rangos por proceso.").classes("text-sm text-slate-600")
-
-            ui.separator()
-            ui.label("Parámetros UI").classes("text-lg font-semibold")
-            allow_move_line_chk = ui.checkbox(
-                "Habilitar mover filas 'en proceso' de línea",
-                value=str(repo.get_config(key="ui_allow_move_in_progress_line", default="0") or "0").strip() == "1",
+            ui.label("Dispatcher").classes("text-2xl font-semibold")
+            ui.label("Configura el dispatch (táctico): Centro/Almacén (SAP) y familias por línea.").classes(
+                "pt-subtitle"
             )
 
-            with ui.row().classes("items-end w-full gap-3 flex-wrap"):
-                dura_in = ui.input(
-                    "Toma de dureza",
-                    value=(
-                        repo.get_config(
-                            key="sap_almacen_toma_dureza",
-                            default=(repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035"),
-                        )
-                        or "4035"
-                    ),
-                ).classes("w-56")
-                mec_in = ui.input(
-                    "Mecanizado",
-                    value=repo.get_config(key="sap_almacen_mecanizado", default="4049") or "4049",
-                ).classes("w-56")
-                mec_ext_in = ui.input(
-                    "Mecanizado externo",
-                    value=repo.get_config(key="sap_almacen_mecanizado_externo", default="4050") or "4050",
-                ).classes("w-56")
-                insp_ext_in = ui.input(
-                    "Inspección externa",
-                    value=repo.get_config(key="sap_almacen_inspeccion_externa", default="4046") or "4046",
-                ).classes("w-56")
-                por_vulc_in = ui.input(
-                    "Por vulcanizar",
-                    value=repo.get_config(key="sap_almacen_por_vulcanizar", default="4047") or "4047",
-                ).classes("w-56")
-                en_vulc_in = ui.input(
-                    "En vulcanizado",
-                    value=repo.get_config(key="sap_almacen_en_vulcanizado", default="4048") or "4048",
-                ).classes("w-56")
-
-                def save_cfg() -> None:
-                    repo.set_config(key="planta", value=str(planta_in.value or "").strip())
-                    repo.set_config(key="sap_centro", value=str(centro_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_terminaciones", value=str(almacen_in.value or "").strip())
-                    repo.set_config(key="sap_material_prefixes", value=str(prefixes_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_toma_dureza", value=str(dura_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_mecanizado", value=str(mec_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_mecanizado_externo", value=str(mec_ext_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_inspeccion_externa", value=str(insp_ext_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_por_vulcanizar", value=str(por_vulc_in.value or "").strip())
-                    repo.set_config(key="sap_almacen_en_vulcanizado", value=str(en_vulc_in.value or "").strip())
-                    repo.set_config(
-                        key="ui_allow_move_in_progress_line",
-                        value="1" if bool(allow_move_line_chk.value) else "0",
-                    )
-                    ui.notify("Configuración guardada")
-                    ui.notify("Actualizando rangos/programas...")
-                    kick_refresh_from_sap_all(notify=False)
-                    ui.navigate.to("/config")
-
-                ui.button("Guardar", on_click=save_cfg).props("unelevated color=primary")
-
-            lines = repo.get_lines()
             families = repo.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
 
-            ui.separator()
-            ui.label("Líneas y familias permitidas - Terminaciones").classes("text-lg font-semibold")
-
-            num_lines = ui.number("Número de líneas", value=len(lines) or 8, min=1, max=50, step=1)
-
-            ui.label("Ajusta familias y luego presiona 'Aplicar cambios'.").classes("text-sm text-slate-600")
-
-            rows_container = ui.column().classes("w-full")
-            line_selects: dict[int, ui.select] = {}
-            line_names: dict[int, ui.input] = {}
-
-            def rebuild_rows(n: int) -> None:
-                rows_container.clear()
-                line_selects.clear()
-                line_names.clear()
-                current = {
-                    ln["line_id"]: {
-                        "families": set(ln["families"]),
-                        "name": str(ln.get("line_name") or "").strip(),
-                    }
-                    for ln in repo.get_lines()
-                }
-                for line_id in range(1, n + 1):
-                    allowed = (current.get(line_id, {}) or {}).get("families", set(families))
-                    name_val = (current.get(line_id, {}) or {}).get("name", "") or f"Línea {line_id}"
-                    with rows_container:
-                        with ui.row().classes("items-center w-full gap-3"):
-                            ui.label(f"Línea {line_id}").classes("w-24")
-                            nm = ui.input("Nombre", value=name_val).classes("w-64")
-                            ms = ui.select(
-                                families,
-                                value=list(allowed),
-                                multiple=True,
-                                label="Familias permitidas",
-                            ).classes("w-96")
-                            line_selects[line_id] = ms
-                            line_names[line_id] = nm
-
-            def apply_all() -> None:
-                n = int(num_lines.value or 0)
-                if n <= 0:
-                    ui.notify("Número de líneas inválido", color="negative")
-                    return
-
-                # Delete lines above N
-                existing_ids = [ln["line_id"] for ln in repo.get_lines()]
-                for line_id in sorted(existing_ids):
-                    if int(line_id) > n:
-                        repo.delete_line(line_id=int(line_id))
-
-                # Upsert 1..N using current UI selections
-                for line_id in range(1, n + 1):
-                    sel = line_selects.get(line_id)
-                    selected_families = list((sel.value if sel else families) or [])
-                    nm = line_names.get(line_id)
-                    repo.upsert_line(line_id=line_id, line_name=(nm.value if nm else None), families=selected_families)
-
-                updated = auto_generate_and_save(notify=False)
-                if updated:
-                    ui.notify("Configuración guardada. Programa actualizado.")
-                else:
-                    ui.notify("Configuración guardada. Programa no actualizado (faltan datos).", color="warning")
-
-            rebuild_rows(int(num_lines.value))
-
-            def on_num_change() -> None:
-                rebuild_rows(int(num_lines.value))
-
-            num_lines.on("change", lambda _: on_num_change())
-
-            ui.separator()
-            ui.button("Aplicar cambios", on_click=apply_all).props("unelevated color=primary")
-
-            def process_lines_editor(*, process: str, title: str) -> None:
+            def render_process_lines_editor(*, process: str, title: str, show_header: bool = True) -> None:
+                """Render line editor for a given process (card/expansion-friendly)."""
                 lines_p = repo.get_lines(process=process)
 
-                with ui.expansion(title, value=False).classes("w-full"):
-                    num_lines_p = ui.number(
-                        "Número de líneas",
-                        value=len(lines_p) or 8,
-                        min=1,
-                        max=50,
-                        step=1,
-                    )
+                if show_header:
+                    ui.label(title).classes("text-lg font-semibold")
+                    ui.label("Ajusta familias y presiona 'Aplicar cambios'.").classes("text-sm text-slate-600")
+                else:
                     ui.label("Ajusta familias y presiona 'Aplicar cambios'.").classes("text-sm text-slate-600")
 
-                    rows_container_p = ui.column().classes("w-full")
-                    line_selects_p: dict[int, ui.select] = {}
-                    line_names_p: dict[int, ui.input] = {}
+                num_lines_p = ui.number(
+                    "Número de líneas",
+                    value=len(lines_p) or 8,
+                    min=1,
+                    max=50,
+                    step=1,
+                )
 
-                    def rebuild_rows_p(n: int) -> None:
-                        rows_container_p.clear()
-                        line_selects_p.clear()
-                        line_names_p.clear()
-                        current = {
-                            ln["line_id"]: {
-                                "families": set(ln["families"]),
-                                "name": str(ln.get("line_name") or "").strip(),
-                            }
-                            for ln in repo.get_lines(process=process)
+                rows_container_p = ui.column().classes("w-full")
+                line_selects_p: dict[int, ui.select] = {}
+                line_names_p: dict[int, ui.input] = {}
+
+                def rebuild_rows_p(n: int) -> None:
+                    rows_container_p.clear()
+                    line_selects_p.clear()
+                    line_names_p.clear()
+                    current = {
+                        ln["line_id"]: {
+                            "families": set(ln["families"]),
+                            "name": str(ln.get("line_name") or "").strip(),
                         }
-                        for line_id in range(1, n + 1):
-                            allowed = (current.get(line_id, {}) or {}).get("families", set(families))
-                            name_val = (current.get(line_id, {}) or {}).get("name", "") or f"Línea {line_id}"
-                            with rows_container_p:
-                                with ui.row().classes("items-center w-full gap-3"):
-                                    ui.label(f"Línea {line_id}").classes("w-24")
-                                    nm = ui.input("Nombre", value=name_val).classes("w-64")
-                                    ms = ui.select(
-                                        families,
-                                        value=list(allowed),
-                                        multiple=True,
-                                        label="Familias permitidas",
-                                    ).classes("w-96")
-                                    line_selects_p[line_id] = ms
-                                    line_names_p[line_id] = nm
+                        for ln in repo.get_lines(process=process)
+                    }
+                    for line_id in range(1, n + 1):
+                        allowed = (current.get(line_id, {}) or {}).get("families", set(families))
+                        name_val = (current.get(line_id, {}) or {}).get("name", "") or f"Línea {line_id}"
+                        with rows_container_p:
+                            with ui.row().classes("items-center w-full gap-3"):
+                                ui.label(f"Línea {line_id}").classes("w-24")
+                                nm = ui.input("Nombre", value=name_val).classes("w-64")
+                                ms = ui.select(
+                                    families,
+                                    value=list(allowed),
+                                    multiple=True,
+                                    label="Familias permitidas",
+                                ).classes("w-96")
+                                line_selects_p[line_id] = ms
+                                line_names_p[line_id] = nm
 
-                    def apply_all_p() -> None:
-                        n = int(num_lines_p.value or 0)
-                        if n <= 0:
-                            ui.notify("Número de líneas inválido", color="negative")
-                            return
+                def apply_all_p() -> None:
+                    n = int(num_lines_p.value or 0)
+                    if n <= 0:
+                        ui.notify("Número de líneas inválido", color="negative")
+                        return
 
-                        existing_ids = [ln["line_id"] for ln in repo.get_lines(process=process)]
-                        for line_id in sorted(existing_ids):
-                            if int(line_id) > n:
-                                repo.delete_line(process=process, line_id=int(line_id))
+                    existing_ids = [ln["line_id"] for ln in repo.get_lines(process=process)]
+                    for line_id in sorted(existing_ids):
+                        if int(line_id) > n:
+                            repo.delete_line(process=process, line_id=int(line_id))
 
-                        for line_id in range(1, n + 1):
-                            sel = line_selects_p.get(line_id)
-                            selected_families = list((sel.value if sel else families) or [])
-                            nm = line_names_p.get(line_id)
-                            repo.upsert_line(
-                                process=process,
-                                line_id=line_id,
-                                line_name=(nm.value if nm else None),
-                                families=selected_families,
-                            )
+                    for line_id in range(1, n + 1):
+                        sel = line_selects_p.get(line_id)
+                        selected_families = list((sel.value if sel else families) or [])
+                        nm = line_names_p.get(line_id)
+                        repo.upsert_line(
+                            process=process,
+                            line_id=line_id,
+                            line_name=(nm.value if nm else None),
+                            families=selected_families,
+                        )
 
-                        # If this process hasn't built orders yet, try to rebuild now.
-                        try:
-                            repo.try_rebuild_orders_from_sap_for(process=process)
-                        except Exception:
-                            pass
+                    # If this process hasn't built orders yet, try to rebuild now.
+                    try:
+                        repo.try_rebuild_orders_from_sap_for(process=process)
+                    except Exception:
+                        pass
 
-                        updated = auto_generate_and_save(process=process, notify=False)
-                        if updated:
-                            ui.notify("Configuración guardada. Programa actualizado.")
-                        else:
-                            ui.notify("Configuración guardada. Programa no actualizado (faltan datos).", color="warning")
+                    updated = auto_generate_and_save(process=process, notify=False)
+                    if updated:
+                        ui.notify("Configuración guardada. Programa actualizado.")
+                    else:
+                        ui.notify(
+                            "Configuración guardada. Programa no actualizado (faltan datos).",
+                            color="warning",
+                        )
 
-                    rebuild_rows_p(int(num_lines_p.value))
+                rebuild_rows_p(int(num_lines_p.value))
+                num_lines_p.on("change", lambda _: rebuild_rows_p(int(num_lines_p.value)))
 
-                    def on_num_change_p() -> None:
-                        rebuild_rows_p(int(num_lines_p.value))
+                ui.button("Aplicar cambios", on_click=apply_all_p).props("unelevated color=primary")
 
-                    num_lines_p.on("change", lambda _: on_num_change_p())
-                    ui.button("Aplicar cambios", on_click=apply_all_p).props("unelevated color=primary")
+            def render_process_expansion(*, process: str, title: str, open_by_default: bool = False) -> None:
+                line_count = len(repo.get_lines(process=process) or [])
+                exp = ui.expansion(value=open_by_default).classes("w-full")
+                with exp.add_slot("header"):
+                    with ui.row().classes("items-center w-full justify-between"):
+                        ui.label(title).classes("text-base font-semibold")
+                        ui.badge(str(line_count)).props("outline color=primary")
+                with exp:
+                    render_process_lines_editor(process=process, title=title, show_header=False)
+
+            with ui.column().classes("w-full gap-4"):
+                general_exp = ui.expansion(value=True).classes("w-full")
+                with general_exp.add_slot("header"):
+                    with ui.row().classes("items-center w-full justify-between"):
+                        ui.label("Generales").classes("text-base font-semibold")
+                with general_exp:
+                    ui.separator()
+                    planta_in = ui.input(
+                        "Planta",
+                        value=repo.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua",
+                    ).classes("w-80")
+
+                    ui.separator()
+                    ui.label("Almacenes (SAP) / Importación").classes("text-base font-semibold")
+                    with ui.row().classes("items-end w-full gap-3 flex-wrap"):
+                        centro_in = ui.input(
+                            "Centro",
+                            value=repo.get_config(key="sap_centro", default="4000") or "4000",
+                        ).classes("w-40")
+                        almacen_in = ui.input(
+                            "Almacén terminaciones",
+                            value=repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035",
+                        ).classes("w-64")
+                        prefixes_in = ui.input(
+                            "Prefijos material (MB52)",
+                            value=repo.get_config(key="sap_material_prefixes", default="436") or "436",
+                            placeholder="Ej: 436  | o '436,437' | o '*' (sin filtro)",
+                        ).classes("w-80")
+
+                    ui.separator()
+                    ui.label("Definición de almacenes por proceso").classes("text-base font-semibold")
+                    ui.label("Se usan para filtrar MB52 al reconstruir rangos por proceso.").classes(
+                        "text-sm text-slate-600"
+                    )
+
+                    allow_move_line_chk = ui.checkbox(
+                        "Habilitar mover filas 'en proceso' de línea",
+                        value=str(repo.get_config(key="ui_allow_move_in_progress_line", default="0") or "0").strip()
+                        == "1",
+                    )
+
+                    with ui.row().classes("items-end w-full gap-3 flex-wrap"):
+                        dura_in = ui.input(
+                            "Toma de dureza",
+                            value=(
+                                repo.get_config(
+                                    key="sap_almacen_toma_dureza",
+                                    default=(
+                                        repo.get_config(key="sap_almacen_terminaciones", default="4035") or "4035"
+                                    ),
+                                )
+                                or "4035"
+                            ),
+                        ).classes("w-56")
+                        mec_in = ui.input(
+                            "Mecanizado",
+                            value=repo.get_config(key="sap_almacen_mecanizado", default="4049") or "4049",
+                        ).classes("w-56")
+                        mec_ext_in = ui.input(
+                            "Mecanizado externo",
+                            value=repo.get_config(key="sap_almacen_mecanizado_externo", default="4050") or "4050",
+                        ).classes("w-56")
+                        insp_ext_in = ui.input(
+                            "Inspección externa",
+                            value=repo.get_config(key="sap_almacen_inspeccion_externa", default="4046") or "4046",
+                        ).classes("w-56")
+                        por_vulc_in = ui.input(
+                            "Por vulcanizar",
+                            value=repo.get_config(key="sap_almacen_por_vulcanizar", default="4047") or "4047",
+                        ).classes("w-56")
+                        en_vulc_in = ui.input(
+                            "En vulcanizado",
+                            value=repo.get_config(key="sap_almacen_en_vulcanizado", default="4048") or "4048",
+                        ).classes("w-56")
+
+                    def save_cfg() -> None:
+                        repo.set_config(key="planta", value=str(planta_in.value or "").strip())
+                        repo.set_config(key="sap_centro", value=str(centro_in.value or "").strip())
+                        repo.set_config(key="sap_almacen_terminaciones", value=str(almacen_in.value or "").strip())
+                        repo.set_config(key="sap_material_prefixes", value=str(prefixes_in.value or "").strip())
+                        repo.set_config(key="sap_almacen_toma_dureza", value=str(dura_in.value or "").strip())
+                        repo.set_config(key="sap_almacen_mecanizado", value=str(mec_in.value or "").strip())
+                        repo.set_config(
+                            key="sap_almacen_mecanizado_externo",
+                            value=str(mec_ext_in.value or "").strip(),
+                        )
+                        repo.set_config(
+                            key="sap_almacen_inspeccion_externa",
+                            value=str(insp_ext_in.value or "").strip(),
+                        )
+                        repo.set_config(key="sap_almacen_por_vulcanizar", value=str(por_vulc_in.value or "").strip())
+                        repo.set_config(key="sap_almacen_en_vulcanizado", value=str(en_vulc_in.value or "").strip())
+                        repo.set_config(
+                            key="ui_allow_move_in_progress_line",
+                            value="1" if bool(allow_move_line_chk.value) else "0",
+                        )
+                        ui.notify("Configuración guardada")
+                        ui.notify("Actualizando rangos/programas...")
+                        kick_refresh_from_sap_all(notify=False)
+                        ui.navigate.to("/config")
+
+                    with ui.row().classes("items-center gap-3 pt-2"):
+                        ui.button("Guardar", on_click=save_cfg).props("unelevated color=primary")
+
+                ui.separator()
+                ui.label("Procesos").classes("text-lg font-semibold")
+                ui.label("Cada proceso mantiene sus propias líneas/familias.").classes("text-sm text-slate-600")
+
+                render_process_expansion(process="terminaciones", title="Terminaciones", open_by_default=True)
+                render_process_expansion(process="toma_de_dureza", title="Toma de dureza")
+                render_process_expansion(process="mecanizado", title="Mecanizado")
+                render_process_expansion(process="mecanizado_externo", title="Mecanizado externo")
+                render_process_expansion(process="inspeccion_externa", title="Inspección externa")
+                render_process_expansion(process="por_vulcanizar", title="Por vulcanizar")
+                render_process_expansion(process="en_vulcanizado", title="En vulcanizado")
+
+    @ui.page("/config/planificador")
+    def config_planner() -> None:
+        render_nav(active="config_planificador", repo=repo)
+        with page_container():
+            ui.label("Planificador (semanal)").classes("text-2xl font-semibold")
+            ui.label("Ajustes del solver MIP (foundry_planner_engine / CBC).").classes("pt-subtitle")
 
             ui.separator()
-            ui.label("Otras líneas de proceso").classes("text-lg font-semibold")
-            process_lines_editor(process="toma_de_dureza", title="Toma de dureza")
-            process_lines_editor(process="mecanizado", title="Mecanizado")
-            process_lines_editor(process="mecanizado_externo", title="Mecanizado externo")
-            process_lines_editor(process="inspeccion_externa", title="Inspección externa")
-            process_lines_editor(process="por_vulcanizar", title="Por vulcanizar")
-            process_lines_editor(process="en_vulcanizado", title="En vulcanizado")
+            ui.label("Solver").classes("text-lg font-semibold")
+
+            time_limit_in = ui.number(
+                "Límite de tiempo (segundos)",
+                value=float(repo.get_config(key="strategy_time_limit_seconds", default="300") or 300),
+                min=1,
+                step=1,
+            ).classes("w-72")
+
+            mip_gap_in = ui.number(
+                "MIP gap relativo (0.01 = 1%)",
+                value=float(repo.get_config(key="strategy_mip_gap", default="0.01") or 0.01),
+                min=0.0,
+                max=1.0,
+                step=0.005,
+            ).classes("w-72")
+
+            horizon_in = ui.number(
+                "Horizonte (semanas)",
+                value=float(repo.get_config(key="strategy_planning_horizon_weeks", default="40") or 40),
+                min=1,
+                max=104,
+                step=1,
+            ).classes("w-72")
+
+            threads_in = ui.number(
+                "Threads (vacío = default)",
+                value=(
+                    float(repo.get_config(key="strategy_solver_threads", default="") or 0)
+                    if str(repo.get_config(key="strategy_solver_threads", default="") or "").strip()
+                    else None
+                ),
+                min=1,
+                max=64,
+                step=1,
+            ).classes("w-72")
+
+            solver_msg_chk = ui.checkbox(
+                "Mostrar log del solver (debug)",
+                value=str(repo.get_config(key="strategy_solver_msg", default="0") or "0").strip() == "1",
+            )
+
+            ui.label(
+                "Sugerencias: reduce horizonte (20) y/o sube gap (0.02–0.05) para acelerar. "
+                "Estos cambios aplican en la próxima ejecución del plan."
+            ).classes("text-sm text-slate-600 max-w-3xl")
+
+            ui.separator()
+            ui.label("Restricciones de planta").classes("text-lg font-semibold")
+            ui.label(
+                "Estas restricciones alimentan las tablas de capacidad del plan semanal (engine.db): "
+                "cajas/flasks, moldes por semana y capacidad global de colada."
+            ).classes("text-sm text-slate-600 max-w-3xl")
+
+            working_days_in = ui.number(
+                "Días laborales por semana (5–7)",
+                value=float(repo.get_config(key="strategy_working_days_per_week", default="5") or 5),
+                min=0,
+                max=7,
+                step=1,
+            ).classes("w-72")
+
+            molds_per_day_in = ui.number(
+                "Moldes por día por línea",
+                value=float(repo.get_config(key="strategy_molds_per_day_per_line", default="25") or 25),
+                min=0,
+                step=1,
+            ).classes("w-72")
+
+            pour_tons_per_day_in = ui.number(
+                "Capacidad de colada (ton/día)",
+                value=float(repo.get_config(key="strategy_pour_tons_per_day", default="100") or 100),
+                min=0,
+                step=10,
+            ).classes("w-72")
+
+            working_hours_in = ui.number(
+                "Horas laborables por semana por línea (molding_lines_config)",
+                value=float(repo.get_config(key="strategy_working_hours_per_week", default="120") or 120),
+                min=0,
+                step=1,
+            ).classes("w-72")
+
+            flasks_qty_in = ui.number(
+                "Cajas/Flasks por línea y tamaño",
+                value=float(repo.get_config(key="strategy_flasks_qty_per_line", default="25") or 25),
+                min=0,
+                step=1,
+            ).classes("w-72")
+
+            flask_sizes_in = ui.input(
+                "Tamaños de caja (coma separada)",
+                value=str(repo.get_config(key="strategy_flask_sizes", default="120,105,146") or "120,105,146"),
+            ).classes("w-96")
+
+            holidays_in = ui.textarea(
+                "Días festivos (YYYY-MM-DD, uno por línea)",
+                value=str(repo.get_config(key="strategy_holidays", default="") or ""),
+            ).classes("w-full max-w-3xl")
+
+            def save_planner_cfg() -> None:
+                try:
+                    tl = int(float(time_limit_in.value or 0))
+                    if tl <= 0:
+                        raise ValueError("time_limit_seconds inválido")
+
+                    mg = float(mip_gap_in.value or 0.0)
+                    if mg < 0.0 or mg > 1.0:
+                        raise ValueError("mip_gap debe estar entre 0 y 1")
+
+                    hz = int(float(horizon_in.value or 0))
+                    if hz <= 0:
+                        raise ValueError("planning_horizon_weeks inválido")
+
+                    repo.set_config(key="strategy_time_limit_seconds", value=str(tl))
+                    repo.set_config(key="strategy_mip_gap", value=str(mg))
+                    repo.set_config(key="strategy_planning_horizon_weeks", value=str(hz))
+
+                    th_val = threads_in.value
+                    if th_val is None or str(th_val).strip() == "":
+                        repo.set_config(key="strategy_solver_threads", value="")
+                    else:
+                        repo.set_config(key="strategy_solver_threads", value=str(int(float(th_val))))
+
+                    repo.set_config(
+                        key="strategy_solver_msg",
+                        value="1" if bool(solver_msg_chk.value) else "0",
+                    )
+
+                    wd = int(float(working_days_in.value or 0))
+                    if wd < 0 or wd > 7:
+                        raise ValueError("working_days_per_week inválido")
+
+                    mpd = int(float(molds_per_day_in.value or 0))
+                    if mpd < 0:
+                        raise ValueError("molds_per_day_per_line inválido")
+
+                    ptd = float(pour_tons_per_day_in.value or 0.0)
+                    if ptd < 0:
+                        raise ValueError("pour_tons_per_day inválido")
+
+                    wh = float(working_hours_in.value or 0.0)
+                    if wh < 0:
+                        raise ValueError("working_hours_per_week inválido")
+
+                    fq = int(float(flasks_qty_in.value or 0))
+                    if fq < 0:
+                        raise ValueError("flasks_qty_per_line inválido")
+
+                    fs = str(flask_sizes_in.value or "").strip()
+                    hol = str(holidays_in.value or "").strip()
+
+                    repo.set_config(key="strategy_working_days_per_week", value=str(wd))
+                    repo.set_config(key="strategy_molds_per_day_per_line", value=str(mpd))
+                    repo.set_config(key="strategy_pour_tons_per_day", value=str(ptd))
+                    repo.set_config(key="strategy_working_hours_per_week", value=str(wh))
+                    repo.set_config(key="strategy_flasks_qty_per_line", value=str(fq))
+                    repo.set_config(key="strategy_flask_sizes", value=fs)
+                    repo.set_config(key="strategy_holidays", value=hol)
+
+                    ui.notify("Configuración del planificador guardada")
+                    ui.navigate.to("/config/planificador")
+                except Exception as ex:
+                    ui.notify(f"Error guardando configuración: {ex}", color="negative")
+
+            with ui.row().classes("items-center gap-3"):
+                ui.button("Guardar", on_click=save_planner_cfg).props("unelevated color=primary")
+                ui.button(
+                    "Restaurar defaults",
+                    on_click=lambda: (
+                        setattr(time_limit_in, "value", 300),
+                        setattr(mip_gap_in, "value", 0.01),
+                        setattr(horizon_in, "value", 40),
+                        setattr(threads_in, "value", None),
+                        setattr(solver_msg_chk, "value", False),
+                        setattr(working_days_in, "value", 5),
+                        setattr(molds_per_day_in, "value", 25),
+                        setattr(pour_tons_per_day_in, "value", 100),
+                        setattr(working_hours_in, "value", 120),
+                        setattr(flasks_qty_in, "value", 25),
+                        setattr(flask_sizes_in, "value", "120,105,146"),
+                        setattr(holidays_in, "value", ""),
+                    ),
+                ).props("flat")
 
     @ui.page("/actualizar")
     def actualizar_data() -> None:
         render_nav(active="actualizar", repo=repo)
         with page_container():
             ui.label("Actualizar datos SAP").classes("text-2xl font-semibold")
-            ui.label("Sube MB52 y Visión Planta. Centro/Almacén se configuran en Parámetros.").classes("pt-subtitle")
+            ui.label("Sube MB52 y Visión Planta. Centro/Almacén se configuran en Dispatcher.").classes("pt-subtitle")
 
             with ui.row().classes("items-center gap-3 pt-2"):
                 mb52_merge = ui.checkbox(

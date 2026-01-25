@@ -1,38 +1,55 @@
 # Database Schema (v5)
 
-FoundryPlanner uses SQLite with WAL enabled. Schema versioning lives in the `schema_version` table; v5 adds the strategic planning layer while keeping existing dispatch tables unchanged.
+FoundryPlanner uses SQLite with WAL enabled. Schema versioning lives in `schema_version`.
 
-## Dispatch (existing, shared)
-- families
-- app_config
-- parts (shared by planner and dispatcher)
-- sap_mb52 (raw MB52 upload)
-- sap_vision (raw Visión upload)
-- orders (shared by planner and dispatcher)
-- programa / last_program (dispatch outputs)
-- orderpos_priority / order_priority
-- line_config
-- program_in_progress / program_in_progress_item
-- vision_kpi_daily, mb52_progress_last, vision_progress_last
+Important implementation detail (current): the strategic solver runs against a **separate SQLite database file** (`engine.db`) to avoid table/schema collisions with the app DB.
 
-## Strategic Planning (new in v5)
-Inputs:
-- plan_orders_weekly
-- plan_parts_routing
-- plan_molding_lines_config
-- plan_flasks_inventory
-- plan_capacities_weekly
-- plan_global_capacities_weekly
-- plan_initial_flask_usage
+---
 
-Outputs:
-- plan_molding
-- plan_pouring
-- plan_shakeout
-- plan_completion
-- order_results
+## App DB (main)
+
+The main app database stores SAP imports, the tactical dispatcher data, and user-managed master data.
+
+Common tables:
+- `families`
+- `app_config`
+- `parts` (internal master)
+- `sap_mb52` (raw MB52 upload)
+- `sap_vision` (raw Visión upload)
+- `orders` (per-process demand built from MB52+Visión)
+- `programa` / `last_program` (dispatch outputs)
+- `orderpos_priority` / `order_priority`
+- `line_config`
+- `program_in_progress` / `program_in_progress_item`
+- `vision_kpi_daily`, `mb52_progress_last`, `vision_progress_last`
+
+Also present (created in schema v5): `plan_*` / `order_results` tables.
+
+Note: today these plan tables are **not** the source of truth for the weekly solver outputs; they are reserved for a possible future “copy-back” of engine outputs into the app DB.
+
+---
+
+## Engine DB (`engine.db`)
+
+This database is created/populated by the planning layer before running the engine.
+
+Typical engine inputs (names are engine-owned):
+- `orders`
+- `parts`
+- `molding_lines_config`
+- `flasks_inventory`
+- `capacities_weekly`
+- `global_capacities_weekly`
+- `initial_flask_usage`
+
+Typical engine outputs:
+- `plan_molding`
+- `order_results`
+- (and any other engine-derived tables)
+
+---
 
 ## Notes
-- Schema migrations run in `Db.ensure_schema()` and bump `schema_version` to 5.
-- Dispatcher remains independent of planner outputs; both layers share `orders` and `parts` only.
-- Indexes added on plan tables for order/line/week lookups.
+
+- Migrations run in `Db.ensure_schema()` and bump `schema_version` to 5.
+- Dispatcher remains independent of weekly planner outputs.

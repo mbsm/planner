@@ -30,5 +30,6 @@ class Part:
     mecanizado_dias: int | None = None
     inspeccion_externa_dias: int | None = None
     peso_ton: float | None = None
+    caja_moldeo: str | None = None
     mec_perf_inclinada: bool = False
     sobre_medida: bool = False

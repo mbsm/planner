@@ -26,7 +26,7 @@ The strategic planning layer uses the `foundry_planner_engine` solver, which acc
 
 ### `planning_horizon_weeks`
 - **Type:** Integer
-- **Default:** 40 (hardcoded in solver.py)
+- **Default:** 40
 - **Description:** Number of weeks to plan ahead. Longer horizons increase model size and solve time but allow better capacity smoothing.
 - **Typical range:** 12-52 weeks
 - **Example:**
@@ -43,6 +43,8 @@ Options are stored in the `app_config` table and passed to the solver via `Strat
 | `strategy_time_limit_seconds` | 300 | 5-minute timeout |
 | `strategy_mip_gap` | 0.01 | 1% optimality gap |
 | `strategy_planning_horizon_weeks` | 40 | ~10 months |
+| `strategy_solver_threads` | (empty) | Solver default |
+| `strategy_solver_msg` | 0 | 1 = show CBC logs |
 
 ### Example: Updating via Repository
 
@@ -52,25 +54,9 @@ repo.set_config("strategy_mip_gap", "0.02")            # 2% gap
 repo.set_config("strategy_planning_horizon_weeks", "26")  # 6 months
 ```
 
-### Example: UI Configuration Page
+### UI Configuration Page
 
-Add a settings section under `/config` to allow operators to adjust solver tuning:
-
-```python
-with ui.card():
-    ui.label("Solver Configuration").classes("text-xl font-semibold")
-    time_limit = ui.number("Max solve time (seconds)", value=300, min=30, max=600)
-    mip_gap = ui.number("MIP gap tolerance", value=0.01, min=0.0, max=0.1, step=0.01)
-    horizon = ui.number("Planning horizon (weeks)", value=40, min=12, max=52)
-    
-    async def save():
-        repo.set_config("strategy_time_limit_seconds", str(int(time_limit.value)))
-        repo.set_config("strategy_mip_gap", str(mip_gap.value))
-        repo.set_config("strategy_planning_horizon_weeks", str(int(horizon.value)))
-        ui.notify("Solver config saved")
-    
-    ui.button("Save", on_click=save)
-```
+Solver settings are exposed in the app at **`/config/planificador`**.
 
 ## Performance Tuning Guidelines
 

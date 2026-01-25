@@ -1,345 +1,85 @@
-# FoundryPlanner: Implementation Checklist
+# FoundryPlanner: Implementation Checklist (Updated 2026-01-25)
 
-This document tracks the phased rollout of the two-layer planning system. For detailed architecture, see [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md).
-
----
-
-## Phase 1: Foundation (Weeks 1-2)
-
-_Status: Ready to proceed to Phase 2; remaining open items are tracked as carryover below._
-
-### Rename Project & Update Docs
-- [x] Rename package: `plannerterm` → `foundryplanner`
-- [x] Update README + docs to FoundryPlanner
-- [x] Update copilot instructions: ✅ DONE ([.github/copilot-instructions.md](.github/copilot-instructions.md))
-- [x] Create INTEGRATION_ARCHITECTURE.md: ✅ DONE
-- [x] Update package metadata (pyproject.toml)
-- [x] Update GitHub repo description
-  - Set to: "FoundryPlanner – weekly MIP planning + hourly dispatch (NiceGUI + SQLite), powered by foundry_planner_engine"
-
-### Set Up foundry_planner_engine Dependency
-- [x] Vendor as git submodule: `external/foundry_planner_engine`
-- [x] Wire package import path in code (strategy layer) via `planning.engine_adapter.ensure_engine_on_path()` / `import_engine_solve()`
-- [x] Verify Python 3.11+ compatibility → **Declared 3.14+ as minimum**
-- [x] Document solver configuration options → **See [docs/solver_configuration.md](docs/solver_configuration.md)**
-
-### Create Planning Folder Structure
-- [x] Create `src/foundryplanner/planning/` folder
-- [x] Create `src/foundryplanner/planning/__init__.py`
-- [x] Create `src/foundryplanner/planning/data_bridge.py` (stub)
-- [x] Create `src/foundryplanner/planning/result_reader.py` (stub)
-- [x] Create `src/foundryplanner/planning/orchestrator.py` (stub)
-
-### Schema Migrations
-- [x] Read current schema version from database (add version tracking if missing)
-- [x] Design new tables for Layer 1 (see INTEGRATION_ARCHITECTURE.md)
-- [x] Update `src/foundryplanner/data/db.py:Db.ensure_schema()`
-  - [x] Add version check: `if current_version < 5: migrate_to_v5()`
-  - [x] Create strategic tables (inputs + outputs for foundry_planner_engine)
-  - [x] Add indexes for performance (plan_* lookups by order/line/week)
-  - [x] Increment schema version to v5
-- [x] Create test database to verify migration works
-- [x] Document schema changes (add comments in code + docs/schema.md)
+This checklist reflects the current state of the repo (what is already implemented and what remains). For the architecture and design rationale, see [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md).
 
 ---
 
-## Phase 2: ETL & Data Adapter (Weeks 2-3)
+## Current Status (Works End-to-End)
 
-### Carryover from Phase 1
-- [x] Verify Python 3.11+ compatibility → **Declared 3.14+ as minimum**
-- [x] Document solver configuration options → **See [docs/solver_configuration.md](docs/solver_configuration.md)**
+### Two-layer system (Strategic + Tactical)
+- [x] **Strategic (weekly):** foundry_planner_engine is integrated and runnable from the UI.
+- [x] **Tactical (hourly/on-demand):** dispatcher remains independent of the weekly plan.
 
-### Create SAP ↔ Engine Data Mappers (Visión + MB52 Excel uploads only; internal part master)
-- [x] Implement `StrategyDataBridge` class in `src/foundryplanner/planning/data_bridge.py`:
-  - [x] `populate_plan_orders_weekly` — Join sap_mb52 + sap_vision + internal master → plan_orders_weekly
-  - [x] `populate_plan_parts_routing` — Internal part master → plan_parts_routing
-  - [x] `populate_plan_molding_lines_config` — app_config + configuration → plan_molding_lines_config
-  - [x] `populate_plan_flasks_inventory` — app_config → plan_flasks_inventory
-  - [x] `populate_plan_capacities_weekly` — app_config + maintenance windows → plan_capacities_weekly
-  - [x] `populate_plan_global_capacities` — app_config → plan_global_capacities_weekly (melt deck tonnage)
-  - [x] `populate_plan_initial_flask_usage` — Current WIP → plan_initial_flask_usage
-  - [x] `populate_all` — Call all populate_* methods; return summary stats
-  - [x] Handle NULL values, missing config gracefully
-  - [x] Add validation: ensure all required fields present
-  - [x] Add diagnostics: return summary stats (row counts per table)
+### Engine integration
+- [x] Engine vendored as submodule: `external/foundry_planner_engine`.
+- [x] Engine import path handled via `src/foundryplanner/planning/engine_adapter.py`.
+- [x] **Separate engine database** (`engine.db`) is used to avoid table/schema collisions with the app database.
+- [x] Solver runs off the NiceGUI event loop (background thread) to avoid UI disconnects.
 
-- [x] Implement `StrategyResultReader` class in `src/foundryplanner/planning/result_reader.py`:
-  - [x] `get_order_results()` — Read order_results table; return structured KPIs
-  - [x] `get_molding_plan_by_week(week_id)` — Get plan_molding rows for a specific week
-  - [x] `get_molding_plan_by_order(pedido, posicion)` — Get plan_molding rows for a specific order
-  - [x] `get_line_utilization_by_week()` — Compute % capacity utilized per line per week
-  - [x] `get_lateness_summary()` — Count on-time vs late orders; avg weeks late
-  - [x] `get_plan_summary()` — High-level KPIs for dashboard
-  - [x] Handle case where plan doesn't exist (return empty/zeros)
+### Configuration UI
+- [x] `/config/planificador` exists (MIP/CBC tuning: time limit, mip gap, horizon, threads, solver msg).
+- [x] `/config` (Dispatcher) is organized in a single column with collapsible sections and per-process line-count badges.
 
-### Implement Repository Extensions
-- [x] Add to `src/foundryplanner/data/repository.py`:
-  ```python
-  def get_strategy_data_bridge(self) -> StrategyDataBridge:
-    return StrategyDataBridge(self)
-
-  def get_strategy_result_reader(self) -> StrategyResultReader:
-    return StrategyResultReader(self)
-
-  def get_strategy_orchestrator(self) -> StrategyOrchestrator:
-    return StrategyOrchestrator(self)
-  ```
-
-### Create UI Models for Strategic Plan
-- [x] Create `src/foundryplanner/planning/models.py`:
-  - [x] WeeklyPlan (process, line_id, pedido, posicion, week_id, molds_planned)
-  - [x] OrderResultsKPI (process, pedido, posicion, molds_to_plan, start_week, delivery_week, is_late, weeks_late)
-  - [x] LineUtilization (process, line_id, week_id, capacity, planned, utilization_pct)
-  - [x] LatenessSummary (process, total_orders, on_time_count, late_count, on_time_pct, avg_weeks_late)
+### Scheduled weekly solve
+- [x] A background weekly solve scheduler exists in `src/foundryplanner/app.py`.
+- [x] Schedule is configurable via `strategy_solve_day` (0-6) and `strategy_solve_hour` (0-23) in config.
 
 ---
 
-## Phase 3: Orchestration & Scheduling (Weeks 3-4)
+## Implemented Building Blocks (Code Exists)
 
-### Create Strategy Orchestrator
-- [x] Implement `StrategyOrchestrator` in `src/foundryplanner/planning/orchestrator.py`:
-  - [x] `solve_weekly_plan()` — Orchestrates: validate → ETL → solve → persist
-    - [x] Validate SAP data completeness
-    - [x] Populate input tables via StrategyDataBridge
-    - [x] Call foundry_planner_engine.solve() with options from app_config
-    - [x] Handle results or errors (success, infeasible, error states)
-  - [x] `_validate_data()` — Check for missing config (capacities, parts, etc.)
-  - [x] Add error handling: infeasible → log + return status, don't crash
-  - [x] Add diagnostics: return ETL stats (rows inserted, skipped, errors)
-  - [x] **REMOVED** regenerate_dispatch_from_plan (dispatcher is independent)
+### Planning layer files
+- [x] `src/foundryplanner/planning/data_bridge.py` populates engine inputs into `engine.db`.
+- [x] `src/foundryplanner/planning/orchestrator.py` orchestrates validate → populate → solve.
+- [x] `src/foundryplanner/planning/models.py` defines basic DTOs for plan visualization.
 
-### Dispatch Layer Independence
-**CONFIRMED** — Dispatcher is completely independent of weekly strategic plan.
-- Only the **future molding dispatcher** will consume `plan_molding` allocations
-- Current `generate_program()` uses MB52+Visión data directly (unconstrained heuristic)
-- `StrategyOrchestrator` does NOT call or trigger dispatch regeneration
-- Dispatch runs on its own schedule/triggers (existing auto_regenerate_programs mechanism)
-- When molding dispatcher is implemented, it will:
-  - Read `plan_molding[order_id, week_id, molds_planned]` to sequence per pattern slot
-  - Respect weekly allocations from strategic plan
-  - Integrate with molding line scheduling UI
-
-### Add Background Task Runner
-- [x] Update `src/foundryplanner/app.py`:
-  ```python
-  @app.on_startup
-  async def schedule_weekly_solve():
-      """Schedule weekly solve at Monday 00:00 UTC"""
-      orchestrator = StrategyOrchestrator(repo)
-      
-      async def scheduled_job():
-          while True:
-              # Calculate next Monday 00:00 UTC
-              delay_seconds = seconds_until_next_monday_midnight()
-              await asyncio.sleep(delay_seconds)
-              result = await orchestrator.solve_weekly_plan()
-              # Log result, notify if needed
-      
-      asyncio.create_task(scheduled_job())
-  ```
-  - [x] Make schedule configurable (app_config: "strategy_solve_day", "strategy_solve_hour")
-  - [x] Add manual trigger button in UI for testing
-
-### Wire Up Orchestrator Calls
-- [x] Update `src/foundryplanner/ui/pages.py`:
-  ```python
-  def register_pages(repo: Repository) -> None:
-    orchestrator = StrategyOrchestrator(repo)
-      
-    # Manual trigger only (no auto-run on SAP upload)
-    async def force_replan():
-      result = await orchestrator.solve_weekly_plan()
-      if result["status"] == "success":
-        ui.notify("Plan actualizado")
-      else:
-        ui.notify(f"Error: {result['message']}", color="negative")
-      
-    # Wire button to call force_replan()
-  ```
-  - [x] Add "Force Replan" button in UI for manual triggers
-  - [x] Add "Last solve timestamp" display on dashboard
+### Notes / known mismatch to fix
+- [ ] `src/foundryplanner/planning/result_reader.py` currently reads from the app DB, but the engine writes outputs into `engine.db`.
+  - Decision needed: (A) read directly from `engine.db`, or (B) copy/merge outputs back into the app DB after solve.
 
 ---
 
-## Phase 4: UI & Documentation (Weeks 4-5)
+## Pending (High Value Next Steps)
 
-### Create Strategic Plan View (`/plano-semanal`)
-- [ ] Add new page route in `src/foundryplanner/ui/pages.py`:
-  ```python
-  @page('/')
-  def plano_semanal() -> None:
-      """Strategic weekly plan visualization"""
-      # Header: Last solve time, replan button, filters
-      # Section 1: Order KPIs (late, on-time, avg lateness)
-      # Section 2: Heatmap of line utilization per week
-      # Section 3: Table of order_results with drill-down
-      # Section 4: Download plan as Excel
-  ```
-  - [ ] Display `order_results` table with sorting/filtering
-  - [ ] Heatmap: weeks (x-axis) vs lines (y-axis), colored by % utilization
-  - [ ] Order details: expand to show plan_molding allocations per week
-  - [ ] Export button: save plan to Excel for meetings/archives
+### Strategic UI (`/plano-semanal`)
+- [ ] Replace placeholder copy with real data from the plan outputs.
+- [ ] Show `order_results` table (filter/sort; drill-down per order).
+- [ ] Show line/week utilization (heatmap or table) from capacities vs plan.
+- [ ] Export plan to Excel (for meetings/archives).
 
-### Update Dashboard (`/`)
-- [ ] Add strategic plan widget:
-  - Last solve timestamp + status
-  - On-time % (current week plan vs historical)
-  - Average lateness (current plan vs historical)
-  - Alert if plan is stale (> 7 days)
-- [ ] Link to `/plano-semanal` for detailed view
+### Persistence contract for strategic outputs
+- [ ] Pick one and standardize:
+  - [ ] **Option A:** UI reads planning outputs directly from `engine.db`.
+  - [ ] **Option B:** After solve, copy outputs into app DB tables for UI/reporting/history.
 
-### Update Dispatch View (`/programa`)
-**Note:** Current dispatcher is independent of weekly plan (unconstrained heuristic).
-- No changes needed to existing `/programa` view at this time
-- Future enhancement (molding dispatcher):
-  - [ ] Add filter: "Show plan version" dropdown
-  - [ ] Highlight source: which orders come from current weekly plan vs ad-hoc
-  - [ ] Add constraint indicator: show if actual dispatch ≠ planned (warning)
-
-### Create Documentation
-- [ ] Write `docs/strategic_planning.md`:
-  - Two-layer architecture overview
-  - Input data (SAP + config) + validation
-  - Optimization objectives & constraints
-  - Output interpretation (plan_molding, order_results, lateness)
-  - Configuration parameters (solver time limit, MIP gap)
-  
-- [ ] Write `docs/integration_guide.md`:
-  - How to swap/extend optimization engine
-  - API contract for StrategyDataBridge / StrategyOrchestrator
-  - Testing strategies
-  
-- [ ] Update `docs/configuracion.md`:
-  - Add facility capacity parameters (flask sizes, hourly rates, melt deck tonnage)
-  - Explain maintenance windows + seasonal limits
-  
-- [ ] Update [.github/copilot-instructions.md](.github/copilot-instructions.md): ✅ DONE
-- [ ] Update [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md): ✅ DONE
+### Testing
+- [ ] Add planning-layer tests:
+  - [ ] `tests/test_data_bridge.py`
+  - [ ] `tests/test_orchestrator.py`
+  - [ ] `tests/test_result_reader.py` (after the engine.db vs app-db decision)
 
 ---
 
-## Phase 5: Testing & Validation (Weeks 5-6)
+## Later / Optional
 
-### Unit Tests
-- [ ] `tests/test_data_bridge.py`:
-  - SAP records → plan_orders_weekly (joins, filtering)
-  - Config → plan_capacities_weekly (defaults, edge cases)
-  - NULL handling, missing data
-  
-- [ ] `tests/test_result_reader.py`:
-  - Read empty plan (no solve yet)
-  - Read valid plan (KPIs, line utilization)
-  - Cache behavior
-  
-- [ ] `tests/test_orchestrator.py`:
-  - Happy path: SAP upload → solve → dispatch trigger
-  - Error cases: missing config, infeasible, solver timeout
-  - Fallback behavior
-
-- [ ] `tests/test_scheduler_constrained.py`:
-  - Dispatch respects weekly_plan caps
-  - Backward compatibility (no plan supplied)
-  - Edge case: plan cap < order size
-
-### Integration Tests
-- [ ] End-to-end workflow:
-  1. Upload SAP files (MB52 + Visión)
-  2. Trigger weekly solve
-  3. Verify plan_molding + order_results populated
-  4. Regenerate dispatch
-  5. Verify programa respects allocations
-
-- [ ] Stress tests:
-  - 500+ orders, 40-week horizon → measure solve time
-  - Verify no timeouts, acceptable solution quality
-
-- [ ] Regression tests:
-  - Compare new 2-layer output vs old 1-layer on historical data
-  - Measure lateness improvement %
-
-### Validation Metrics
-- [ ] Lateness improvement: target 15-20% reduction
-- [ ] On-time %: target 85%+ (vs current 75%)
-- [ ] Line utilization: std dev < 15% week-to-week
-- [ ] Solve time: < 60 seconds for typical scenario
+- [ ] Plan history/versioning (keep previous runs and compare scenarios).
+- [ ] SLA/observability: persist solve duration + solver status per run.
+- [ ] Documentation polish:
+  - [ ] `docs/strategic_planning.md`
+  - [ ] `docs/integration_guide.md`
 
 ---
 
-## Phase 6: Deployment & Monitoring (Weeks 6-7)
+## Success Criteria (Practical)
 
-### Performance Tuning
-- [ ] Profile solver on real SAP data (typical & large scenarios)
-- [ ] Tune solver parameters:
-  - time_limit_seconds: target < 60s
-  - mip_gap: balance 1% (tight) vs 5% (fast)
-  - planning_horizon: 40 weeks default, adjustable for faster solve
-- [ ] Document SLA: "Weekly solve completes in < 60s; plan available by 06:00 UTC"
-
-### Error Handling & Fallback
-- [ ] Test failure modes:
-  - Missing SAP data → clear error message, don't solve
-  - Infeasible problem → alert + fall back to Layer 2 only
-  - Solver timeout → use best found solution or previous plan
-  - Database error → log + retry, UI graceful degradation
-- [ ] Add monitoring alerts:
-  - Solve failed for 2+ weeks → escalate
-  - Solve time exceeding SLA → investigate
-
-### Deploy & Release
-- [ ] Code review: all PR merged, CI passing
-- [ ] Update CHANGELOG with two-layer planning feature
-- [ ] Tag version (e.g., v2.0.0)
-- [ ] Deploy to staging → test with real SAP data
-- [ ] Deploy to production → rollout with monitoring
-
-### User Training & Documentation
-- [ ] Create user guide: "How to read the weekly plan"
-  - What does "on-time" mean?
-  - How to interpret lateness weeks?
-  - When to override plan manually?
-- [ ] Create admin guide: "How to adjust capacity model"
-  - Update flask inventory
-  - Adjust line working hours (seasonal)
-  - Configure melt deck tonnage limits
-- [ ] Create dev guide: "How to integrate custom optimization engine"
-  - Swap foundry_planner_engine for another solver
-  - Implement alternative StrategyDataBridge / ResultReader
+- [ ] Weekly solve completes reliably (timeouts handled; UI stays responsive).
+- [ ] Strategic view is actionable (KPIs + allocations + export).
+- [ ] Dispatcher stays independent (until a dedicated molding dispatcher is implemented).
 
 ---
 
-## Post-Launch (Ongoing)
+## References
 
-### Monitoring & Optimization
-- [ ] Weekly review of solve metrics (time, quality, feasibility)
-- [ ] Monthly lateness report (on-time %, avg weeks late)
-- [ ] Tune solver parameters based on observed performance
-- [ ] Collect user feedback: is plan easy to understand? actionable?
-
-### Future Enhancements
-- [ ] Manual plan override UI (if operator wants to adjust allocations)
-- [ ] Plan versioning: keep history, compare scenarios
-- [ ] Sensitivity analysis: "What if we add 10 more flasks?"
-- [ ] Integration with production floor data (actual vs planned)
-- [ ] Real-time dispatch updates (on-line replanning)
-
----
-
-## Success Criteria
-
-| Metric | Target | Owner | Deadline |
-|--------|--------|-------|----------|
-| Schema v5 migrates cleanly | 100% | Dev | Week 1 |
-| foundry_planner_engine imports successfully | Yes | Dev | Week 1 |
-| Strategic view renders weekly plan | Yes | UI | Week 4 |
-| Dispatch respects weekly allocations | 100% | Dispatch | Week 3 |
-| Weekly solve < 60 seconds | 95% of runs | Dev | Week 5 |
-| Lateness improvement | ≥ 15% | Biz | Month 2 |
-| On-time delivery | ≥ 85% | Biz | Month 2 |
-
----
-
-## Contacts & Questions
-
-- **Architecture questions:** See [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md)
-- **Solver questions:** See [foundry_planner_engine README](https://github.com/mbsm/foundry_planner_engine)
-- **Code questions:** See [.github/copilot-instructions.md](.github/copilot-instructions.md)
+- Architecture: [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md)
+- Solver config: [docs/solver_configuration.md](docs/solver_configuration.md)
+- Copilot conventions: [.github/copilot-instructions.md](.github/copilot-instructions.md)

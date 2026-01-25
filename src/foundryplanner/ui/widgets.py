@@ -81,7 +81,14 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
         "programa_en_vulcanizado",
     }
     production_progress_active = active_key in {"avance"}
-    config_active = active_key in {"config", "config_lineas", "config_familias", "config_materiales", "config_pedidos"}
+    config_active = active_key in {
+        "config",
+        "config_dispatcher",
+        "config_familias",
+        "config_materiales",
+        "config_pedidos",
+        "config_planificador",
+    }
 
     with ui.header().classes("pt-header bg-white text-slate-900"):
         with ui.row().classes("w-full items-center justify-between gap-4 px-4 py-2"):
@@ -144,9 +151,9 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                     _cfg_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         label_lineas = (
-                            "✓ Parámetros"
-                            if active_key in {"config", "config_lineas"}
-                            else "Parámetros"
+                            "✓ Dispatcher"
+                            if active_key in {"config", "config_dispatcher"}
+                            else "Dispatcher"
                         )
                         label_familias = (
                             "✓ Familias"
@@ -164,7 +171,14 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             else "Pedidos"
                         )
 
+                        label_planificador = (
+                            "✓ Planificador"
+                            if active_key == "config_planificador"
+                            else "Planificador"
+                        )
+
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
+                        ui.menu_item(label_planificador, on_click=lambda: ui.navigate.to("/config/planificador"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
                         ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))

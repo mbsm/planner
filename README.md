@@ -7,7 +7,7 @@ Plataforma de planificación de producción (NiceGUI + SQLite) con **dos capas**
 
 Incluye:
 - **Plan Semanal**: asignación de molds por orden/semana respetando restricciones de planta
-- **Programas de Producción** por línea (derivados del plan semanal)
+- **Programas de Producción** por línea/proceso (heurística MB52; **independiente** del plan semanal hoy)
 - **KPI diario** (Visión): tons por entregar y tons atrasadas + gráfico histórico
 - **Avance Producción** (MB52): reporte de salidas brutas vs MB52 anterior, mapeadas al último programa
 
@@ -53,11 +53,13 @@ Luego abre http://localhost:8080
 
 Navegación en la app:
 - **Dashboard**: métricas rápidas (KPI Visión, avance producción).
-- **Plan Semanal** *(NEW)*: vista estratégica del plan semanal; detalles de latencias por orden.
-- **Programa**: colas por línea derivadas del plan semanal (se guarda en SQLite como "última programa").
-- **Actualizar**: carga de MB52 + Visión Planta desde Excel (dispara replanificación automática).
+- **Plan Semanal**: vista estratégica + botón para forzar planificación; el solve también corre por scheduler.
+- **Programa**: colas por línea/proceso (heurística; se guarda en SQLite como "último programa").
+- **Actualizar**: carga de MB52 + Visión Planta desde Excel (reconstruye órdenes por proceso y regenera programas cuando hay datos suficientes).
 - **Avance Producción**: reporte de salidas (MB52) por línea vs el último programa.
-- **Config** (dropdown): Configuración de líneas / Familias / Tiempos de proceso / Parámetros de capacidad.
+- **Config** (dropdown):
+	- **Dispatcher**: almacenes SAP por proceso + líneas/familias (colapsable, con badges por proceso).
+	- **Planificador**: parámetros del solver semanal (time limit, mip gap, horizonte, threads, msg) + scheduler.
 
 ## Operación rápida
 1. Ir a **Actualizar** y verificar Centro/Almacén (defaults: `4000` / `4035`).
@@ -99,8 +101,8 @@ Luego cruza MB52 (Documento comercial + Posición SD) contra Visión (Pedido + P
 
 Notas de estado (importante):
 - Al subir MB52 o Visión, la app **reemplaza** el contenido previamente importado de ese mismo archivo.
-- **El plan semanal se recalcula automáticamente** (aprovecha cambios en SAP + config).
-- El programa/rangos se recalculan cuando están ambos archivos disponibles.
+- El programa/rangos se recalculan cuando están ambos archivos disponibles y existe configuración mínima (líneas/maestro/tiempos).
+- El plan semanal **no** se ejecuta automáticamente al subir SAP: corre por scheduler (configurable) o manualmente desde **Plan Semanal**.
 - El maestro local de producto (familias + tiempos) **se mantiene** y no se borra al importar SAP.
 
 Las **familias** (`numero_parte` → `familia`) se administran dentro de la app en **Config > Familias** y se guardan en SQLite.
@@ -125,6 +127,8 @@ Al importar pedidos o cambiar configuración (familias/tiempos/líneas), la app 
 See [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md) for detailed two-layer design:
 - **Layer 1 (Strategic):** Weekly MIP-based planner using [foundry_planner_engine](https://github.com/mbsm/foundry_planner_engine)
 - **Layer 2 (Tactical):** Heurístico basado en MB52 (prioridad asc, luego fecha_entrega - tiempos). No consume el plan semanal hoy; solo el futuro dispatcher de moldeo usará `plan_molding` para secuenciar por patrón.
+
+Nota de implementación (importante): el motor estratégico opera sobre una base SQLite separada `engine.db` (generada por la app) para evitar colisiones de esquema con la base principal de la app.
 
 ## Notas
 - Persistencia en SQLite local (archivo `.db`).

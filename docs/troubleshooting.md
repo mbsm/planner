@@ -10,6 +10,18 @@
   - `en_control_calidad=0`
   - `documento_comercial`, `posicion_sd` y `lote` no vacíos
 
+## Plan semanal no corre / queda en error
+
+- Verifica que el submódulo del engine esté inicializado:
+  - `git submodule update --init --recursive`
+- Revisa que existan:
+  - Órdenes (>0) para el proceso (se reconstruyen desde MB52+Visión)
+  - Maestro (`parts`) y configuración mínima de líneas (Dispatcher)
+- El solve semanal corre:
+  - Automático por scheduler (UTC; configurable), o
+  - Manual desde `/plano-semanal` con “Forzar planificación”.
+- Nota: el solver usa una base separada `engine.db` (en la misma carpeta que la DB principal).
+
 ## “Familia no configurada en ninguna línea”
 
 - Asigna familia a los materiales en **Config > Familias**.
