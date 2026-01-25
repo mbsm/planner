@@ -20,19 +20,19 @@
 
 ## Architecture boundaries (follow these)
 - **Planning Layer (Strategic)** (`src/foundryplanner/planning/`): Orchestrates foundry_planner_engine; manages ETL (SAP → engine input tables), solve workflow, result persistence. Pure computation: no UI.
-- **Dispatching Layer (Tactical)** (`src/foundryplanner/dispatching/scheduler.py`): Existing dispatch logic, now **constrained by weekly plan**. Enhanced to respect `plan_molding` allocations.
+- **Dispatching Layer (Tactical)** (`src/foundryplanner/dispatching/scheduler.py`): Existing dispatch logic remains **independent of the weekly plan** (unconstrained heuristic). Future molding dispatcher is the only place that will consume `plan_molding`.
 - **UI Layer** (`src/foundryplanner/ui/pages.py`): Renders both layers; new `/plano-semanal` route for strategic plan visualization.
 - **Persistence API**: Both layers use `src/foundryplanner/data/repository.py:Repository` — single data access interface.
 - **SQLite schema/migrations**: `src/foundryplanner/data/db.py:Db.ensure_schema()` (WAL mode, versioned). Schema v5+ includes 12 new tables for strategic planning.
-- **Schedulers (planning + dispatch)**: Strategic `foundry_planner_engine.solve()` (MIP, pure). Tactical `generate_program_constrained()` (heuristic, respects plan).
+- **Schedulers (planning + dispatch)**: Strategic `foundry_planner_engine.solve()` (MIP, pure). Tactical `generate_program()` (heuristic, MB52-driven, independent of plan); future molding dispatcher will use plan allocations.
 
 ## Data flow (how the app actually works)
 - **Sources (SAP):** Only Visión + MB52 (no MB51). Orders are built once from these and shared between MIP and dispatcher. Parts/master remain the internal GUI-managed table shared by both layers.
 - **Layer 1 (Strategic):** SAP uploads → ETL (Visión + MB52 + internal master) → `plan_orders_weekly`, `plan_capacities_weekly`, etc. → `foundry_planner_engine.solve()` → `plan_molding`, `order_results` (weekly MIP plan).
-- **Layer 2 (Tactical):** Existing heuristic using MB52 data; sorts by priority asc, then `due_date - process_time`. It does **not** consume the weekly plan today. Only the **future molding dispatcher** will consume `plan_molding` to sequence per pattern slot.
+- **Layer 2 (Tactical):** Existing heuristic using MB52 data; sorts by priority asc, then `due_date - process_time`. It does **not** consume the weekly plan today. Only the **future molding dispatcher** will consume `plan_molding` to sequence per pattern slot. Dispatch refresh triggers: MB52 upload, dispatch parameter/config updates, or orders flagged as urgent (manual priority).
 - **Data pathway:**
   1. Upload MB52 + Visión in UI (`/actualizar`) → `Repository.import_excel_bytes()` → `sap_mb52`, `sap_vision` tables.
-  2. Auto-trigger: `StrategyOrchestrator.solve_weekly_plan()` → populate strategic input tables → `foundry_planner_engine.solve()` → persist plan tables.
+   2. Triggering: `StrategyOrchestrator.solve_weekly_plan()` runs only via scheduled job or explicit manual call (no auto-run on SAP upload) → populate strategic input tables → `foundry_planner_engine.solve()` → persist plan tables.
   3. Tactical dispatch stays MB52-driven; weekly plan is only for the molding dispatcher (to be implemented).
   4. UI renders both layers: dashboard (KPIs), `/plano-semanal` (strategic view), `/programa` (tactical dispatch).
 - **Multi-process support** (Layer 2 only): 7 processes (terminaciones, toma_de_dureza, mecanizado, etc.) each maintain separate dispatch queues per almacen/process.
@@ -48,11 +48,11 @@
 - **Layer 1 (Strategic/Weekly):** MIP solver minimizes weighted lateness. Respects plant-wide constraints: flask capacity per line, global melt deck tonnage, line working hours, pattern wear limits, pouring delays, post-process lead times.
   - Inputs: `plan_orders_weekly`, `plan_parts_routing`, `plan_capacities_weekly`, `plan_flasks_inventory`, etc.
   - Outputs: `plan_molding[order_id, week_id, molds_planned]`, `order_results[order_id, start_week, delivery_week, is_late, weeks_late]`.
-- **Layer 2 (Tactical/Hourly):** Enhanced heuristic scheduler. Respects weekly plan allocations from `plan_molding`.
-  - Priority sorting key: **tests first** (`is_test=True`), then **manual priority**, then **`start_by = fecha_entrega - post_process_days`**.
-  - Assignment: choose among eligible lines (family allowed) the one with **lowest current load**, capped by weekly allocation.
+- **Layer 2 (Tactical/Hourly):** Unconstrained heuristic scheduler (independent of weekly plan).
+  - Priority sorting key: **tests first** (`is_test=True`), then **manual priority / urgent flag**, then **`start_by = fecha_entrega - post_process_days`**.
+  - Assignment: choose among eligible lines (family allowed) the one with **lowest current load**.
   - Output rows include: `_row_id`, `prio_kind`, `pedido`, `posicion`, `numero_parte`, `cantidad`, `corr_inicio`, `corr_fin`, `familia`, `fecha_entrega`, `start_by`.
-  - If Layer 1 (strategic) changes, Layer 2 regenerates automatically via `auto_generate_and_save_all()`.
+  - Refresh triggers: MB52 upload, dispatch parameter/config updates, orders flagged as urgent (manual priority updates).
 - **If you change either scheduling behavior**, update `tests/test_scheduler.py` + strategic integration tests.
 
 ## NiceGUI UI conventions used here

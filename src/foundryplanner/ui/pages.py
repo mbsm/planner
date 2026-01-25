@@ -5,12 +5,28 @@ from datetime import date, datetime
 
 from nicegui import ui
 
-from foundryplanner.dispatching.scheduler import generate_program
 from foundryplanner.data.repository import Repository
+from foundryplanner.dispatching.scheduler import generate_program
+from foundryplanner.planning.orchestrator import StrategyOrchestrator
 from foundryplanner.ui.widgets import page_container, render_line_tables, render_nav
 
 
 def register_pages(repo: Repository) -> None:
+    orchestrator = repo.get_strategy_orchestrator() if hasattr(repo, "get_strategy_orchestrator") else StrategyOrchestrator(repo)
+
+    async def force_replan(*, notify: bool = True) -> None:
+        """Manually trigger weekly plan solve (no auto-run on SAP uploads)."""
+        try:
+            result = await orchestrator.solve_weekly_plan()
+            if result.get("status") == "success":
+                repo.set_config("strategy_last_solve_at", datetime.utcnow().isoformat())
+                if notify:
+                    ui.notify("Plan semanal generado")
+            else:
+                ui.notify(f"Plan no resuelto: {result.get('message')}", color="warning")
+        except Exception as ex:
+            ui.notify(f"Error resolviendo plan: {ex}", color="negative")
+
     def auto_generate_and_save(*, process: str = "terminaciones", notify: bool = True) -> bool:
         process = str(process or "terminaciones").strip().lower()
         updated = False
@@ -93,6 +109,19 @@ def register_pages(repo: Repository) -> None:
         with page_container():
             ui.label("Plan semanal (vista estratégica)").classes("text-2xl font-semibold")
             ui.separator()
+            last_solve_raw = repo.get_config("strategy_last_solve_at")
+            last_solve = "—"
+            if last_solve_raw:
+                try:
+                    last_solve = datetime.fromisoformat(str(last_solve_raw)).strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    last_solve = str(last_solve_raw)
+
+            with ui.row().classes("items-center gap-3"):
+                ui.label(f"Última planificación semanal: {last_solve}").classes("text-sm text-slate-600")
+                ui.button("Forzar planificación", on_click=lambda: asyncio.create_task(force_replan())).props(
+                    "color=primary"
+                )
             ui.label(
                 "Esta vista mostrará el plan semanal generado por foundry_planner_engine. "
                 "Usa las tablas compartidas de orders y parts; el dispatcher actual sigue independiente."

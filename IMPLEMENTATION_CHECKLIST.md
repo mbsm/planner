@@ -120,7 +120,7 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
   - Integrate with molding line scheduling UI
 
 ### Add Background Task Runner
-- [ ] Update `src/foundryplanner/app.py`:
+- [x] Update `src/foundryplanner/app.py`:
   ```python
   @app.on_startup
   async def schedule_weekly_solve():
@@ -137,27 +137,27 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
       
       asyncio.create_task(scheduled_job())
   ```
-  - [ ] Make schedule configurable (app_config: "strategy_solve_day", "strategy_solve_hour")
-  - [ ] Add manual trigger button in UI for testing
+  - [x] Make schedule configurable (app_config: "strategy_solve_day", "strategy_solve_hour")
+  - [x] Add manual trigger button in UI for testing
 
 ### Wire Up Orchestrator Calls
-- [ ] Update `src/foundryplanner/ui/pages.py`:
+- [x] Update `src/foundryplanner/ui/pages.py`:
   ```python
   def register_pages(repo: Repository) -> None:
-      orchestrator = StrategyOrchestrator(repo)
+    orchestrator = StrategyOrchestrator(repo)
       
-      async def on_sap_upload():
-          """After SAP upload, auto-trigger solve + dispatch"""
-          result = await orchestrator.solve_weekly_plan()
-          if result["status"] == "success":
-              ui.notify("Plan actualizado")
-          else:
-              ui.notify(f"Error: {result['message']}", color="negative")
+    # Manual trigger only (no auto-run on SAP upload)
+    async def force_replan():
+      result = await orchestrator.solve_weekly_plan()
+      if result["status"] == "success":
+        ui.notify("Plan actualizado")
+      else:
+        ui.notify(f"Error: {result['message']}", color="negative")
       
-      # Wire into existing upload handlers
+    # Wire button to call force_replan()
   ```
-  - [ ] Add "Force Replan" button in UI for manual triggers
-  - [ ] Add "Last solve timestamp" display on dashboard
+  - [x] Add "Force Replan" button in UI for manual triggers
+  - [x] Add "Last solve timestamp" display on dashboard
 
 ---
 
