@@ -18,7 +18,7 @@ class StrategyDataBridge:
         Maps calendar dates to week IDs and aggregates order quantities by (pedido, posicion, part).
         """
         orders = self.repo.get_orders_model(process=process)
-        priority_set = self.repo.get_priority_orderpos()
+        priority_set = self.repo.get_priority_orderpos_set()
         
         # Compute reference date (week 0 = current Monday)
         today = date.today()
