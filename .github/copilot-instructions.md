@@ -1,36 +1,69 @@
-# Copilot instructions (PlannerTerm)
+# Copilot instructions (FoundryPlanner)
 
 ## What this repo is
-- PlannerTerm is a Windows-first NiceGUI web app that generates per-line work queues (“programa”) from SAP Excel uploads (MB52 + Visión Planta) + in-app master data (familias + tiempos), persisted in a local SQLite DB.
+- FoundryPlanner is a cross-platform production planning platform (Windows primary, macOS dev) with **two optimization layers**:
+  1. **Strategic (Weekly):** Facility-wide MIP-based planning using [foundry_planner_engine](https://github.com/mbsm/foundry_planner_engine) — respects global constraints (flask capacity, melt deck tonnage, line hours), minimizes weighted lateness.
+  2. **Tactical (Hourly/On-demand):** Dispatch queues per line, derived from weekly plan + SAP stock (MB52) + master data (families, post-process times).
+- Persists to local SQLite; UI via NiceGUI.
 
-## Key entrypoints / dev commands (Windows)
-- Run from repo root: `.venv\Scripts\python.exe run_app.py --port 8080` (no install needed; `run_app.py` adds `src/` to `sys.path`).
-- Tests: `.venv\Scripts\python.exe -m pytest`.
-- Bootstrap: `src/plannerterm/app.py:main()` creates `Db` + `Repository`, registers pages via `src/plannerterm/ui/pages.py:register_pages(repo)`, serves `/assets`.
+## Key entrypoints / dev commands
+- **Windows**: `.venv\Scripts\python.exe run_app.py --port 8080` | `.venv\Scripts\python.exe -m pytest`
+- **macOS/Linux**: `.venv/bin/python run_app.py --port 8080` | `.venv/bin/python -m pytest`
+- No install needed: `run_app.py` adds `src/` to `sys.path` and handles Windows async event loop policy.
+- Bootstrap: `src/foundryplanner/app.py:main()` creates `Db` + `Repository`, registers pages via `src/foundryplanner/ui/pages.py:register_pages(repo)`, serves `/assets`.
+- foundry_planner_engine is vendored as a git submodule in `external/foundry_planner_engine` (run `git submodule update --init --recursive` after clone).
+
+## Workflow (mandatory)
+- Before committing any code change, **run the linter** and fix all errors/warnings. Iterate until clean.
+- Then **run the tests**; if they fail, fix while keeping the linter clean.
+- After tests pass, make a **clear, descriptive commit** and push to the remote.
 
 ## Architecture boundaries (follow these)
-- UI: `src/plannerterm/ui/pages.py` + shared widgets/theme in `src/plannerterm/ui/widgets.py`.
-- Persistence API: UI should only touch storage through `src/plannerterm/data/repository.py:Repository`.
-- SQLite schema/migrations: `src/plannerterm/data/db.py:Db.ensure_schema()` (WAL mode, best-effort migrations).
-- Scheduling core: `src/plannerterm/core/scheduler.py:generate_program()` is pure over dataclasses in `src/plannerterm/core/models.py`.
+- **Planning Layer (Strategic)** (`src/foundryplanner/planning/`): Orchestrates foundry_planner_engine; manages ETL (SAP → engine input tables), solve workflow, result persistence. Pure computation: no UI.
+- **Dispatching Layer (Tactical)** (`src/foundryplanner/dispatching/scheduler.py`): Existing dispatch logic, now **constrained by weekly plan**. Enhanced to respect `plan_molding` allocations.
+- **UI Layer** (`src/foundryplanner/ui/pages.py`): Renders both layers; new `/plano-semanal` route for strategic plan visualization.
+- **Persistence API**: Both layers use `src/foundryplanner/data/repository.py:Repository` — single data access interface.
+- **SQLite schema/migrations**: `src/foundryplanner/data/db.py:Db.ensure_schema()` (WAL mode, versioned). Schema v5+ includes 12 new tables for strategic planning.
+- **Schedulers (planning + dispatch)**: Strategic `foundry_planner_engine.solve()` (MIP, pure). Tactical `generate_program_constrained()` (heuristic, respects plan).
 
 ## Data flow (how the app actually works)
-- Upload MB52 + Visión in the UI (`/actualizar`) → `Repository.import_excel_bytes(kind='mb52'|'vision')` loads into tables `sap_mb52` / `sap_vision`.
-- Rebuild orders from SAP: `Repository.try_rebuild_orders_from_sap()` → `orders` table is derived by joining MB52 (pedido/posición + lote) with Visión (fecha_de_pedido), counting usable pieces.
-- Master data: `parts` holds `numero_parte -> familia` plus optional `*_dias` post-process lead times; `families` is a catalog.
-- Scheduling: UI calls `generate_program(...)` and persists output in `last_program` (cached JSON).
+- **Sources (SAP):** Only Visión + MB52 (no MB51). Orders are built once from these and shared between MIP and dispatcher. Parts/master remain the internal GUI-managed table shared by both layers.
+- **Layer 1 (Strategic):** SAP uploads → ETL (Visión + MB52 + internal master) → `plan_orders_weekly`, `plan_capacities_weekly`, etc. → `foundry_planner_engine.solve()` → `plan_molding`, `order_results` (weekly MIP plan).
+- **Layer 2 (Tactical):** Existing heuristic using MB52 data; sorts by priority asc, then `due_date - process_time`. It does **not** consume the weekly plan today. Only the **future molding dispatcher** will consume `plan_molding` to sequence per pattern slot.
+- **Data pathway:**
+  1. Upload MB52 + Visión in UI (`/actualizar`) → `Repository.import_excel_bytes()` → `sap_mb52`, `sap_vision` tables.
+  2. Auto-trigger: `StrategyOrchestrator.solve_weekly_plan()` → populate strategic input tables → `foundry_planner_engine.solve()` → persist plan tables.
+  3. Tactical dispatch stays MB52-driven; weekly plan is only for the molding dispatcher (to be implemented).
+  4. UI renders both layers: dashboard (KPIs), `/plano-semanal` (strategic view), `/programa` (tactical dispatch).
+- **Multi-process support** (Layer 2 only): 7 processes (terminaciones, toma_de_dureza, mecanizado, etc.) each maintain separate dispatch queues per almacen/process.
 
 ## Project-specific conventions / business rules
-- MB52 import keeps only materials starting with `"436"` and normalizes SAP numeric keys (e.g., 10.0/000010) via `Repository._normalize_sap_key`.
-- “Usable” pieces for rebuild: match configured `sap_centro`/`sap_almacen_terminaciones`, `libre_utilizacion=1`, `en_control_calidad=0`, and require `documento_comercial` + `posicion_sd` + `lote`.
-- Lotes can be alphanumeric; correlativos are derived by extracting digits (`Repository._lote_to_int`).
+- **Excel import**: MB52 keeps only materials starting with `"436"`; normalizes SAP numeric keys (e.g., 10.0/000010) via `Repository._normalize_sap_key`.
+- **Column name normalization**: `excel_io.normalize_col_name()` handles SAP exports with accents, non-breaking spaces → ASCII snake_case.
+- **Usable pieces (Terminaciones)**: match configured `sap_centro`/`sap_almacen_terminaciones`, `libre_utilizacion=1`, `en_control_calidad=0`, require `documento_comercial` + `posicion_sd` + `lote`.
+- **Toma de dureza inversion**: uses opposite predicate (`libre_utilizacion=0 OR en_control_calidad=1`) to track unavailable stock.
+- **Alphanumeric lotes**: correlativos extracted via `Repository._lote_to_int()` (finds first digit group, e.g., `"0030PD0674"` → `30`).
 
 ## Scheduling contract (keep tests in sync)
-- Priority sorting key (see `generate_program`): tests first, then manual priority (from `orderpos_priority`), then by `start_by = fecha_entrega - (vulcanizado + mecanizado + inspeccion_externa)`.
-- Assignment: choose among eligible lines (family allowed) the one with lowest current load.
-- Output rows include: `_row_id`, `prio_kind`, `pedido`, `posicion`, `numero_parte`, `cantidad`, `corr_inicio`, `corr_fin`, `familia`, `fecha_entrega`, `start_by`.
-- If you change scheduling behavior, update `tests/test_scheduler.py`.
+- **Layer 1 (Strategic/Weekly):** MIP solver minimizes weighted lateness. Respects plant-wide constraints: flask capacity per line, global melt deck tonnage, line working hours, pattern wear limits, pouring delays, post-process lead times.
+  - Inputs: `plan_orders_weekly`, `plan_parts_routing`, `plan_capacities_weekly`, `plan_flasks_inventory`, etc.
+  - Outputs: `plan_molding[order_id, week_id, molds_planned]`, `order_results[order_id, start_week, delivery_week, is_late, weeks_late]`.
+- **Layer 2 (Tactical/Hourly):** Enhanced heuristic scheduler. Respects weekly plan allocations from `plan_molding`.
+  - Priority sorting key: **tests first** (`is_test=True`), then **manual priority**, then **`start_by = fecha_entrega - post_process_days`**.
+  - Assignment: choose among eligible lines (family allowed) the one with **lowest current load**, capped by weekly allocation.
+  - Output rows include: `_row_id`, `prio_kind`, `pedido`, `posicion`, `numero_parte`, `cantidad`, `corr_inicio`, `corr_fin`, `familia`, `fecha_entrega`, `start_by`.
+  - If Layer 1 (strategic) changes, Layer 2 regenerates automatically via `auto_generate_and_save_all()`.
+- **If you change either scheduling behavior**, update `tests/test_scheduler.py` + strategic integration tests.
 
 ## NiceGUI UI conventions used here
 - Pages render consistent layout via `render_nav(active=...)` + `page_container()`.
 - Avoid raw HTML/sanitization workarounds; prefer NiceGUI components.
+- Use `asyncio.to_thread()` for blocking DB/Excel ops in UI callbacks to keep UI responsive.
+- Both strategic (`/plano-semanal`) and tactical (`/programa`) views accessible from same dashboard.
+
+## Integration with foundry_planner_engine
+- Engine is a **pure library** (no UI, no database logic).
+- Called via `StrategyOrchestrator.solve_weekly_plan()` (orchestrator pattern).
+- Inputs populated by `StrategyDataBridge` (ETL from SAP + config).
+- Outputs read by `StrategyResultReader` (for UI + Layer 2 triggering).
+- See [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md) for detailed design and phased rollout.

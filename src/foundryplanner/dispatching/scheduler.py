@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from plannerterm.core.models import Line, Order, Part
+from foundryplanner.dispatching.models import Line, Order, Part
 
 
 def generate_program(

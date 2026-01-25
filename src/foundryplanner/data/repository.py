@@ -4,9 +4,9 @@ import json
 import re
 from datetime import date, datetime
 
-from plannerterm.core.models import Line, Order, Part
-from plannerterm.data.db import Db
-from plannerterm.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
+from foundryplanner.dispatching.models import Line, Order, Part
+from foundryplanner.data.db import Db
+from foundryplanner.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
 
 
 class Repository:
@@ -284,6 +284,23 @@ class Repository:
             )
 
         return out
+
+    # --- Strategic planning helpers (stubs) ---
+
+    def get_strategy_data_bridge(self):
+        from foundryplanner.planning import StrategyDataBridge
+
+        return StrategyDataBridge(self)
+
+    def get_strategy_result_reader(self):
+        from foundryplanner.planning import StrategyResultReader
+
+        return StrategyResultReader(self)
+
+    def get_strategy_orchestrator(self):
+        from foundryplanner.planning import StrategyOrchestrator
+
+        return StrategyOrchestrator(self)
 
     def get_sap_orderpos_missing_vision_rows(self, *, limit: int = 200) -> list[dict]:
         """Usable MB52 pieces (with pedido/pos/lote) that don't match any Vision row."""

@@ -7,10 +7,10 @@ from pathlib import Path
 
 from nicegui import app, ui
 
-from plannerterm.settings import Settings, default_db_path
-from plannerterm.data.db import Db
-from plannerterm.data.repository import Repository
-from plannerterm.ui.pages import register_pages
+from foundryplanner.settings import Settings, default_db_path
+from foundryplanner.data.db import Db
+from foundryplanner.data.repository import Repository
+from foundryplanner.ui.pages import register_pages
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -38,6 +38,7 @@ def main() -> None:
     if sys.platform == "win32":
         @app.on_startup
         async def _silence_windows_connection_reset() -> None:
+            # Suppress noisy ConnectionResetError 10054 from Windows clients dropping websockets.
             loop = asyncio.get_running_loop()
 
             def _handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
@@ -48,7 +49,7 @@ def main() -> None:
 
             loop.set_exception_handler(_handler)
 
-        ui.run(host=settings.host, port=settings.port, title=planta, reload=False)
+    ui.run(host=settings.host, port=settings.port, title=planta, reload=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

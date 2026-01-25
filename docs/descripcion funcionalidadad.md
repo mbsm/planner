@@ -1,5 +1,5 @@
 
-# PlannerTerm – Descripción funcional (SAP)
+# FoundryPlanner – Descripción funcional (SAP)
 
 ## Objetivo
 El planificador genera el **programa (secuencia/colas de trabajo)** por cada línea productiva de terminaciones.

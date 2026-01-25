@@ -3,10 +3,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "plannerterm"
+name = "foundryplanner"
 version = "0.1.0"
-description = "Programación de Terminaciones (NiceGUI + SQLite)"
-requires-python = ">=3.11"
+description = "FoundryPlanner: planificación estratégica + despacho táctico (NiceGUI + SQLite)"
+requires-python = ">=3.14"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

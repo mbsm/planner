@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: plannerterm
-Version: 0.1.0
-Summary: Programación de Terminaciones (NiceGUI + SQLite)
-Requires-Python: >=3.11

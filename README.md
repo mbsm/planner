@@ -1,38 +1,63 @@
-# PlannerTerm (Programación Terminaciones)
+# FoundryPlanner (Planificación Integral de Planta)
 
-App web (NiceGUI) para generar colas de trabajo por línea a partir de **stock usable (SAP MB52)** + **Visión Planta** + maestro local (familias + tiempos), persistiendo en SQLite.
+Plataforma de planificación de producción (NiceGUI + SQLite) con **dos capas**:
+
+1. **Planificación Estratégica (Semanal):** Genera planes de producción respetando capacidades globales de la planta (moldeadoras, pailas, flasks). Usa optimización matemática (MIP) para minimizar atrasos ponderados. [*Powered by [foundry_planner_engine](https://github.com/mbsm/foundry_planner_engine)*]
+2. **Despacho Táctico (Horario):** Colas de trabajo por línea derivadas del plan semanal + stock usable (SAP MB52) + Visión Planta, con maestro local (familias + tiempos).
 
 Incluye:
-- **Programas de Producción** por línea (por proceso/almacén)
+- **Plan Semanal**: asignación de molds por orden/semana respetando restricciones de planta
+- **Programas de Producción** por línea (derivados del plan semanal)
 - **KPI diario** (Visión): tons por entregar y tons atrasadas + gráfico histórico
 - **Avance Producción** (MB52): reporte de salidas brutas vs MB52 anterior, mapeadas al último programa
 
 ## Requisitos
-- Windows
-- Python 3.11+
+- **Windows** (primary) o **macOS/Linux** (development)
+- Python 3.14+
+- Submódulos inicializados: `git submodule update --init --recursive`
 
 ## Instalación
 Desde la carpeta raíz del workspace (donde está `.venv`):
 
+1. Inicializa el motor estratégico vendorizado:
+
+```bash
+git submodule update --init --recursive
+```
+
+2. Instala dependencias Python:
+
+**Windows:**
 ```powershell
-# instalar dependencias
-\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+**macOS/Linux:**
+```bash
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ## Ejecutar
 
+**Windows:**
 ```powershell
-\.venv\Scripts\python.exe run_app.py --port 8080
+.venv\Scripts\python.exe run_app.py --port 8080
+```
+
+**macOS/Linux:**
+```bash
+.venv/bin/python run_app.py --port 8080
 ```
 
 Luego abre http://localhost:8080
 
 Navegación en la app:
-- **Dashboard**: métricas rápidas.
-- **Programa**: colas por línea (se guarda en SQLite como “último programa”).
-- **Actualizar**: carga de MB52 + Visión Planta desde Excel.
+- **Dashboard**: métricas rápidas (KPI Visión, avance producción).
+- **Plan Semanal** *(NEW)*: vista estratégica del plan semanal; detalles de latencias por orden.
+- **Programa**: colas por línea derivadas del plan semanal (se guarda en SQLite como "última programa").
+- **Actualizar**: carga de MB52 + Visión Planta desde Excel (dispara replanificación automática).
 - **Avance Producción**: reporte de salidas (MB52) por línea vs el último programa.
-- **Config** (dropdown): Configuración de líneas / Familias / Tiempos de proceso.
+- **Config** (dropdown): Configuración de líneas / Familias / Tiempos de proceso / Parámetros de capacidad.
 
 ## Operación rápida
 1. Ir a **Actualizar** y verificar Centro/Almacén (defaults: `4000` / `4035`).
@@ -48,8 +73,14 @@ Notas:
 
 ## Tests
 
+**Windows:**
 ```powershell
-\.venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m pytest
+```
+
+**macOS/Linux:**
+```bash
+.venv/bin/python -m pytest
 ```
 
 ## Datos esperados (SAP)
@@ -68,6 +99,7 @@ Luego cruza MB52 (Documento comercial + Posición SD) contra Visión (Pedido + P
 
 Notas de estado (importante):
 - Al subir MB52 o Visión, la app **reemplaza** el contenido previamente importado de ese mismo archivo.
+- **El plan semanal se recalcula automáticamente** (aprovecha cambios en SAP + config).
 - El programa/rangos se recalculan cuando están ambos archivos disponibles.
 - El maestro local de producto (familias + tiempos) **se mantiene** y no se borra al importar SAP.
 
@@ -88,13 +120,22 @@ Si importas pedidos con números de parte que no tienen estos tiempos definidos,
 
 Al importar pedidos o cambiar configuración (familias/tiempos/líneas), la app intenta **actualizar automáticamente el programa**. Si faltan datos, muestra un aviso indicando qué completar.
 
+## Arquitectura de Dos Capas
+
+See [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md) for detailed two-layer design:
+- **Layer 1 (Strategic):** Weekly MIP-based planner using [foundry_planner_engine](https://github.com/mbsm/foundry_planner_engine)
+- **Layer 2 (Tactical):** Heurístico basado en MB52 (prioridad asc, luego fecha_entrega - tiempos). No consume el plan semanal hoy; solo el futuro dispatcher de moldeo usará `plan_molding` para secuenciar por patrón.
+
 ## Notas
 - Persistencia en SQLite local (archivo `.db`).
-- El scheduler v1 es heurístico (orden por fecha y asignación a líneas elegibles por familia).
+- **Planificación estratégica (semanal):** Optimización matemática (minimiza atrasos ponderados).
+- **Despacho táctico (horario):** Heurística (orden por fecha entrega + carga de línea).
+- Capacidades respetadas: flasks, tonelaje de paila (melt deck), horas/línea, límites por patrón.
 
 ## Documentación
-- Formatos SAP (MB52/Visión): ver [docs/formato_excel.md](docs/formato_excel.md)
-- Descripción funcional (SAP): ver [docs/descripcion funcionalidadad.md](docs/descripcion%20funcionalidadad.md)
-- Parámetros/configuración: ver [docs/configuracion.md](docs/configuracion.md)
-- Solución de problemas: ver [docs/troubleshooting.md](docs/troubleshooting.md)
+- Arquitectura de integración: [INTEGRATION_ARCHITECTURE.md](INTEGRATION_ARCHITECTURE.md)
+- Formatos SAP (MB52/Visión): [docs/formato_excel.md](docs/formato_excel.md)
+- Descripción funcional (SAP): [docs/descripcion funcionalidadad.md](docs/descripcion%20funcionalidadad.md)
+- Parámetros/configuración: [docs/configuracion.md](docs/configuracion.md)
+- Solución de problemas: [docs/troubleshooting.md](docs/troubleshooting.md)
 

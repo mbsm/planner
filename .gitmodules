@@ -1,0 +1,3 @@
+[submodule "external/foundry_planner_engine"]
+	path = external/foundry_planner_engine
+	url = https://github.com/mbsm/foundry_planner_engine.git

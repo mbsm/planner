@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 from nicegui import ui
 
-from plannerterm.data.repository import Repository
+from foundryplanner.data.repository import Repository
 
 
 _THEME_APPLIED = False
@@ -68,6 +68,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
         pass
     sections: list[tuple[str, str, str]] = [
         ("dashboard", "Pedidos", "/"),
+        ("plano_semanal", "Plan semanal", "/plano-semanal"),
         ("actualizar", "Actualizar", "/actualizar"),
     ]
     production_program_active = active_key in {
@@ -99,7 +100,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                     btn.style("color: rgb(0, 120, 190);")
 
                 prog_props = "dense no-caps" + (" unelevated" if production_program_active else " flat")
-                with ui.button("Programas Producción", icon="factory").props(prog_props) as _prog_btn:
+                with ui.button("Dispatch Producción", icon="factory").props(prog_props) as _prog_btn:
                     _prog_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(

@@ -298,6 +298,29 @@ class Db:
                     except Exception:
                         pass
 
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS programa (
+                    process TEXT NOT NULL,
+                    line_id INTEGER NOT NULL,
+                    pedido TEXT NOT NULL,
+                    posicion TEXT NOT NULL,
+                    numero_parte TEXT NOT NULL,
+                    corr_inicio INTEGER NOT NULL,
+                    corr_fin INTEGER NOT NULL,
+                    cantidad INTEGER NOT NULL,
+                    prio_kind TEXT,
+                    start_by TEXT,
+                    fecha_entrega TEXT,
+                    familia TEXT,
+                    PRIMARY KEY (process, line_id, pedido, posicion, numero_parte, corr_inicio, corr_fin)
+                );
+                """
+            )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_programa_process_line ON programa(process, line_id)"
+            )
+
             # program_in_progress: locks to keep selected order positions pinned per line.
             # Keyed by (process, pedido, posicion, is_test).
             try:
@@ -473,3 +496,148 @@ class Db:
                         )
                 except Exception:
                     pass
+
+            # ----- Schema versioning -----
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL, upgraded_at TEXT)"
+            )
+            row = con.execute("SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1").fetchone()
+            current_version = int(row[0]) if row and row[0] is not None else 4
+            if row is None:
+                con.execute("INSERT INTO schema_version(version, upgraded_at) VALUES(?, datetime('now'))", (current_version,))
+
+            if current_version < 5:
+                self._migrate_to_v5(con)
+                con.execute(
+                    "INSERT INTO schema_version(version, upgraded_at) VALUES(?, datetime('now'))",
+                    (5,),
+                )
+
+
+    def _migrate_to_v5(self, con: sqlite3.Connection) -> None:
+        """Add strategic planning tables (inputs/outputs) for foundry_planner_engine."""
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS plan_orders_weekly (
+                process TEXT NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                numero_parte TEXT NOT NULL,
+                demand_molds INTEGER NOT NULL,
+                due_week INTEGER,
+                priority INTEGER DEFAULT 0,
+                PRIMARY KEY (process, pedido, posicion)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_parts_routing (
+                numero_parte TEXT PRIMARY KEY,
+                weight_ton REAL,
+                cooling_time_days INTEGER,
+                lead_time_days INTEGER,
+                pattern_wear_limit INTEGER,
+                family TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_molding_lines_config (
+                process TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                hours_per_week REAL,
+                molds_per_hour REAL,
+                pattern_wear_limit INTEGER,
+                PRIMARY KEY (process, line_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_flasks_inventory (
+                flask_size TEXT PRIMARY KEY,
+                quantity INTEGER NOT NULL,
+                allowed_lines TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_capacities_weekly (
+                process TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                week_id INTEGER NOT NULL,
+                hours_available REAL,
+                molds_capacity INTEGER,
+                PRIMARY KEY (process, line_id, week_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_global_capacities_weekly (
+                week_id INTEGER PRIMARY KEY,
+                melt_deck_tons REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_initial_flask_usage (
+                flask_size TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                molds_in_use INTEGER NOT NULL,
+                PRIMARY KEY (flask_size, line_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_molding (
+                process TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                week_id INTEGER NOT NULL,
+                molds_planned INTEGER NOT NULL,
+                PRIMARY KEY (process, line_id, pedido, posicion, week_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_pouring (
+                process TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                week_id INTEGER NOT NULL,
+                molds_poured INTEGER NOT NULL,
+                PRIMARY KEY (process, line_id, pedido, posicion, week_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_shakeout (
+                process TEXT NOT NULL,
+                line_id INTEGER NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                week_id INTEGER NOT NULL,
+                molds_released INTEGER NOT NULL,
+                PRIMARY KEY (process, line_id, pedido, posicion, week_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_completion (
+                process TEXT NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                ready_week INTEGER,
+                PRIMARY KEY (process, pedido, posicion)
+            );
+
+            CREATE TABLE IF NOT EXISTS order_results (
+                process TEXT NOT NULL,
+                pedido TEXT NOT NULL,
+                posicion TEXT NOT NULL,
+                start_week INTEGER,
+                delivery_week INTEGER,
+                is_late INTEGER NOT NULL DEFAULT 0,
+                weeks_late INTEGER DEFAULT 0,
+                PRIMARY KEY (process, pedido, posicion)
+            );
+            """
+        )
+
+        # Indexes to speed up plan lookups
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plan_molding_order_week ON plan_molding(pedido, posicion, week_id)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plan_pouring_order_week ON plan_pouring(pedido, posicion, week_id)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plan_shakeout_order_week ON plan_shakeout(pedido, posicion, week_id)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plan_capacities_week ON plan_capacities_weekly(process, week_id, line_id)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_results_process ON order_results(process, pedido, posicion)"
+        )

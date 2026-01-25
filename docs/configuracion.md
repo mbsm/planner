@@ -1,6 +1,6 @@
 # Configuración
 
-PlannerTerm guarda parámetros en SQLite y se administran desde **Config** dentro de la app.
+FoundryPlanner guarda parámetros en SQLite y se administran desde **Config** dentro de la app.
 
 ## Parámetros SAP
 

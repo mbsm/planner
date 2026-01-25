@@ -5,9 +5,9 @@ from datetime import date, datetime
 
 from nicegui import ui
 
-from plannerterm.core.scheduler import generate_program
-from plannerterm.data.repository import Repository
-from plannerterm.ui.widgets import page_container, render_line_tables, render_nav
+from foundryplanner.dispatching.scheduler import generate_program
+from foundryplanner.data.repository import Repository
+from foundryplanner.ui.widgets import page_container, render_line_tables, render_nav
 
 
 def register_pages(repo: Repository) -> None:
@@ -86,6 +86,20 @@ def register_pages(repo: Repository) -> None:
             await refresh_from_sap_all(notify=notify)
 
         asyncio.create_task(_runner())
+
+    @ui.page("/plano-semanal")
+    def weekly_plan() -> None:
+        render_nav(repo=repo, active="plano_semanal")
+        with page_container():
+            ui.label("Plan semanal (vista estratégica)").classes("text-2xl font-semibold")
+            ui.separator()
+            ui.label(
+                "Esta vista mostrará el plan semanal generado por foundry_planner_engine. "
+                "Usa las tablas compartidas de orders y parts; el dispatcher actual sigue independiente."
+            ).classes("text-sm text-slate-600 max-w-3xl")
+            ui.label(
+                "Próximamente: KPIs por pedido, asignación de molds por línea/semana y heatmaps de capacidad."
+            ).classes("text-sm text-slate-600 max-w-3xl")
 
     @ui.page("/")
     def dashboard() -> None:

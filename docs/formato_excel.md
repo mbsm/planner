@@ -1,6 +1,6 @@
 # Formato Excel (SAP)
 
-PlannerTerm importa **2 archivos Excel** en `.xlsx` leyendo **solo la primera hoja**:
+FoundryPlanner importa **2 archivos Excel** en `.xlsx` leyendo **solo la primera hoja**:
 
 1. **MB52** (stock por pieza/lote)
 2. **Visión Planta** (pedido/posición, fechas y pesos)

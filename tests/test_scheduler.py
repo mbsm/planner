@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from plannerterm.core.models import Line, Order, Part
-from plannerterm.core.scheduler import generate_program
+from foundryplanner.dispatching.models import Line, Order, Part
+from foundryplanner.dispatching.scheduler import generate_program
 
 
 def test_generate_program_orders_by_due_date_and_eligibility():
