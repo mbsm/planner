@@ -1250,6 +1250,40 @@ def register_pages(repo: Repository) -> None:
                     "Estos cambios aplican en la próxima ejecución del plan."
                 ).classes("text-sm text-slate-600 max-w-3xl")
 
+                def save_solver_cfg():
+                    try:
+                        tl = int(float(time_limit_in.value or 0))
+                        if tl <= 0:
+                            raise ValueError("time_limit_seconds inválido")
+                        mg = float(mip_gap_in.value or 0.0)
+                        if mg < 0.0 or mg > 1.0:
+                            raise ValueError("mip_gap debe estar entre 0 y 1")
+                        hz = int(float(horizon_in.value or 0))
+                        if hz <= 0:
+                            raise ValueError("planning_horizon_weeks inválido")
+
+                        repo.set_config(key="strategy_time_limit_seconds", value=str(tl))
+                        repo.set_config(key="strategy_mip_gap", value=str(mg))
+                        repo.set_config(key="strategy_planning_horizon_weeks", value=str(hz))
+
+                        th_val = threads_in.value
+                        if th_val is None or str(th_val).strip() == "":
+                            repo.set_config(key="strategy_solver_threads", value="")
+                        else:
+                            repo.set_config(key="strategy_solver_threads", value=str(int(float(th_val))))
+
+                        repo.set_config(
+                            key="strategy_solver_msg",
+                            value="1" if bool(solver_msg_chk.value) else "0",
+                        )
+                        ui.notify("Configuración del solver guardada")
+                    except Exception as ex:
+                        ui.notify(f"Error: {ex}", color="negative")
+
+                ui.button("Guardar solver", on_click=save_solver_cfg).props("unelevated dense color=primary").classes(
+                    "mt-2"
+                )
+
             # ========== RESTRICCIONES DE PLANTA / FUSIÓN ==========
             plant_exp = ui.expansion(value=False).classes("w-full")
             with plant_exp.add_slot("header"):
@@ -1303,6 +1337,29 @@ def register_pages(repo: Repository) -> None:
                 fusion_shifts_in.on("change", lambda _: update_steel_label())
                 pours_per_shift_in.on("change", lambda _: update_steel_label())
                 tons_per_pour_in.on("change", lambda _: update_steel_label())
+
+                def save_fusion_cfg():
+                    try:
+                        fs = int(float(fusion_shifts_in.value or 0))
+                        if fs < 0:
+                            raise ValueError("fusion_shifts_per_week inválido")
+                        pps = int(float(pours_per_shift_in.value or 0))
+                        if pps < 0:
+                            raise ValueError("pours_per_shift inválido")
+                        tpp = float(tons_per_pour_in.value or 0.0)
+                        if tpp < 0:
+                            raise ValueError("tons_per_pour inválido")
+
+                        repo.set_config(key="strategy_fusion_shifts_per_week", value=str(fs))
+                        repo.set_config(key="strategy_pours_per_shift", value=str(pps))
+                        repo.set_config(key="strategy_tons_per_pour", value=str(tpp))
+                        ui.notify("Configuración de fusión guardada")
+                    except Exception as ex:
+                        ui.notify(f"Error: {ex}", color="negative")
+
+                ui.button("Guardar fusión", on_click=save_fusion_cfg).props("unelevated dense color=primary").classes(
+                    "mt-2"
+                )
 
             # ========== CENTROS DE MOLDEO ==========
             centers_exp = ui.expansion(value=False).classes("w-full")
@@ -1506,63 +1563,20 @@ def register_pages(repo: Repository) -> None:
                     value=str(repo.get_config(key="strategy_holidays", default="") or ""),
                 ).classes("w-full max-w-3xl")
 
-            # ========== GUARDAR ==========
-            def save_planner_cfg() -> None:
-                try:
-                    tl = int(float(time_limit_in.value or 0))
-                    if tl <= 0:
-                        raise ValueError("time_limit_seconds inválido")
+                def save_calendar_cfg():
+                    try:
+                        hol = str(holidays_in.value or "").strip()
+                        repo.set_config(key="strategy_holidays", value=hol)
+                        ui.notify("Calendario guardado")
+                    except Exception as ex:
+                        ui.notify(f"Error: {ex}", color="negative")
 
-                    mg = float(mip_gap_in.value or 0.0)
-                    if mg < 0.0 or mg > 1.0:
-                        raise ValueError("mip_gap debe estar entre 0 y 1")
+                ui.button("Guardar calendario", on_click=save_calendar_cfg).props(
+                    "unelevated dense color=primary"
+                ).classes("mt-2")
 
-                    hz = int(float(horizon_in.value or 0))
-                    if hz <= 0:
-                        raise ValueError("planning_horizon_weeks inválido")
-
-                    repo.set_config(key="strategy_time_limit_seconds", value=str(tl))
-                    repo.set_config(key="strategy_mip_gap", value=str(mg))
-                    repo.set_config(key="strategy_planning_horizon_weeks", value=str(hz))
-
-                    th_val = threads_in.value
-                    if th_val is None or str(th_val).strip() == "":
-                        repo.set_config(key="strategy_solver_threads", value="")
-                    else:
-                        repo.set_config(key="strategy_solver_threads", value=str(int(float(th_val))))
-
-                    repo.set_config(
-                        key="strategy_solver_msg",
-                        value="1" if bool(solver_msg_chk.value) else "0",
-                    )
-
-                    # Fusion parameters
-                    fs = int(float(fusion_shifts_in.value or 0))
-                    if fs < 0:
-                        raise ValueError("fusion_shifts_per_week inválido")
-
-                    pps = int(float(pours_per_shift_in.value or 0))
-                    if pps < 0:
-                        raise ValueError("pours_per_shift inválido")
-
-                    tpp = float(tons_per_pour_in.value or 0.0)
-                    if tpp < 0:
-                        raise ValueError("tons_per_pour inválido")
-
-                    hol = str(holidays_in.value or "").strip()
-
-                    repo.set_config(key="strategy_fusion_shifts_per_week", value=str(fs))
-                    repo.set_config(key="strategy_pours_per_shift", value=str(pps))
-                    repo.set_config(key="strategy_tons_per_pour", value=str(tpp))
-                    repo.set_config(key="strategy_holidays", value=hol)
-
-                    ui.notify("Configuración del planificador guardada")
-                    ui.navigate.to("/config/planificador")
-                except Exception as ex:
-                    ui.notify(f"Error guardando configuración: {ex}", color="negative")
-
+            # ========== RESTAURAR DEFAULTS ==========
             with ui.row().classes("items-center gap-3 pt-4"):
-                ui.button("Guardar", on_click=save_planner_cfg).props("unelevated color=primary")
                 ui.button(
                     "Restaurar defaults",
                     on_click=lambda: (
