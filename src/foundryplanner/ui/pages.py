@@ -22,13 +22,13 @@ def register_pages(repo: Repository) -> None:
             if result.get("status") == "success":
                 repo.set_config(key="strategy_last_solve_at", value=datetime.utcnow().isoformat())
                 if notify:
-                    client.notify("Plan semanal generado")
+                    ui.notify("Plan semanal generado")
             else:
                 if notify:
-                    client.notify(f"Plan no resuelto: {result.get('message')}", color="warning")
+                    ui.notify(f"Plan no resuelto: {result.get('message')}", color="warning")
         except Exception as ex:
             if notify:
-                client.notify(f"Error resolviendo plan: {ex}", color="negative")
+                ui.notify(f"Error resolviendo plan: {ex}", color="negative")
 
     def auto_generate_and_save(*, process: str = "terminaciones", notify: bool = True) -> bool:
         process = str(process or "terminaciones").strip().lower()
