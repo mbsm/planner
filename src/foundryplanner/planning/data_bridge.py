@@ -63,10 +63,17 @@ class StrategyDataBridge:
         return set(range(n))
 
     def _effective_workdays_for_week(self, week_id: int) -> int:
+        """Calculate effective work days for a week considering holidays.
+        
+        Uses a default of 5 working days per week (Mon-Fri).
+        Capacity per center is now driven by shifts_per_week × molds_per_shift,
+        but global pouring capacity still needs workdays calculation.
+        """
         today = date.today()
         week_zero = today - timedelta(days=today.weekday())
         start = week_zero + timedelta(days=7 * int(week_id))
 
+        # Default to 5-day work week for pouring calculations
         working_days_per_week = self._get_int_cfg("strategy_working_days_per_week", 5)
         workdays = self._workday_weekday_set(working_days_per_week)
         holidays = self._parse_holidays()
@@ -364,18 +371,31 @@ class StrategyDataBridge:
         return len(rows_to_insert)
 
     def populate_capacities_weekly(self, process: str = "terminaciones", week_range: tuple[int, int] = (0, 40)) -> int:
-        """Build `capacities_weekly` table for engine."""
-        lines = self.repo.get_lines_model(process=process)
-
-        molds_per_day = self._get_int_cfg("strategy_molds_per_day_per_line", 25)
+        """Build `capacities_weekly` table for engine.
+        
+        Capacity per week per center = shifts_per_week × molds_per_shift.
+        Uses molding_centers table instead of global config.
+        """
+        centers = self.repo.list_molding_centers()
         
         rows_to_insert = []
         for week_id in range(week_range[0], week_range[1]):
-            eff_days = self._effective_workdays_for_week(week_id)
-            max_molds = max(0, int(molds_per_day) * int(eff_days))
-            for line in lines:
-                line_id = f"L{line.line_id}"
+            for c in centers:
+                cid = c["center_id"]
+                spw = c.get("shifts_per_week", 10)
+                mps = c.get("molds_per_shift", 25)
+                max_molds = max(0, int(spw) * int(mps))
+                line_id = f"C{cid}"  # Use center ID as line ID
                 rows_to_insert.append((week_id, line_id, max_molds))
+        
+        # If no centers defined, fall back to dispatcher lines with default capacity
+        if not centers:
+            lines = self.repo.get_lines_model(process=process)
+            default_molds_week = 10 * 25  # 10 shifts × 25 molds
+            for week_id in range(week_range[0], week_range[1]):
+                for line in lines:
+                    line_id = f"L{line.line_id}"
+                    rows_to_insert.append((week_id, line_id, default_molds_week))
         
         with self._connect_engine_db() as con:
             con.execute(

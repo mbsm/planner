@@ -666,23 +666,41 @@ class Repository:
     def list_molding_centers(self) -> list[dict]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT center_id, COALESCE(name, '') AS name, COALESCE(molds_per_day, 25) AS molds_per_day FROM molding_centers ORDER BY center_id"
+                "SELECT center_id, COALESCE(name, '') AS name, COALESCE(shifts_per_week, 10) AS shifts_per_week, COALESCE(molds_per_shift, 25) AS molds_per_shift FROM molding_centers ORDER BY center_id"
             ).fetchall()
-        return [{"center_id": int(r[0]), "name": str(r[1] or ""), "molds_per_day": int(r[2] or 25)} for r in rows]
+        return [
+            {
+                "center_id": int(r[0]),
+                "name": str(r[1] or ""),
+                "shifts_per_week": int(r[2] or 10),
+                "molds_per_shift": int(r[3] or 25),
+            }
+            for r in rows
+        ]
 
-    def upsert_molding_center(self, *, center_id: int, name: str | None = None, molds_per_day: int | None = None) -> None:
+    def upsert_molding_center(
+        self,
+        *,
+        center_id: int,
+        name: str | None = None,
+        shifts_per_week: int | None = None,
+        molds_per_shift: int | None = None,
+    ) -> None:
         cid = int(center_id)
         if cid <= 0:
             raise ValueError("center_id inválido")
         nm = str(name or "").strip() or None
-        mpd = int(molds_per_day) if molds_per_day is not None else 25
-        if mpd < 0:
-            mpd = 0
+        spw = int(shifts_per_week) if shifts_per_week is not None else 10
+        if spw < 0:
+            spw = 0
+        mps = int(molds_per_shift) if molds_per_shift is not None else 25
+        if mps < 0:
+            mps = 0
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO molding_centers(center_id, name, molds_per_day) VALUES(?, ?, ?) "
-                "ON CONFLICT(center_id) DO UPDATE SET name=excluded.name, molds_per_day=excluded.molds_per_day",
-                (cid, nm, mpd),
+                "INSERT INTO molding_centers(center_id, name, shifts_per_week, molds_per_shift) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(center_id) DO UPDATE SET name=excluded.name, shifts_per_week=excluded.shifts_per_week, molds_per_shift=excluded.molds_per_shift",
+                (cid, nm, spw, mps),
             )
 
     def delete_molding_center(self, *, center_id: int) -> None:

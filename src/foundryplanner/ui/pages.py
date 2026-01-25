@@ -1258,16 +1258,8 @@ def register_pages(repo: Repository) -> None:
             with plant_exp:
                 ui.label(
                     "Estas restricciones alimentan las tablas de capacidad del plan semanal (engine.db): "
-                    "capacidad global de colada y días laborales."
+                    "capacidad global de colada."
                 ).classes("text-sm text-slate-600 max-w-3xl")
-
-                working_days_in = ui.number(
-                    "Días laborales por semana (5–7)",
-                    value=float(repo.get_config(key="strategy_working_days_per_week", default="5") or 5),
-                    min=0,
-                    max=7,
-                    step=1,
-                ).classes("w-72")
 
                 pour_tons_per_day_in = ui.number(
                     "Capacidad de colada (ton/día)",
@@ -1298,8 +1290,8 @@ def register_pages(repo: Repository) -> None:
 
             with centers_exp:
                 ui.label(
-                    "Cada centro de moldeo tiene su capacidad de moldes/día y un inventario de cajas (flasks). "
-                    "Primero define los tipos de caja, luego asigna cantidades por centro."
+                    "Cada centro de moldeo tiene turnos/semana y moldes/turno. "
+                    "Molds/semana = turnos × moldes/turno. Además, inventario de cajas."
                 ).classes("text-sm text-slate-600 max-w-3xl pb-2")
 
                 # --- Tipos de caja ---
@@ -1362,13 +1354,16 @@ def register_pages(repo: Repository) -> None:
                         for c in centers:
                             cid = c["center_id"]
                             cname = c["name"] or f"Centro {cid}"
-                            mpd = c.get("molds_per_day", 25)
+                            spw = c.get("shifts_per_week", 10)
+                            mps = c.get("molds_per_shift", 25)
+                            molds_week = spw * mps
                             boxes = repo.get_molding_center_boxes(center_id=cid)
                             boxes_map = {b["box_code"]: b["quantity"] for b in boxes}
 
                             with ui.card().classes("w-full p-3"):
                                 with ui.row().classes("items-center justify-between w-full"):
                                     ui.label(f"{cid}: {cname}").classes("font-semibold")
+                                    ui.badge(f"{molds_week} moldes/sem").props("outline color=primary")
                                     ui.button(
                                         icon="delete",
                                         on_click=lambda _, cid=cid: (
@@ -1378,20 +1373,31 @@ def register_pages(repo: Repository) -> None:
                                     ).props("flat dense color=negative size=sm")
 
                                 with ui.row().classes("items-end gap-3 pt-1"):
-                                    mpd_in = ui.number(
-                                        "Moldes/día",
-                                        value=mpd,
+                                    spw_in = ui.number(
+                                        "Turnos/semana",
+                                        value=spw,
+                                        min=0,
+                                        max=21,
+                                        step=1,
+                                    ).classes("w-32")
+                                    mps_in = ui.number(
+                                        "Moldes/turno",
+                                        value=mps,
                                         min=0,
                                         step=1,
                                     ).classes("w-32")
-                                    mpd_in.on(
-                                        "change",
-                                        lambda e, cid=cid, nm=cname, inp=mpd_in: repo.upsert_molding_center(
+
+                                    def on_capacity_change(cid=cid, nm=cname, spw_inp=spw_in, mps_inp=mps_in):
+                                        repo.upsert_molding_center(
                                             center_id=cid,
                                             name=nm if nm != f"Centro {cid}" else None,
-                                            molds_per_day=int(inp.value or 0),
-                                        ),
-                                    )
+                                            shifts_per_week=int(spw_inp.value or 0),
+                                            molds_per_shift=int(mps_inp.value or 0),
+                                        )
+                                        refresh_centers()
+
+                                    spw_in.on("change", lambda e, fn=on_capacity_change: fn())
+                                    mps_in.on("change", lambda e, fn=on_capacity_change: fn())
 
                                 if box_types:
                                     ui.label("Inventario de cajas:").classes("text-sm text-slate-600 pt-1")
@@ -1425,21 +1431,29 @@ def register_pages(repo: Repository) -> None:
 
                 with ui.row().classes("items-end gap-2 pt-2"):
                     new_center_id_in = ui.number("ID", value=1, min=1, step=1).classes("w-20")
-                    new_center_name_in = ui.input("Nombre", placeholder="Ej: Centro Norte").classes("w-48")
-                    new_center_mpd_in = ui.number("Moldes/día", value=25, min=0, step=1).classes("w-28")
+                    new_center_name_in = ui.input("Nombre", placeholder="Ej: Centro Norte").classes("w-40")
+                    new_center_spw_in = ui.number("Turnos/sem", value=10, min=0, max=21, step=1).classes("w-28")
+                    new_center_mps_in = ui.number("Moldes/turno", value=25, min=0, step=1).classes("w-28")
 
                     def add_center():
                         cid = int(new_center_id_in.value or 0)
                         name = str(new_center_name_in.value or "").strip()
-                        mpd = int(new_center_mpd_in.value or 25)
+                        spw = int(new_center_spw_in.value or 10)
+                        mps = int(new_center_mps_in.value or 25)
                         if cid <= 0:
                             ui.notify("ID inválido", color="warning")
                             return
                         try:
-                            repo.upsert_molding_center(center_id=cid, name=name or None, molds_per_day=mpd)
+                            repo.upsert_molding_center(
+                                center_id=cid,
+                                name=name or None,
+                                shifts_per_week=spw,
+                                molds_per_shift=mps,
+                            )
                             new_center_id_in.value = cid + 1
                             new_center_name_in.value = ""
-                            new_center_mpd_in.value = 25
+                            new_center_spw_in.value = 10
+                            new_center_mps_in.value = 25
                             refresh_centers()
                             ui.notify(f"Centro {cid} agregado")
                         except Exception as ex:
@@ -1477,10 +1491,6 @@ def register_pages(repo: Repository) -> None:
                         value="1" if bool(solver_msg_chk.value) else "0",
                     )
 
-                    wd = int(float(working_days_in.value or 0))
-                    if wd < 0 or wd > 7:
-                        raise ValueError("working_days_per_week inválido")
-
                     ptd = float(pour_tons_per_day_in.value or 0.0)
                     if ptd < 0:
                         raise ValueError("pour_tons_per_day inválido")
@@ -1491,7 +1501,6 @@ def register_pages(repo: Repository) -> None:
 
                     hol = str(holidays_in.value or "").strip()
 
-                    repo.set_config(key="strategy_working_days_per_week", value=str(wd))
                     repo.set_config(key="strategy_pour_tons_per_day", value=str(ptd))
                     repo.set_config(key="strategy_working_hours_per_week", value=str(wh))
                     repo.set_config(key="strategy_holidays", value=hol)
@@ -1511,7 +1520,6 @@ def register_pages(repo: Repository) -> None:
                         setattr(horizon_in, "value", 40),
                         setattr(threads_in, "value", None),
                         setattr(solver_msg_chk, "value", False),
-                        setattr(working_days_in, "value", 5),
                         setattr(pour_tons_per_day_in, "value", 100),
                         setattr(working_hours_in, "value", 120),
                         setattr(holidays_in, "value", ""),

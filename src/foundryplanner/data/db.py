@@ -228,16 +228,22 @@ class Db:
                 CREATE TABLE IF NOT EXISTS molding_centers (
                     center_id INTEGER PRIMARY KEY,
                     name TEXT,
-                    molds_per_day INTEGER DEFAULT 25
+                    shifts_per_week INTEGER DEFAULT 10,
+                    molds_per_shift INTEGER DEFAULT 25
                 )
                 """
             )
 
-            # Migration: add molds_per_day column if missing (for existing DBs)
+            # Migration: add shifts_per_week and molds_per_shift columns if missing (for existing DBs)
             mc_cols = [r[1] for r in con.execute("PRAGMA table_info(molding_centers)").fetchall()]
-            if "molds_per_day" not in mc_cols:
+            if "shifts_per_week" not in mc_cols:
                 try:
-                    con.execute("ALTER TABLE molding_centers ADD COLUMN molds_per_day INTEGER DEFAULT 25")
+                    con.execute("ALTER TABLE molding_centers ADD COLUMN shifts_per_week INTEGER DEFAULT 10")
+                except Exception:
+                    pass
+            if "molds_per_shift" not in mc_cols:
+                try:
+                    con.execute("ALTER TABLE molding_centers ADD COLUMN molds_per_shift INTEGER DEFAULT 25")
                 except Exception:
                     pass
 
