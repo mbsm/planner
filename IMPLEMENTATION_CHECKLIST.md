@@ -50,42 +50,18 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
 - [x] Document solver configuration options → **See [docs/solver_configuration.md](docs/solver_configuration.md)**
 
 ### Create SAP ↔ Engine Data Mappers (Visión + MB52 Excel uploads only; internal part master)
-- [ ] Implement `StrategyDataBridge` class in `src/foundryplanner/planning/data_bridge.py`:
-  ```python
-  class StrategyDataBridge:
-      def __init__(self, repo: Repository):
-          self.repo = repo
-      
-        def populate_plan_orders_weekly(self, process: str = "terminaciones") -> int:
-          """Join sap_mb52 + sap_vision (+ internal master) → plan_orders_weekly"""
-          # Reuse shared dispatch orders (MB52+Visión filters) as input
-          # Return count of rows inserted
-      
-        def populate_plan_parts_routing(self, process: str = "terminaciones") -> int:
-          """internal part master → plan_parts_routing"""
-      
-      def populate_plan_molding_lines_config(self) -> int:
-          """app_config + configuration → plan_molding_lines_config"""
-      
-      def populate_plan_flasks_inventory(self) -> int:
-          """app_config → plan_flasks_inventory"""
-      
-      def populate_plan_capacities_weekly(self, week_range: tuple = (0, 40)) -> int:
-          """app_config + maintenance windows → plan_capacities_weekly"""
-      
-      def populate_plan_global_capacities(self, week_range: tuple = (0, 40)) -> int:
-          """app_config → plan_global_capacities_weekly (melt deck tonnage)"""
-      
-      def populate_plan_initial_flask_usage(self) -> int:
-          """Current WIP → plan_initial_flask_usage"""
-      
-      def populate_all(self, process: str = "terminaciones") -> dict:
-          """Call all populate_* methods; return summary stats"""
-  ```
-  - [ ] Handle NULL values, missing config gracefully
-  - [ ] Add validation: ensure all required fields present
-  - [ ] Add diagnostics: log what % of data mapped vs skipped
-  - [ ] Scope: source = Excel uploads from SAP (Visión + MB52); future direct SAP connection is out of scope for this phase
+- [x] Implement `StrategyDataBridge` class in `src/foundryplanner/planning/data_bridge.py`:
+  - [x] `populate_plan_orders_weekly` — Join sap_mb52 + sap_vision + internal master → plan_orders_weekly
+  - [x] `populate_plan_parts_routing` — Internal part master → plan_parts_routing
+  - [x] `populate_plan_molding_lines_config` — app_config + configuration → plan_molding_lines_config
+  - [x] `populate_plan_flasks_inventory` — app_config → plan_flasks_inventory
+  - [x] `populate_plan_capacities_weekly` — app_config + maintenance windows → plan_capacities_weekly
+  - [x] `populate_plan_global_capacities` — app_config → plan_global_capacities_weekly (melt deck tonnage)
+  - [x] `populate_plan_initial_flask_usage` — Current WIP → plan_initial_flask_usage
+  - [x] `populate_all` — Call all populate_* methods; return summary stats
+  - [x] Handle NULL values, missing config gracefully
+  - [x] Add validation: ensure all required fields present
+  - [x] Add diagnostics: return summary stats (row counts per table)
 
 - [ ] Implement `StrategyResultReader` class in `src/foundryplanner/planning/result_reader.py`:
   ```python
