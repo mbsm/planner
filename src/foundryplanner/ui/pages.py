@@ -1250,23 +1250,61 @@ def register_pages(repo: Repository) -> None:
                     "Estos cambios aplican en la próxima ejecución del plan."
                 ).classes("text-sm text-slate-600 max-w-3xl")
 
-            # ========== RESTRICCIONES DE PLANTA ==========
+            # ========== RESTRICCIONES DE PLANTA / FUSIÓN ==========
             plant_exp = ui.expansion(value=False).classes("w-full")
             with plant_exp.add_slot("header"):
                 with ui.row().classes("items-center w-full justify-between"):
-                    ui.label("Restricciones de planta").classes("text-base font-semibold")
+                    ui.label("Fusión (capacidad de acero)").classes("text-base font-semibold")
             with plant_exp:
                 ui.label(
-                    "Estas restricciones alimentan las tablas de capacidad del plan semanal (engine.db): "
-                    "capacidad global de colada."
+                    "Estos parámetros determinan la capacidad semanal de acero (ton/semana) = "
+                    "turnos × coladas/turno × ton/colada."
                 ).classes("text-sm text-slate-600 max-w-3xl")
 
-                pour_tons_per_day_in = ui.number(
-                    "Capacidad de colada (ton/día)",
-                    value=float(repo.get_config(key="strategy_pour_tons_per_day", default="100") or 100),
+                fusion_shifts_in = ui.number(
+                    "Turnos de fusión por semana",
+                    value=float(repo.get_config(key="strategy_fusion_shifts_per_week", default="10") or 10),
                     min=0,
-                    step=10,
+                    max=21,
+                    step=1,
                 ).classes("w-72")
+
+                pours_per_shift_in = ui.number(
+                    "Coladas por turno",
+                    value=float(repo.get_config(key="strategy_pours_per_shift", default="2") or 2),
+                    min=0,
+                    step=1,
+                ).classes("w-72")
+
+                tons_per_pour_in = ui.number(
+                    "Toneladas por colada",
+                    value=float(repo.get_config(key="strategy_tons_per_pour", default="50") or 50),
+                    min=0,
+                    step=5,
+                ).classes("w-72")
+
+                # Calculated capacity display
+                def calc_weekly_steel():
+                    try:
+                        shifts = float(fusion_shifts_in.value or 0)
+                        pours = float(pours_per_shift_in.value or 0)
+                        tons = float(tons_per_pour_in.value or 0)
+                        return shifts * pours * tons
+                    except Exception:
+                        return 0.0
+
+                steel_label = ui.label(f"→ Capacidad semanal: {calc_weekly_steel():.0f} ton/semana").classes(
+                    "text-base font-semibold text-primary pt-2"
+                )
+
+                def update_steel_label():
+                    steel_label.text = f"→ Capacidad semanal: {calc_weekly_steel():.0f} ton/semana"
+
+                fusion_shifts_in.on("change", lambda _: update_steel_label())
+                pours_per_shift_in.on("change", lambda _: update_steel_label())
+                tons_per_pour_in.on("change", lambda _: update_steel_label())
+
+                ui.separator()
 
                 working_hours_in = ui.number(
                     "Horas laborables por semana por línea (molding_lines_config)",
@@ -1491,9 +1529,18 @@ def register_pages(repo: Repository) -> None:
                         value="1" if bool(solver_msg_chk.value) else "0",
                     )
 
-                    ptd = float(pour_tons_per_day_in.value or 0.0)
-                    if ptd < 0:
-                        raise ValueError("pour_tons_per_day inválido")
+                    # Fusion parameters
+                    fs = int(float(fusion_shifts_in.value or 0))
+                    if fs < 0:
+                        raise ValueError("fusion_shifts_per_week inválido")
+
+                    pps = int(float(pours_per_shift_in.value or 0))
+                    if pps < 0:
+                        raise ValueError("pours_per_shift inválido")
+
+                    tpp = float(tons_per_pour_in.value or 0.0)
+                    if tpp < 0:
+                        raise ValueError("tons_per_pour inválido")
 
                     wh = float(working_hours_in.value or 0.0)
                     if wh < 0:
@@ -1501,7 +1548,9 @@ def register_pages(repo: Repository) -> None:
 
                     hol = str(holidays_in.value or "").strip()
 
-                    repo.set_config(key="strategy_pour_tons_per_day", value=str(ptd))
+                    repo.set_config(key="strategy_fusion_shifts_per_week", value=str(fs))
+                    repo.set_config(key="strategy_pours_per_shift", value=str(pps))
+                    repo.set_config(key="strategy_tons_per_pour", value=str(tpp))
                     repo.set_config(key="strategy_working_hours_per_week", value=str(wh))
                     repo.set_config(key="strategy_holidays", value=hol)
 
@@ -1520,9 +1569,12 @@ def register_pages(repo: Repository) -> None:
                         setattr(horizon_in, "value", 40),
                         setattr(threads_in, "value", None),
                         setattr(solver_msg_chk, "value", False),
-                        setattr(pour_tons_per_day_in, "value", 100),
+                        setattr(fusion_shifts_in, "value", 10),
+                        setattr(pours_per_shift_in, "value", 2),
+                        setattr(tons_per_pour_in, "value", 50),
                         setattr(working_hours_in, "value", 120),
                         setattr(holidays_in, "value", ""),
+                        update_steel_label(),
                     ),
                 ).props("flat")
 

@@ -411,12 +411,26 @@ class StrategyDataBridge:
         return len(rows_to_insert)
 
     def populate_global_capacities(self, week_range: tuple[int, int] = (0, 40)) -> int:
-        """Build `global_capacities_weekly` table for engine."""
-        pour_tons_per_day = self._get_float_cfg("strategy_pour_tons_per_day", 100.0)
+        """Build `global_capacities_weekly` table for engine.
+        
+        Steel capacity per week = fusion_shifts_per_week × pours_per_shift × tons_per_pour.
+        Holidays reduce the effective capacity proportionally.
+        """
+        fusion_shifts = self._get_int_cfg("strategy_fusion_shifts_per_week", 10)
+        pours_per_shift = self._get_int_cfg("strategy_pours_per_shift", 2)
+        tons_per_pour = self._get_float_cfg("strategy_tons_per_pour", 50.0)
+        
+        # Base weekly capacity (without holidays)
+        base_weekly_tons = float(fusion_shifts) * float(pours_per_shift) * float(tons_per_pour)
+        
         rows_to_insert = []
         for week_id in range(week_range[0], week_range[1]):
+            # Adjust for holidays: reduce capacity proportionally
             eff_days = self._effective_workdays_for_week(week_id)
-            rows_to_insert.append((week_id, float(pour_tons_per_day) * float(eff_days)))
+            # Assume base capacity is for 5 working days
+            holiday_factor = float(eff_days) / 5.0 if eff_days < 5 else 1.0
+            weekly_tons = base_weekly_tons * holiday_factor
+            rows_to_insert.append((week_id, weekly_tons))
         
         with self._connect_engine_db() as con:
             con.execute(
