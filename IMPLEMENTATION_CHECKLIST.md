@@ -63,29 +63,14 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
   - [x] Add validation: ensure all required fields present
   - [x] Add diagnostics: return summary stats (row counts per table)
 
-- [ ] Implement `StrategyResultReader` class in `src/foundryplanner/planning/result_reader.py`:
-  ```python
-  class StrategyResultReader:
-      def __init__(self, repo: Repository):
-          self.repo = repo
-      
-      def get_order_results(self) -> list[dict]:
-          """Read order_results table; return structured KPIs"""
-      
-      def get_molding_plan_by_week(self, week_id: int) -> list[dict]:
-          """Get plan_molding rows for a specific week"""
-      
-      def get_molding_plan_by_order(self, order_id: str) -> list[dict]:
-          """Get plan_molding rows for a specific order"""
-      
-      def get_line_utilization_by_week(self) -> dict[int, float]:
-          """Compute % capacity utilized per line per week"""
-      
-      def get_lateness_summary(self) -> dict:
-          """Count on-time vs late orders; avg weeks late"""
-  ```
-  - [ ] Handle case where plan doesn't exist (return empty/zeros)
-  - [ ] Cache results if needed (e.g., for dashboard refresh)
+- [x] Implement `StrategyResultReader` class in `src/foundryplanner/planning/result_reader.py`:
+  - [x] `get_order_results()` — Read order_results table; return structured KPIs
+  - [x] `get_molding_plan_by_week(week_id)` — Get plan_molding rows for a specific week
+  - [x] `get_molding_plan_by_order(pedido, posicion)` — Get plan_molding rows for a specific order
+  - [x] `get_line_utilization_by_week()` — Compute % capacity utilized per line per week
+  - [x] `get_lateness_summary()` — Count on-time vs late orders; avg weeks late
+  - [x] `get_plan_summary()` — High-level KPIs for dashboard
+  - [x] Handle case where plan doesn't exist (return empty/zeros)
 
 ### Implement Repository Extensions
 - [x] Add to `src/foundryplanner/data/repository.py`:
