@@ -375,16 +375,22 @@ class StrategyDataBridge:
         
         Capacity per week per center = shifts_per_week × molds_per_shift.
         Uses molding_centers table instead of global config.
+        Holidays reduce capacity proportionally (based on 5 working days baseline).
         """
         centers = self.repo.list_molding_centers()
         
         rows_to_insert = []
         for week_id in range(week_range[0], week_range[1]):
+            # Calculate holiday factor for this week
+            eff_days = self._effective_workdays_for_week(week_id)
+            holiday_factor = float(eff_days) / 5.0 if eff_days < 5 else 1.0
+            
             for c in centers:
                 cid = c["center_id"]
                 spw = c.get("shifts_per_week", 10)
                 mps = c.get("molds_per_shift", 25)
-                max_molds = max(0, int(spw) * int(mps))
+                base_molds = int(spw) * int(mps)
+                max_molds = max(0, int(base_molds * holiday_factor))
                 line_id = f"C{cid}"  # Use center ID as line ID
                 rows_to_insert.append((week_id, line_id, max_molds))
         
@@ -393,9 +399,12 @@ class StrategyDataBridge:
             lines = self.repo.get_lines_model(process=process)
             default_molds_week = 10 * 25  # 10 shifts × 25 molds
             for week_id in range(week_range[0], week_range[1]):
+                eff_days = self._effective_workdays_for_week(week_id)
+                holiday_factor = float(eff_days) / 5.0 if eff_days < 5 else 1.0
+                max_molds = max(0, int(default_molds_week * holiday_factor))
                 for line in lines:
                     line_id = f"L{line.line_id}"
-                    rows_to_insert.append((week_id, line_id, default_molds_week))
+                    rows_to_insert.append((week_id, line_id, max_molds))
         
         with self._connect_engine_db() as con:
             con.execute(

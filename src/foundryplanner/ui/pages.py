@@ -1304,20 +1304,6 @@ def register_pages(repo: Repository) -> None:
                 pours_per_shift_in.on("change", lambda _: update_steel_label())
                 tons_per_pour_in.on("change", lambda _: update_steel_label())
 
-                ui.separator()
-
-                working_hours_in = ui.number(
-                    "Horas laborables por semana por línea (molding_lines_config)",
-                    value=float(repo.get_config(key="strategy_working_hours_per_week", default="120") or 120),
-                    min=0,
-                    step=1,
-                ).classes("w-72")
-
-                holidays_in = ui.textarea(
-                    "Días festivos (YYYY-MM-DD, uno por línea)",
-                    value=str(repo.get_config(key="strategy_holidays", default="") or ""),
-                ).classes("w-full max-w-3xl")
-
             # ========== CENTROS DE MOLDEO ==========
             centers_exp = ui.expansion(value=False).classes("w-full")
             with centers_exp.add_slot("header"):
@@ -1499,6 +1485,27 @@ def register_pages(repo: Repository) -> None:
 
                     ui.button("Agregar centro", on_click=add_center).props("unelevated dense")
 
+            # ========== CALENDARIO (FERIADOS Y MANTENCIONES) ==========
+            calendar_exp = ui.expansion(value=False).classes("w-full")
+            with calendar_exp.add_slot("header"):
+                with ui.row().classes("items-center w-full justify-between"):
+                    ui.label("Calendario (feriados y mantenciones)").classes("text-base font-semibold")
+            with calendar_exp:
+                ui.label(
+                    "Días no laborables afectan las capacidades semanales de fusión y moldeo. "
+                    "Las capacidades se reducen proporcionalmente según los días hábiles de cada semana."
+                ).classes("text-sm text-slate-600 max-w-3xl")
+
+                ui.label("Días feriados y detenidos por mantenimiento").classes("text-base font-semibold pt-2")
+                ui.label(
+                    "Ingresa un día por línea en formato YYYY-MM-DD. Ejemplo: 2026-01-01"
+                ).classes("text-sm text-slate-500")
+
+                holidays_in = ui.textarea(
+                    "Fechas no laborables",
+                    value=str(repo.get_config(key="strategy_holidays", default="") or ""),
+                ).classes("w-full max-w-3xl")
+
             # ========== GUARDAR ==========
             def save_planner_cfg() -> None:
                 try:
@@ -1542,16 +1549,11 @@ def register_pages(repo: Repository) -> None:
                     if tpp < 0:
                         raise ValueError("tons_per_pour inválido")
 
-                    wh = float(working_hours_in.value or 0.0)
-                    if wh < 0:
-                        raise ValueError("working_hours_per_week inválido")
-
                     hol = str(holidays_in.value or "").strip()
 
                     repo.set_config(key="strategy_fusion_shifts_per_week", value=str(fs))
                     repo.set_config(key="strategy_pours_per_shift", value=str(pps))
                     repo.set_config(key="strategy_tons_per_pour", value=str(tpp))
-                    repo.set_config(key="strategy_working_hours_per_week", value=str(wh))
                     repo.set_config(key="strategy_holidays", value=hol)
 
                     ui.notify("Configuración del planificador guardada")
@@ -1572,7 +1574,6 @@ def register_pages(repo: Repository) -> None:
                         setattr(fusion_shifts_in, "value", 10),
                         setattr(pours_per_shift_in, "value", 2),
                         setattr(tons_per_pour_in, "value", 50),
-                        setattr(working_hours_in, "value", 120),
                         setattr(holidays_in, "value", ""),
                         update_steel_label(),
                     ),
