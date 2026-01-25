@@ -6,7 +6,10 @@ from foundryplanner.planning.engine_adapter import import_engine_solve
 
 
 class StrategyOrchestrator:
-    """Orchestrates weekly solve and dispatch regeneration."""
+    """Orchestrates weekly strategic planning solve.
+    
+    Does NOT trigger dispatch regeneration - dispatch layer is independent.
+    """
 
     def __init__(self, repo: Repository):
         self.repo = repo
@@ -81,52 +84,6 @@ class StrategyOrchestrator:
                 "status": "error",
                 "message": f"Orchestration error: {str(e)}",
                 "stats": {},
-            }
-
-    async def regenerate_dispatch_from_plan(self, *, process: str = "terminaciones") -> dict:
-        """Rebuild dispatch queues constrained by plan_molding.
-
-        Currently calls existing unconstrained dispatcher (future: add weekly plan constraints).
-        
-        Returns:
-            dict with keys: status, message, programs_generated
-        """
-        try:
-            # Read plan_molding to get weekly allocations (future: pass to constrained scheduler)
-            # For now, just regenerate using existing unconstrained logic
-            
-            # Auto-generate dispatch for this process
-            lines = self.repo.get_lines(process=process)
-            orders = self.repo.get_orders_model(process=process)
-            parts = self.repo.get_parts_model()
-            priority_set = self.repo.get_priority_orderpos()
-            
-            from foundryplanner.dispatching.scheduler import generate_program
-            
-            program, errors = generate_program(
-                lines=lines,
-                orders=orders,
-                parts=parts,
-                priority_orderpos=priority_set,
-            )
-            
-            # Save program
-            self.repo.save_last_program(process=process, program=program, errors=errors)
-            
-            total_rows = sum(len(rows) for rows in program.values())
-            
-            return {
-                "status": "success",
-                "message": f"Dispatch regenerated for {process}",
-                "programs_generated": total_rows,
-                "errors": len(errors),
-            }
-        
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Dispatch regeneration error: {str(e)}",
-                "programs_generated": 0,
             }
 
     def _validate_data(self, process: str = "terminaciones") -> dict:

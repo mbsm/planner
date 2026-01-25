@@ -97,49 +97,27 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
 ## Phase 3: Orchestration & Scheduling (Weeks 3-4)
 
 ### Create Strategy Orchestrator
-- [ ] Implement `StrategyOrchestrator` in `src/foundryplanner/planning/orchestrator.py`:
-  ```python
-  class StrategyOrchestrator:
-      def __init__(self, repo: Repository):
-          self.repo = repo
-      
-      async def solve_weekly_plan(self, *, force=False) -> dict:
-          """Orchestrates: validate → ETL → solve → persist → trigger Layer 2"""
-          # 1. Validate SAP data completeness
-          # 2. Populate input tables
-          # 3. Call foundry_planner_engine.solve()
-          # 4. Handle results or errors
-          # 5. Trigger dispatch regeneration
-          return {"status": "success"|"infeasible"|"error", "message": "..."}
-      
-      async def regenerate_dispatch_from_plan(self) -> dict:
-          """Reads plan_molding; calls generate_program_constrained()"""
-          # 1. Read plan_molding allocations
-          # 2. Call enhanced generate_program()
-          # 3. Save resultado
-          return {"status": "success"|"error", "message": "..."}
-  ```
-  - [ ] Add error handling: infeasible → log + alert, don't crash
-  - [ ] Add validation: check for missing config (capacities, parts, etc.)
-  - [ ] Add diagnostics: log ETL stats (rows inserted, skipped, errors)
-  - [ ] Add fallback: if solver fails, keep old plan or fallback to Layer 2 only
+- [x] Implement `StrategyOrchestrator` in `src/foundryplanner/planning/orchestrator.py`:
+  - [x] `solve_weekly_plan()` — Orchestrates: validate → ETL → solve → persist
+    - [x] Validate SAP data completeness
+    - [x] Populate input tables via StrategyDataBridge
+    - [x] Call foundry_planner_engine.solve() with options from app_config
+    - [x] Handle results or errors (success, infeasible, error states)
+  - [x] `_validate_data()` — Check for missing config (capacities, parts, etc.)
+  - [x] Add error handling: infeasible → log + return status, don't crash
+  - [x] Add diagnostics: return ETL stats (rows inserted, skipped, errors)
+  - [x] **REMOVED** regenerate_dispatch_from_plan (dispatcher is independent)
 
-### Enhance Dispatch Layer Scheduler
-- [ ] Modify `src/foundryplanner/dispatching/scheduler.py`:
-  ```python
-  def generate_program_constrained(
-      lines: list[Line],
-      orders: list[Order],
-      parts: list[Part],
-      weekly_plan: dict[str, int] | None = None,  # NEW
-  ) -> tuple[dict[int, list[dict]], list[dict]]:
-      """Enhanced scheduler respecting weekly allocations"""
-      # 1. Sort orders (same as before, but check plan priority)
-      # 2. For each order, cap by weekly_plan[order_id] if available
-      # 3. Assign to lowest-load eligible line (respecting cap)
-  ```
-  - [ ] Add tests for constrained vs unconstrained modes
-  - [ ] Ensure backward compatibility (can still call without weekly_plan)
+### Dispatch Layer Independence
+**CONFIRMED** — Dispatcher is completely independent of weekly strategic plan.
+- Only the **future molding dispatcher** will consume `plan_molding` allocations
+- Current `generate_program()` uses MB52+Visión data directly (unconstrained heuristic)
+- `StrategyOrchestrator` does NOT call or trigger dispatch regeneration
+- Dispatch runs on its own schedule/triggers (existing auto_regenerate_programs mechanism)
+- When molding dispatcher is implemented, it will:
+  - Read `plan_molding[order_id, week_id, molds_planned]` to sequence per pattern slot
+  - Respect weekly allocations from strategic plan
+  - Integrate with molding line scheduling UI
 
 ### Add Background Task Runner
 - [ ] Update `src/foundryplanner/app.py`:
@@ -211,9 +189,12 @@ _Status: Ready to proceed to Phase 2; remaining open items are tracked as carryo
 - [ ] Link to `/plano-semanal` for detailed view
 
 ### Update Dispatch View (`/programa`)
-- [ ] Add filter: "Show plan version" dropdown
-- [ ] Highlight source: which orders come from current weekly plan vs ad-hoc
-- [ ] Add constraint indicator: show if actual dispatch ≠ planned (warning)
+**Note:** Current dispatcher is independent of weekly plan (unconstrained heuristic).
+- No changes needed to existing `/programa` view at this time
+- Future enhancement (molding dispatcher):
+  - [ ] Add filter: "Show plan version" dropdown
+  - [ ] Highlight source: which orders come from current weekly plan vs ad-hoc
+  - [ ] Add constraint indicator: show if actual dispatch ≠ planned (warning)
 
 ### Create Documentation
 - [ ] Write `docs/strategic_planning.md`:
