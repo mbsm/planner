@@ -4,7 +4,6 @@ import asyncio
 from datetime import date, datetime
 
 from nicegui import ui
-from nicegui.client import Client
 
 from foundryplanner.data.repository import Repository
 from foundryplanner.dispatching.scheduler import generate_program
@@ -15,20 +14,17 @@ from foundryplanner.ui.widgets import page_container, render_line_tables, render
 def register_pages(repo: Repository) -> None:
     orchestrator = repo.get_strategy_orchestrator() if hasattr(repo, "get_strategy_orchestrator") else StrategyOrchestrator(repo)
 
-    async def force_replan(client: Client, *, notify: bool = True) -> None:
+    async def force_replan() -> None:
         """Manually trigger weekly plan solve (no auto-run on SAP uploads)."""
         try:
             result = await orchestrator.solve_weekly_plan()
             if result.get("status") == "success":
                 repo.set_config(key="strategy_last_solve_at", value=datetime.utcnow().isoformat())
-                if notify:
-                    ui.notify("Plan semanal generado")
+                ui.notify("Plan semanal generado")
             else:
-                if notify:
-                    ui.notify(f"Plan no resuelto: {result.get('message')}", color="warning")
+                ui.notify(f"Plan no resuelto: {result.get('message')}", color="warning")
         except Exception as ex:
-            if notify:
-                ui.notify(f"Error resolviendo plan: {ex}", color="negative")
+            ui.notify(f"Error resolviendo plan: {ex}", color="negative")
 
     def auto_generate_and_save(*, process: str = "terminaciones", notify: bool = True) -> bool:
         process = str(process or "terminaciones").strip().lower()
@@ -122,10 +118,7 @@ def register_pages(repo: Repository) -> None:
 
             with ui.row().classes("items-center gap-3"):
                 ui.label(f"Última planificación semanal: {last_solve}").classes("text-sm text-slate-600")
-                ui.button(
-                    "Forzar planificación",
-                    on_click=lambda e: asyncio.create_task(force_replan(e.client)),
-                ).props("color=primary")
+                ui.button("Forzar planificación", on_click=force_replan).props("color=primary")
             ui.label(
                 "Esta vista mostrará el plan semanal generado por foundry_planner_engine. "
                 "Usa las tablas compartidas de orders y parts; el dispatcher actual sigue independiente."
