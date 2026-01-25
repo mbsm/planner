@@ -24,32 +24,37 @@ class StrategyDataBridge:
         today = date.today()
         week_zero = today - timedelta(days=today.weekday())
         
-        rows_to_insert = []
+        # Aggregate by (pedido, posicion) to avoid duplicates
+        aggregated: dict[tuple[str, str], dict] = {}
         for order in orders:
-            # Convert fecha_entrega to week_id
-            delta_days = (order.fecha_entrega - week_zero).days
-            due_week = max(0, delta_days // 7)
-            
-            # Priority: tests=2, manual=1, normal=0
-            if order.is_test:
-                priority = 2
-            elif (order.pedido, order.posicion) in priority_set:
-                priority = 1
+            key = (order.pedido, order.posicion)
+            if key in aggregated:
+                # Sum quantities if same order appears multiple times
+                aggregated[key]["demand_molds"] += order.cantidad
             else:
-                priority = 0
-            
-            # Demand in molds (assume 1 mold = cantidad for now; engine expects molds)
-            demand_molds = order.cantidad
-            
-            rows_to_insert.append((
-                process,
-                order.pedido,
-                order.posicion,
-                order.numero_parte,
-                demand_molds,
-                due_week,
-                priority,
-            ))
+                # Convert fecha_entrega to week_id
+                delta_days = (order.fecha_entrega - week_zero).days
+                due_week = max(0, delta_days // 7)
+                
+                # Priority: tests=2, manual=1, normal=0
+                if order.is_test:
+                    priority = 2
+                elif key in priority_set:
+                    priority = 1
+                else:
+                    priority = 0
+                
+                aggregated[key] = {
+                    "numero_parte": order.numero_parte,
+                    "demand_molds": order.cantidad,
+                    "due_week": due_week,
+                    "priority": priority,
+                }
+        
+        rows_to_insert = [
+            (process, pedido, posicion, data["numero_parte"], data["demand_molds"], data["due_week"], data["priority"])
+            for (pedido, posicion), data in aggregated.items()
+        ]
         
         with self.repo.db.connect() as con:
             con.execute("DELETE FROM plan_orders_weekly WHERE process = ?", (process,))
