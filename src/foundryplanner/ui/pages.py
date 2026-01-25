@@ -1199,107 +1199,242 @@ def register_pages(repo: Repository) -> None:
             ui.label("Planificador (semanal)").classes("text-2xl font-semibold")
             ui.label("Ajustes del solver MIP (foundry_planner_engine / CBC).").classes("pt-subtitle")
 
-            ui.separator()
-            ui.label("Solver").classes("text-lg font-semibold")
+            # ========== SOLVER ==========
+            solver_exp = ui.expansion(value=True).classes("w-full")
+            with solver_exp.add_slot("header"):
+                with ui.row().classes("items-center w-full justify-between"):
+                    ui.label("Solver").classes("text-base font-semibold")
+            with solver_exp:
+                time_limit_in = ui.number(
+                    "Límite de tiempo (segundos)",
+                    value=float(repo.get_config(key="strategy_time_limit_seconds", default="300") or 300),
+                    min=1,
+                    step=1,
+                ).classes("w-72")
 
-            time_limit_in = ui.number(
-                "Límite de tiempo (segundos)",
-                value=float(repo.get_config(key="strategy_time_limit_seconds", default="300") or 300),
-                min=1,
-                step=1,
-            ).classes("w-72")
+                mip_gap_in = ui.number(
+                    "MIP gap relativo (0.01 = 1%)",
+                    value=float(repo.get_config(key="strategy_mip_gap", default="0.01") or 0.01),
+                    min=0.0,
+                    max=1.0,
+                    step=0.005,
+                ).classes("w-72")
 
-            mip_gap_in = ui.number(
-                "MIP gap relativo (0.01 = 1%)",
-                value=float(repo.get_config(key="strategy_mip_gap", default="0.01") or 0.01),
-                min=0.0,
-                max=1.0,
-                step=0.005,
-            ).classes("w-72")
+                horizon_in = ui.number(
+                    "Horizonte (semanas)",
+                    value=float(repo.get_config(key="strategy_planning_horizon_weeks", default="40") or 40),
+                    min=1,
+                    max=104,
+                    step=1,
+                ).classes("w-72")
 
-            horizon_in = ui.number(
-                "Horizonte (semanas)",
-                value=float(repo.get_config(key="strategy_planning_horizon_weeks", default="40") or 40),
-                min=1,
-                max=104,
-                step=1,
-            ).classes("w-72")
+                threads_in = ui.number(
+                    "Threads (vacío = default)",
+                    value=(
+                        float(repo.get_config(key="strategy_solver_threads", default="") or 0)
+                        if str(repo.get_config(key="strategy_solver_threads", default="") or "").strip()
+                        else None
+                    ),
+                    min=1,
+                    max=64,
+                    step=1,
+                ).classes("w-72")
 
-            threads_in = ui.number(
-                "Threads (vacío = default)",
-                value=(
-                    float(repo.get_config(key="strategy_solver_threads", default="") or 0)
-                    if str(repo.get_config(key="strategy_solver_threads", default="") or "").strip()
-                    else None
-                ),
-                min=1,
-                max=64,
-                step=1,
-            ).classes("w-72")
+                solver_msg_chk = ui.checkbox(
+                    "Mostrar log del solver (debug)",
+                    value=str(repo.get_config(key="strategy_solver_msg", default="0") or "0").strip() == "1",
+                )
 
-            solver_msg_chk = ui.checkbox(
-                "Mostrar log del solver (debug)",
-                value=str(repo.get_config(key="strategy_solver_msg", default="0") or "0").strip() == "1",
-            )
+                ui.label(
+                    "Sugerencias: reduce horizonte (20) y/o sube gap (0.02–0.05) para acelerar. "
+                    "Estos cambios aplican en la próxima ejecución del plan."
+                ).classes("text-sm text-slate-600 max-w-3xl")
 
-            ui.label(
-                "Sugerencias: reduce horizonte (20) y/o sube gap (0.02–0.05) para acelerar. "
-                "Estos cambios aplican en la próxima ejecución del plan."
-            ).classes("text-sm text-slate-600 max-w-3xl")
+            # ========== RESTRICCIONES DE PLANTA ==========
+            plant_exp = ui.expansion(value=False).classes("w-full")
+            with plant_exp.add_slot("header"):
+                with ui.row().classes("items-center w-full justify-between"):
+                    ui.label("Restricciones de planta").classes("text-base font-semibold")
+            with plant_exp:
+                ui.label(
+                    "Estas restricciones alimentan las tablas de capacidad del plan semanal (engine.db): "
+                    "moldes por semana y capacidad global de colada."
+                ).classes("text-sm text-slate-600 max-w-3xl")
 
-            ui.separator()
-            ui.label("Restricciones de planta").classes("text-lg font-semibold")
-            ui.label(
-                "Estas restricciones alimentan las tablas de capacidad del plan semanal (engine.db): "
-                "cajas/flasks, moldes por semana y capacidad global de colada."
-            ).classes("text-sm text-slate-600 max-w-3xl")
+                working_days_in = ui.number(
+                    "Días laborales por semana (5–7)",
+                    value=float(repo.get_config(key="strategy_working_days_per_week", default="5") or 5),
+                    min=0,
+                    max=7,
+                    step=1,
+                ).classes("w-72")
 
-            working_days_in = ui.number(
-                "Días laborales por semana (5–7)",
-                value=float(repo.get_config(key="strategy_working_days_per_week", default="5") or 5),
-                min=0,
-                max=7,
-                step=1,
-            ).classes("w-72")
+                molds_per_day_in = ui.number(
+                    "Moldes por día por línea",
+                    value=float(repo.get_config(key="strategy_molds_per_day_per_line", default="25") or 25),
+                    min=0,
+                    step=1,
+                ).classes("w-72")
 
-            molds_per_day_in = ui.number(
-                "Moldes por día por línea",
-                value=float(repo.get_config(key="strategy_molds_per_day_per_line", default="25") or 25),
-                min=0,
-                step=1,
-            ).classes("w-72")
+                pour_tons_per_day_in = ui.number(
+                    "Capacidad de colada (ton/día)",
+                    value=float(repo.get_config(key="strategy_pour_tons_per_day", default="100") or 100),
+                    min=0,
+                    step=10,
+                ).classes("w-72")
 
-            pour_tons_per_day_in = ui.number(
-                "Capacidad de colada (ton/día)",
-                value=float(repo.get_config(key="strategy_pour_tons_per_day", default="100") or 100),
-                min=0,
-                step=10,
-            ).classes("w-72")
+                working_hours_in = ui.number(
+                    "Horas laborables por semana por línea (molding_lines_config)",
+                    value=float(repo.get_config(key="strategy_working_hours_per_week", default="120") or 120),
+                    min=0,
+                    step=1,
+                ).classes("w-72")
 
-            working_hours_in = ui.number(
-                "Horas laborables por semana por línea (molding_lines_config)",
-                value=float(repo.get_config(key="strategy_working_hours_per_week", default="120") or 120),
-                min=0,
-                step=1,
-            ).classes("w-72")
+                holidays_in = ui.textarea(
+                    "Días festivos (YYYY-MM-DD, uno por línea)",
+                    value=str(repo.get_config(key="strategy_holidays", default="") or ""),
+                ).classes("w-full max-w-3xl")
 
-            flasks_qty_in = ui.number(
-                "Cajas/Flasks por línea y tamaño",
-                value=float(repo.get_config(key="strategy_flasks_qty_per_line", default="25") or 25),
-                min=0,
-                step=1,
-            ).classes("w-72")
+            # ========== CENTROS DE MOLDEO ==========
+            centers_exp = ui.expansion(value=False).classes("w-full")
+            with centers_exp.add_slot("header"):
+                centers_count = len(repo.list_molding_centers())
+                with ui.row().classes("items-center w-full justify-between"):
+                    ui.label("Centros de moldeo").classes("text-base font-semibold")
+                    ui.badge(str(centers_count)).props("outline color=primary")
 
-            flask_sizes_in = ui.input(
-                "Tamaños de caja (coma separada)",
-                value=str(repo.get_config(key="strategy_flask_sizes", default="120,105,146") or "120,105,146"),
-            ).classes("w-96")
+            with centers_exp:
+                ui.label(
+                    "Cada centro de moldeo tiene un inventario de cajas (flasks). "
+                    "Primero define los tipos de caja, luego asigna cantidades por centro."
+                ).classes("text-sm text-slate-600 max-w-3xl pb-2")
 
-            holidays_in = ui.textarea(
-                "Días festivos (YYYY-MM-DD, uno por línea)",
-                value=str(repo.get_config(key="strategy_holidays", default="") or ""),
-            ).classes("w-full max-w-3xl")
+                # --- Tipos de caja ---
+                ui.label("Tipos de caja").classes("text-base font-semibold pt-2")
+                box_types_container = ui.column().classes("w-full gap-1")
 
+                def refresh_box_types():
+                    box_types_container.clear()
+                    rows = repo.list_molding_box_types()
+                    with box_types_container:
+                        for bt in rows:
+                            with ui.row().classes("items-center gap-2"):
+                                ui.label(bt["box_code"]).classes("w-24 font-mono")
+                                ui.label(bt["name"] or "—").classes("w-48 text-slate-600")
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda _, c=bt["box_code"]: (
+                                        repo.delete_molding_box_type(box_code=c),
+                                        refresh_box_types(),
+                                        refresh_centers(),
+                                    ),
+                                ).props("flat dense color=negative size=sm")
+                        if not rows:
+                            ui.label("Sin tipos de caja definidos").classes("text-slate-500 italic")
+
+                refresh_box_types()
+
+                with ui.row().classes("items-end gap-2 pt-2"):
+                    new_box_code_in = ui.input("Código", placeholder="Ej: 120").classes("w-24")
+                    new_box_name_in = ui.input("Nombre", placeholder="Ej: Caja 120mm").classes("w-48")
+
+                    def add_box_type():
+                        code = str(new_box_code_in.value or "").strip()
+                        name = str(new_box_name_in.value or "").strip()
+                        if not code:
+                            ui.notify("Código requerido", color="warning")
+                            return
+                        try:
+                            repo.upsert_molding_box_type(box_code=code, name=name or None)
+                            new_box_code_in.value = ""
+                            new_box_name_in.value = ""
+                            refresh_box_types()
+                            ui.notify(f"Tipo de caja '{code}' agregado")
+                        except Exception as ex:
+                            ui.notify(f"Error: {ex}", color="negative")
+
+                    ui.button("Agregar tipo", on_click=add_box_type).props("unelevated dense")
+
+                ui.separator()
+
+                # --- Centros ---
+                ui.label("Centros").classes("text-base font-semibold pt-2")
+                centers_container = ui.column().classes("w-full gap-2")
+
+                def refresh_centers():
+                    centers_container.clear()
+                    centers = repo.list_molding_centers()
+                    box_types = repo.list_molding_box_types()
+                    with centers_container:
+                        for c in centers:
+                            cid = c["center_id"]
+                            cname = c["name"] or f"Centro {cid}"
+                            boxes = repo.get_molding_center_boxes(center_id=cid)
+                            boxes_map = {b["box_code"]: b["quantity"] for b in boxes}
+
+                            with ui.card().classes("w-full p-3"):
+                                with ui.row().classes("items-center justify-between w-full"):
+                                    ui.label(f"{cid}: {cname}").classes("font-semibold")
+                                    ui.button(
+                                        icon="delete",
+                                        on_click=lambda _, cid=cid: (
+                                            repo.delete_molding_center(center_id=cid),
+                                            refresh_centers(),
+                                        ),
+                                    ).props("flat dense color=negative size=sm")
+
+                                if box_types:
+                                    ui.label("Inventario de cajas:").classes("text-sm text-slate-600 pt-1")
+                                    with ui.row().classes("items-end gap-3 flex-wrap"):
+                                        for bt in box_types:
+                                            bc = bt["box_code"]
+                                            qty = boxes_map.get(bc, 0)
+                                            qty_in = ui.number(
+                                                f"{bc}",
+                                                value=qty,
+                                                min=0,
+                                                step=1,
+                                            ).classes("w-24")
+                                            qty_in.on(
+                                                "change",
+                                                lambda e, cid=cid, bc=bc, inp=qty_in: repo.set_molding_center_box_qty(
+                                                    center_id=cid,
+                                                    box_code=bc,
+                                                    quantity=int(inp.value or 0),
+                                                ),
+                                            )
+                                else:
+                                    ui.label("Define tipos de caja arriba para asignar inventario.").classes(
+                                        "text-sm text-slate-500 italic"
+                                    )
+
+                        if not centers:
+                            ui.label("Sin centros de moldeo definidos").classes("text-slate-500 italic")
+
+                refresh_centers()
+
+                with ui.row().classes("items-end gap-2 pt-2"):
+                    new_center_id_in = ui.number("ID", value=1, min=1, step=1).classes("w-20")
+                    new_center_name_in = ui.input("Nombre", placeholder="Ej: Centro Norte").classes("w-48")
+
+                    def add_center():
+                        cid = int(new_center_id_in.value or 0)
+                        name = str(new_center_name_in.value or "").strip()
+                        if cid <= 0:
+                            ui.notify("ID inválido", color="warning")
+                            return
+                        try:
+                            repo.upsert_molding_center(center_id=cid, name=name or None)
+                            new_center_id_in.value = cid + 1
+                            new_center_name_in.value = ""
+                            refresh_centers()
+                            ui.notify(f"Centro {cid} agregado")
+                        except Exception as ex:
+                            ui.notify(f"Error: {ex}", color="negative")
+
+                    ui.button("Agregar centro", on_click=add_center).props("unelevated dense")
+
+            # ========== GUARDAR ==========
             def save_planner_cfg() -> None:
                 try:
                     tl = int(float(time_limit_in.value or 0))
@@ -1345,19 +1480,12 @@ def register_pages(repo: Repository) -> None:
                     if wh < 0:
                         raise ValueError("working_hours_per_week inválido")
 
-                    fq = int(float(flasks_qty_in.value or 0))
-                    if fq < 0:
-                        raise ValueError("flasks_qty_per_line inválido")
-
-                    fs = str(flask_sizes_in.value or "").strip()
                     hol = str(holidays_in.value or "").strip()
 
                     repo.set_config(key="strategy_working_days_per_week", value=str(wd))
                     repo.set_config(key="strategy_molds_per_day_per_line", value=str(mpd))
                     repo.set_config(key="strategy_pour_tons_per_day", value=str(ptd))
                     repo.set_config(key="strategy_working_hours_per_week", value=str(wh))
-                    repo.set_config(key="strategy_flasks_qty_per_line", value=str(fq))
-                    repo.set_config(key="strategy_flask_sizes", value=fs)
                     repo.set_config(key="strategy_holidays", value=hol)
 
                     ui.notify("Configuración del planificador guardada")
@@ -1365,7 +1493,7 @@ def register_pages(repo: Repository) -> None:
                 except Exception as ex:
                     ui.notify(f"Error guardando configuración: {ex}", color="negative")
 
-            with ui.row().classes("items-center gap-3"):
+            with ui.row().classes("items-center gap-3 pt-4"):
                 ui.button("Guardar", on_click=save_planner_cfg).props("unelevated color=primary")
                 ui.button(
                     "Restaurar defaults",
@@ -1379,8 +1507,6 @@ def register_pages(repo: Repository) -> None:
                         setattr(molds_per_day_in, "value", 25),
                         setattr(pour_tons_per_day_in, "value", 100),
                         setattr(working_hours_in, "value", 120),
-                        setattr(flasks_qty_in, "value", 25),
-                        setattr(flask_sizes_in, "value", "120,105,146"),
                         setattr(holidays_in, "value", ""),
                     ),
                 ).props("flat")
