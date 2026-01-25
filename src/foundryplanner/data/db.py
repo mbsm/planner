@@ -227,10 +227,19 @@ class Db:
                 """
                 CREATE TABLE IF NOT EXISTS molding_centers (
                     center_id INTEGER PRIMARY KEY,
-                    name TEXT
+                    name TEXT,
+                    molds_per_day INTEGER DEFAULT 25
                 )
                 """
             )
+
+            # Migration: add molds_per_day column if missing (for existing DBs)
+            mc_cols = [r[1] for r in con.execute("PRAGMA table_info(molding_centers)").fetchall()]
+            if "molds_per_day" not in mc_cols:
+                try:
+                    con.execute("ALTER TABLE molding_centers ADD COLUMN molds_per_day INTEGER DEFAULT 25")
+                except Exception:
+                    pass
 
             # Box/Flask types catalog (shared across centers)
             con.execute(

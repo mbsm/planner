@@ -666,20 +666,23 @@ class Repository:
     def list_molding_centers(self) -> list[dict]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT center_id, COALESCE(name, '') AS name FROM molding_centers ORDER BY center_id"
+                "SELECT center_id, COALESCE(name, '') AS name, COALESCE(molds_per_day, 25) AS molds_per_day FROM molding_centers ORDER BY center_id"
             ).fetchall()
-        return [{"center_id": int(r[0]), "name": str(r[1] or "")} for r in rows]
+        return [{"center_id": int(r[0]), "name": str(r[1] or ""), "molds_per_day": int(r[2] or 25)} for r in rows]
 
-    def upsert_molding_center(self, *, center_id: int, name: str | None = None) -> None:
+    def upsert_molding_center(self, *, center_id: int, name: str | None = None, molds_per_day: int | None = None) -> None:
         cid = int(center_id)
         if cid <= 0:
             raise ValueError("center_id inválido")
         nm = str(name or "").strip() or None
+        mpd = int(molds_per_day) if molds_per_day is not None else 25
+        if mpd < 0:
+            mpd = 0
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO molding_centers(center_id, name) VALUES(?, ?) "
-                "ON CONFLICT(center_id) DO UPDATE SET name=excluded.name",
-                (cid, nm),
+                "INSERT INTO molding_centers(center_id, name, molds_per_day) VALUES(?, ?, ?) "
+                "ON CONFLICT(center_id) DO UPDATE SET name=excluded.name, molds_per_day=excluded.molds_per_day",
+                (cid, nm, mpd),
             )
 
     def delete_molding_center(self, *, center_id: int) -> None:
