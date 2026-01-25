@@ -109,7 +109,7 @@ def register_pages(repo: Repository) -> None:
         with page_container():
             ui.label("Plan semanal (vista estratégica)").classes("text-2xl font-semibold")
             ui.separator()
-            last_solve_raw = repo.get_config("strategy_last_solve_at")
+            last_solve_raw = repo.get_config(key="strategy_last_solve_at")
             last_solve = "—"
             if last_solve_raw:
                 try:
