@@ -297,65 +297,10 @@ class Db:
                 """
             )
 
-            # ===== BEST-EFFORT MIGRATIONS: Rename legacy tables to v0.2 names =====
-            # families → family_catalog
-            if self._table_exists(con, "families"):
-                try:
-                    con.execute(
-                        "INSERT OR IGNORE INTO family_catalog(family_id, label, is_active) "
-                        "SELECT name, name, 1 FROM families"
-                    )
-                except Exception:
-                    pass
+            # ===== NOTA: No backward compatibility - solo tablas v0.2 =====
+            # No migrations from legacy tables
 
-            # parts → material_master (migrate if parts exists)
-            if self._table_exists(con, "parts"):
-                try:
-                    # First, ensure all families from parts exist in family_catalog
-                    con.execute(
-                        """INSERT OR IGNORE INTO family_catalog(family_id, label, is_active)
-                           SELECT DISTINCT familia, familia, 1 FROM parts WHERE familia IS NOT NULL"""
-                    )
-                    # Get column info from parts table (some columns may not exist in legacy tables)
-                    part_cols = {r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()}
-                    
-                    # Build the SELECT dynamically, using NULL for missing columns
-                    select_parts = [
-                        "numero_parte AS material",
-                        "familia AS family_id",
-                        "NULL AS aleacion",
-                        "NULL AS piezas_por_molde",
-                        "NULL AS peso_bruto_ton",
-                        "NULL AS tiempo_enfriamiento_molde_dias",
-                        f"COALESCE(vulcanizado_dias, NULL)" if "vulcanizado_dias" in part_cols else "NULL",
-                        f"COALESCE(mecanizado_dias, NULL)" if "mecanizado_dias" in part_cols else "NULL",
-                        f"COALESCE(inspeccion_externa_dias, NULL)" if "inspeccion_externa_dias" in part_cols else "NULL",
-                        f"COALESCE(peso_ton, NULL)" if "peso_ton" in part_cols else "NULL",
-                        f"COALESCE(mec_perf_inclinada, 0)" if "mec_perf_inclinada" in part_cols else "0",
-                        f"COALESCE(sobre_medida, 0)" if "sobre_medida" in part_cols else "0",
-                        "CURRENT_TIMESTAMP AS created_at",
-                        "CURRENT_TIMESTAMP AS updated_at",
-                    ]
-                    
-                    select_sql = f"SELECT {', '.join(select_parts)} FROM parts"
-                    
-                    con.execute(
-                        f"""INSERT OR IGNORE INTO material_master(
-                            material, family_id, aleacion, piezas_por_molde, peso_bruto_ton,
-                            tiempo_enfriamiento_molde_dias, vulcanizado_dias, mecanizado_dias,
-                            inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada,
-                            sobre_medida_mecanizado, created_at, updated_at
-                        ) {select_sql}"""
-                    )
-                except Exception:
-                    pass
-
-            # orderpos_priority v2: add kind (manual/test)
-            opp_cols = [r[1] for r in con.execute("PRAGMA table_info(orderpos_priority)").fetchall()]
-            if "kind" not in opp_cols:
-                con.execute("ALTER TABLE orderpos_priority ADD COLUMN kind TEXT")
-
-            # sap_vision v2: add optional weight fields (tons)
+            # sap_vision_snapshot v2: add optional weight fields (tons) if migrating old schema
             vision_cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision)").fetchall()]
             if "peso_neto" not in vision_cols:
                 try:
@@ -640,7 +585,7 @@ class Db:
                         almacen TEXT NOT NULL,
                         pedido TEXT NOT NULL,
                         posicion TEXT NOT NULL,
-                        numero_parte TEXT NOT NULL,
+                        material TEXT NOT NULL,
                         cantidad INTEGER NOT NULL,
                         fecha_entrega TEXT NOT NULL,
                         primer_correlativo INTEGER NOT NULL,
@@ -684,7 +629,7 @@ class Db:
                                 almacen TEXT NOT NULL,
                                 pedido TEXT NOT NULL,
                                 posicion TEXT NOT NULL,
-                                numero_parte TEXT NOT NULL,
+                                material TEXT NOT NULL,
                                 cantidad INTEGER NOT NULL,
                                 fecha_entrega TEXT NOT NULL,
                                 primer_correlativo INTEGER NOT NULL,

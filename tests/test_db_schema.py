@@ -181,107 +181,14 @@ def test_seeds_process(temp_db):
     assert processes == expected_processes
 
 
-def test_migration_parts_to_material_master():
-    """Test that parts table data is migrated to material_master."""
-    tmpdir = tempfile.mkdtemp()
-    db_path = Path(tmpdir) / "test_legacy.db"
-    
-    # Create legacy database with parts table (pre-v0.2)
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            """CREATE TABLE parts (
-                numero_parte TEXT PRIMARY KEY,
-                familia TEXT NOT NULL
-            )"""
-        )
-        con.execute("INSERT INTO parts VALUES('436001', 'Parrillas')")
-        con.execute("INSERT INTO parts VALUES('436002', 'Lifters')")
-        con.commit()
-
-    # Now run migrations with Db class
-    db = Db(db_path)
-    db.ensure_schema()
-
-    # Verify data was migrated
-    with db.connect() as con:
-        cursor = con.cursor()
-        cursor.execute("SELECT material, family_id FROM material_master WHERE material IN ('436001', '436002')")
-        rows = cursor.fetchall()
-
-    assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}: {rows}"
-    materials = {row[0]: row[1] for row in rows}
-    assert materials.get("436001") == "Parrillas"
-    assert materials.get("436002") == "Lifters"
-    
-    # Cleanup
-    try:
-        for f in Path(tmpdir).glob("test_legacy.db*"):
-            f.unlink(missing_ok=True)
-        Path(tmpdir).rmdir()
-    except Exception:
-        pass
-
-
 def test_auto_test_detection_in_rebuild_orders(temp_db):
     """Test FASE 2.3: Auto-detection of test lotes and orderpos_priority creation."""
     db, db_path = temp_db
     db.ensure_schema()
     repo = Repository(db)
     
-    # Setup: Create minimal MB52 and Vision data in BOTH legacy and v0.2 tables
+    # Setup: Insert test data directly into v0.2 snapshot tables (no legacy tables)
     with db.connect() as con:
-        # Create legacy tables (not created by ensure_schema)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS sap_mb52 (
-                centro TEXT,
-                almacen TEXT,
-                material TEXT,
-                lote TEXT,
-                documento_comercial TEXT,
-                posicion_sd TEXT,
-                libre_utilizacion INTEGER,
-                en_control_calidad INTEGER
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS sap_vision (
-                pedido TEXT,
-                posicion TEXT,
-                fecha_pedido TEXT,
-                cod_material TEXT
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                process TEXT,
-                almacen TEXT,
-                pedido TEXT,
-                posicion TEXT,
-                numero_parte TEXT,
-                cantidad INTEGER,
-                fecha_entrega TEXT,
-                primer_correlativo INTEGER,
-                ultimo_correlativo INTEGER,
-                tiempo_proceso_min INTEGER,
-                is_test INTEGER DEFAULT 0
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS orderpos_priority (
-                pedido TEXT,
-                posicion TEXT,
-                is_priority INTEGER DEFAULT 1,
-                kind TEXT,
-                PRIMARY KEY (pedido, posicion)
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS last_program (
-                process TEXT PRIMARY KEY,
-                data TEXT
-            )
-        """)
-        
         # Update config values for terminaciones process (seeds may have created defaults)
         con.executemany("""
             INSERT INTO app_config (config_key, config_value)
@@ -292,23 +199,24 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
             ("sap_almacen_terminaciones", "4022"),
         ])
         
-        # Insert MB52 rows with numeric and alphanumeric lotes
+        # Insert MB52 rows into sap_mb52_snapshot (v0.2 table)
         con.executemany("""
-            INSERT INTO sap_mb52 (
+            INSERT INTO sap_mb52_snapshot (
                 centro, almacen, material, lote,
                 documento_comercial, posicion_sd,
-                libre_utilizacion, en_control_calidad
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                libre_utilizacion, en_control_calidad,
+                pb_almacen, correlativo_int, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
-            ("4000", "4022", "436001", "12345", "5000001", "10", 1, 0),  # numeric lote (normal)
-            ("4000", "4022", "436001", "12346", "5000001", "10", 1, 0),  # numeric lote (normal)
-            ("4000", "4022", "436002", "ABC123", "5000002", "20", 1, 0),  # alphanumeric lote (test)
-            ("4000", "4022", "436002", "ABC124", "5000002", "20", 1, 0),  # alphanumeric lote (test)
+            ("4000", "4022", "436001", "12345", "5000001", "10", 1, 0, None, 12345, 0),  # numeric lote (normal)
+            ("4000", "4022", "436001", "12346", "5000001", "10", 1, 0, None, 12346, 0),  # numeric lote (normal)
+            ("4000", "4022", "436002", "ABC123", "5000002", "20", 1, 0, None, 123, 1),  # alphanumeric lote (test)
+            ("4000", "4022", "436002", "ABC124", "5000002", "20", 1, 0, None, 124, 1),  # alphanumeric lote (test)
         ])
         
-        # Insert Vision rows
+        # Insert Vision rows into sap_vision_snapshot (v0.2 table)
         con.executemany("""
-            INSERT INTO sap_vision (pedido, posicion, fecha_pedido, cod_material)
+            INSERT INTO sap_vision_snapshot (pedido, posicion, fecha_de_pedido, cod_material)
             VALUES (?, ?, ?, ?)
         """, [
             ("5000001", "10", "2024-03-15", "436001"),
@@ -325,7 +233,7 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
     with db.connect() as con:
         cursor = con.cursor()
         cursor.execute("""
-            SELECT pedido, posicion, numero_parte, cantidad, is_test
+            SELECT pedido, posicion, material, cantidad, is_test
             FROM orders
             WHERE process = 'terminaciones'
             ORDER BY pedido, posicion

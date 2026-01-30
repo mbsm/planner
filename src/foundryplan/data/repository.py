@@ -120,7 +120,7 @@ class Repository:
                 con.execute(
                                         f"""
                                         SELECT COUNT(*)
-                                        FROM sap_mb52
+                                        FROM sap_mb52_snapshot
                                         WHERE centro = ?
                                             AND almacen = ?
                                             AND {avail_sql}
@@ -133,7 +133,7 @@ class Repository:
                 con.execute(
                                         f"""
                                         SELECT COUNT(*)
-                                        FROM sap_mb52
+                                        FROM sap_mb52_snapshot
                                         WHERE centro = ?
                                             AND almacen = ?
                                             AND {avail_sql}
@@ -149,7 +149,7 @@ class Repository:
                 con.execute(
                                         f"""
                                         SELECT COUNT(*)
-                                        FROM sap_mb52 m
+                                        FROM sap_mb52_snapshot m
                                         JOIN sap_vision v
                                             ON v.pedido = m.documento_comercial
                                          AND v.posicion = m.posicion_sd
@@ -170,7 +170,7 @@ class Repository:
                     SELECT COUNT(*)
                     FROM (
                         SELECT DISTINCT documento_comercial, posicion_sd
-                        FROM sap_mb52
+                        FROM sap_mb52_snapshot
                         WHERE centro = ?
                           AND almacen = ?
                           AND {avail_sql}
@@ -189,7 +189,7 @@ class Repository:
                                         SELECT COUNT(*)
                                         FROM (
                                                 SELECT DISTINCT m.documento_comercial AS pedido, m.posicion_sd AS posicion
-                                                FROM sap_mb52 m
+                                                FROM sap_mb52_snapshot m
                                                 LEFT JOIN sap_vision v
                                                     ON v.pedido = m.documento_comercial
                                                  AND v.posicion = m.posicion_sd
@@ -235,7 +235,7 @@ class Repository:
                        COALESCE(libre_utilizacion, 0) AS libre,
                        COALESCE(en_control_calidad, 0) AS qc,
                        documento_comercial, posicion_sd
-                FROM sap_mb52
+                FROM sap_mb52_snapshot
                 WHERE documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
                   AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
                         AND centro = ?
@@ -302,7 +302,7 @@ class Repository:
                        COUNT(*) AS piezas,
                        MIN(m.lote) AS lote_min,
                        MAX(m.lote) AS lote_max
-                FROM sap_mb52 m
+                FROM sap_mb52_snapshot m
                 LEFT JOIN sap_vision v
                   ON v.pedido = m.documento_comercial
                  AND v.posicion = m.posicion_sd
@@ -361,7 +361,7 @@ class Repository:
     # ---------- Families catalog ----------
     def list_families(self) -> list[str]:
         with self.db.connect() as con:
-            rows = con.execute("SELECT name FROM families ORDER BY name").fetchall()
+            rows = con.execute("SELECT family_id FROM family_catalog ORDER BY name").fetchall()
         return [str(r[0]) for r in rows]
 
     def get_families_rows(self) -> list[dict]:
@@ -369,32 +369,32 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT f.name AS familia, COUNT(p.numero_parte) AS parts_count
-                FROM families f
-                LEFT JOIN parts p ON p.familia = f.name
+                SELECT f.name AS family_id, COUNT(p.material) AS parts_count
+                FROM family_catalog f
+                LEFT JOIN parts p ON p.family_id = f.name
                 GROUP BY f.name
                 ORDER BY f.name
                 """
             ).fetchall()
-        return [{"familia": str(r["familia"]), "parts_count": int(r["parts_count"])} for r in rows]
+        return [{"family_id": str(r["family_id"]), "parts_count": int(r["parts_count"])} for r in rows]
 
     def add_family(self, *, name: str) -> None:
         name = str(name).strip()
         if not name:
-            raise ValueError("nombre de familia vacío")
+            raise ValueError("nombre de family_id vacío")
         with self.db.connect() as con:
-            con.execute("INSERT OR IGNORE INTO families(name) VALUES(?)", (name,))
+            con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES(?)", (name,))
 
     def rename_family(self, *, old: str, new: str) -> None:
         old = str(old).strip()
         new = str(new).strip()
         if not old or not new:
-            raise ValueError("familia inválida")
+            raise ValueError("family_id inválida")
         with self.db.connect() as con:
             # Ensure new exists
-            con.execute("INSERT OR IGNORE INTO families(name) VALUES(?)", (new,))
-            # Update parts mappings
-            con.execute("UPDATE parts SET familia = ? WHERE familia = ?", (new, old))
+            con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES(?)", (new,))
+            # UPDATE material_master mappings
+            con.execute("UPDATE material_master SET family_id = ? WHERE family_id = ?", (new, old))
 
             # Update line_config allowed families JSON
             rows = con.execute("SELECT process, line_id, families_json FROM line_config").fetchall()
@@ -408,7 +408,7 @@ class Repository:
                 )
 
             # Remove old from catalog
-            con.execute("DELETE FROM families WHERE name = ?", (old,))
+            con.execute("DELETE FROM family_catalog WHERE name = ?", (old,))
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
@@ -416,16 +416,16 @@ class Repository:
     def delete_family(self, *, name: str, force: bool = False) -> None:
         name = str(name).strip()
         if not name:
-            raise ValueError("familia inválida")
+            raise ValueError("family_id inválida")
         with self.db.connect() as con:
-            in_use = int(con.execute("SELECT COUNT(*) FROM parts WHERE familia = ?", (name,)).fetchone()[0])
+            in_use = int(con.execute("SELECT COUNT(*) FROM material_master WHERE family_id = ?", (name,)).fetchone()[0])
             if in_use and force:
                 # Keep mappings: move affected parts to 'Otros'
-                con.execute("INSERT OR IGNORE INTO families(name) VALUES('Otros')")
-                con.execute("UPDATE parts SET familia='Otros' WHERE familia = ?", (name,))
+                con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES('Otros')")
+                con.execute("UPDATE material_master SET family_id='Otros' WHERE family_id = ?", (name,))
             elif in_use and not force:
                 # Default behavior: remove mappings so affected parts become "missing" and must be reassigned.
-                con.execute("DELETE FROM parts WHERE familia = ?", (name,))
+                con.execute("DELETE FROM material_master WHERE family_id = ?", (name,))
 
             # Update line_config allowed families JSON (remove or replace)
             rows = con.execute("SELECT process, line_id, families_json FROM line_config").fetchall()
@@ -441,7 +441,7 @@ class Repository:
                     (json.dumps(updated), str(r["process"]), int(r["line_id"])),
                 )
 
-            con.execute("DELETE FROM families WHERE name = ?", (name,))
+            con.execute("DELETE FROM family_catalog WHERE name = ?", (name,))
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
@@ -503,20 +503,20 @@ class Repository:
     def get_lines_model(self, *, process: str = "terminaciones") -> list[Line]:
         return [Line(line_id=r["line_id"], allowed_families=set(r["families"])) for r in self.get_lines(process=process)]
 
-    def upsert_part(self, *, numero_parte: str, familia: str) -> None:
-        numero_parte = str(numero_parte).strip()
-        familia = str(familia).strip()
-        if not numero_parte:
-            raise ValueError("numero_parte vacío")
-        if not familia:
-            raise ValueError("familia vacía")
+    def upsert_part(self, *, material: str, family_id: str) -> None:
+        material = str(material).strip()
+        family_id = str(family_id).strip()
+        if not material:
+            raise ValueError("material vacío")
+        if not family_id:
+            raise ValueError("family_id vacía")
         # Ensure family exists in catalog
-        self.add_family(name=familia)
+        self.add_family(name=family_id)
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO parts(numero_parte, familia) VALUES(?, ?) "
-                "ON CONFLICT(numero_parte) DO UPDATE SET familia=excluded.familia",
-                (numero_parte, familia),
+                "INSERT INTO material_master(material, family_id) VALUES(?, ?) "
+                "ON CONFLICT(material) DO UPDATE SET family_id=excluded.family_id",
+                (material, family_id),
             )
 
             # Invalidate any previously generated program
@@ -525,22 +525,22 @@ class Repository:
     def upsert_part_master(
         self,
         *,
-        numero_parte: str,
-        familia: str,
+        material: str,
+        family_id: str,
         vulcanizado_dias: int | None = None,
         mecanizado_dias: int | None = None,
         inspeccion_externa_dias: int | None = None,
-        peso_ton: float | None = None,
+        peso_unitario_ton: float | None = None,
         mec_perf_inclinada: bool = False,
-        sobre_medida: bool = False,
+        sobre_medida_mecanizado: bool = False,
     ) -> None:
         """Upsert a part master row including family and optional process times."""
-        numero_parte = str(numero_parte).strip()
-        familia = str(familia).strip()
-        if not numero_parte:
-            raise ValueError("numero_parte vacío")
-        if not familia:
-            raise ValueError("familia vacía")
+        material = str(material).strip()
+        family_id = str(family_id).strip()
+        if not material:
+            raise ValueError("material vacío")
+        if not family_id:
+            raise ValueError("family_id vacía")
 
         def _coerce_days(value, *, field: str) -> int | None:
             if value is None:
@@ -555,30 +555,30 @@ class Repository:
         i = _coerce_days(inspeccion_externa_dias, field="inspeccion_externa_dias")
 
         pt: float | None = None
-        if peso_ton is not None:
-            pt = float(peso_ton)
+        if peso_unitario_ton is not None:
+            pt = float(peso_unitario_ton)
             if pt < 0:
-                raise ValueError("peso_ton no puede ser negativo")
+                raise ValueError("peso_unitario_ton no puede ser negativo")
 
         mec_perf = 1 if bool(mec_perf_inclinada) else 0
-        sm = 1 if bool(sobre_medida) else 0
+        sm = 1 if bool(sobre_medida_mecanizado) else 0
 
         # Ensure family exists in catalog
-        self.add_family(name=familia)
+        self.add_family(name=family_id)
 
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO parts(numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida) "
+                "INSERT INTO material_master(material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(numero_parte) DO UPDATE SET "
-                "familia=excluded.familia, "
+                "ON CONFLICT(material) DO UPDATE SET "
+                "family_id=excluded.family_id, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
                 "mecanizado_dias=excluded.mecanizado_dias, "
                 "inspeccion_externa_dias=excluded.inspeccion_externa_dias, "
-                "peso_ton=excluded.peso_ton, "
+                "peso_unitario_ton=excluded.peso_unitario_ton, "
                 "mec_perf_inclinada=excluded.mec_perf_inclinada, "
-                "sobre_medida=excluded.sobre_medida",
-                (numero_parte, familia, v, m, i, pt, mec_perf, sm),
+                "sobre_medida_mecanizado=excluded.sobre_medida_mecanizado",
+                (material, family_id, v, m, i, pt, mec_perf, sm),
             )
 
             # Invalidate any previously generated program
@@ -587,14 +587,14 @@ class Repository:
     def update_part_process_times(
         self,
         *,
-        numero_parte: str,
+        material: str,
         vulcanizado_dias: int,
         mecanizado_dias: int,
         inspeccion_externa_dias: int,
     ) -> None:
-        numero_parte = str(numero_parte).strip()
-        if not numero_parte:
-            raise ValueError("numero_parte vacío")
+        material = str(material).strip()
+        if not material:
+            raise ValueError("material vacío")
         for col_name, value in (
             ("vulcanizado_dias", vulcanizado_dias),
             ("mecanizado_dias", mecanizado_dias),
@@ -604,38 +604,38 @@ class Repository:
                 raise ValueError(f"{col_name} no puede ser negativo")
 
         with self.db.connect() as con:
-            exists = con.execute("SELECT 1 FROM parts WHERE numero_parte = ?", (numero_parte,)).fetchone()
+            exists = con.execute("SELECT 1 FROM material_master WHERE material = ?", (material,)).fetchone()
             if exists is None:
                 raise ValueError(
-                    f"No existe maestro para numero_parte={numero_parte}. Asigna familia primero en /familias."
+                    f"No existe maestro para material={material}. Asigna family_id primero en /family_ids."
                 )
             con.execute(
                 """
                 UPDATE parts
                 SET vulcanizado_dias = ?, mecanizado_dias = ?, inspeccion_externa_dias = ?
-                WHERE numero_parte = ?
+                WHERE material = ?
                 """,
-                (int(vulcanizado_dias), int(mecanizado_dias), int(inspeccion_externa_dias), numero_parte),
+                (int(vulcanizado_dias), int(mecanizado_dias), int(inspeccion_externa_dias), material),
             )
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
 
-    def delete_part(self, *, numero_parte: str) -> None:
+    def delete_part(self, *, material: str) -> None:
         with self.db.connect() as con:
-            con.execute("DELETE FROM parts WHERE numero_parte = ?", (str(numero_parte).strip(),))
+            con.execute("DELETE FROM material_master WHERE material = ?", (str(material).strip(),))
             con.execute("DELETE FROM last_program")
 
     def delete_all_parts(self) -> None:
         with self.db.connect() as con:
-            con.execute("DELETE FROM parts")
+            con.execute("DELETE FROM material_master")
             con.execute("DELETE FROM last_program")
 
     def get_parts_rows(self) -> list[dict]:
         """Return the part master as UI-friendly dict rows."""
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida FROM parts ORDER BY numero_parte"
+                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM material_master ORDER BY material"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -662,31 +662,31 @@ class Repository:
                         pedido,
                         posicion,
                         MAX(COALESCE(cod_material, '')) AS cod_material,
-                        MAX(COALESCE(fecha_pedido, '')) AS fecha_pedido,
+                        MAX(COALESCE(fecha_de_pedido, '')) AS fecha_de_pedido,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision
+                    FROM sap_vision_snapshot
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2023-12-31'
+                      AND fecha_de_pedido > '2023-12-31'
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
-                        v.fecha_pedido AS fecha_pedido,
+                        v.fecha_de_pedido AS fecha_de_pedido,
                         CASE
                             WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
                             ELSE (v.solicitado - v.bodega - v.despachado)
                         END AS pendientes,
-                        COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0) AS peso_ton
+                        COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0) AS peso_unitario_ton
                     FROM v
                     LEFT JOIN parts p
-                      ON p.numero_parte = v.cod_material
+                      ON p.material = v.cod_material
                 )
                 SELECT
-                    COALESCE(SUM(pendientes * peso_ton), 0.0) AS tons_por_entregar,
-                    COALESCE(SUM(CASE WHEN fecha_pedido < ? THEN (pendientes * peso_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
+                    COALESCE(SUM(pendientes * peso_unitario_ton), 0.0) AS tons_por_entregar,
+                    COALESCE(SUM(CASE WHEN fecha_de_pedido < ? THEN (pendientes * peso_unitario_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
                 FROM joined
                 """,
                 (d0_iso,),
@@ -738,10 +738,10 @@ class Repository:
                 SELECT
                     v.pedido AS pedido,
                     v.posicion AS posicion,
-                    COALESCE(v.cod_material, '') AS numero_parte,
+                    COALESCE(v.cod_material, '') AS material,
                     COALESCE(v.solicitado, 0) AS solicitado,
                     COALESCE(v.bodega, 0) AS bodega,
-                    v.fecha_pedido AS fecha_entrega,
+                    v.fecha_de_pedido AS fecha_entrega,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
                         WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
@@ -752,31 +752,31 @@ class Repository:
                             WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
                             ELSE (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0))
                         END
-                        * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)
+                        * COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0)
                     ) AS tons,
-                    (COALESCE(v.bodega, 0) * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)) AS tons_dispatch
+                    (COALESCE(v.bodega, 0) * COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0)) AS tons_dispatch
                 FROM (
                     SELECT
                         pedido,
                         posicion,
                         MAX(cliente) AS cliente,
                         MAX(cod_material) AS cod_material,
-                        MAX(COALESCE(fecha_pedido, '')) AS fecha_pedido,
+                        MAX(COALESCE(fecha_de_pedido, '')) AS fecha_de_pedido,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision
+                    FROM sap_vision_snapshot
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2023-12-31'
-                      AND fecha_pedido < ?
+                      AND fecha_de_pedido > '2023-12-31'
+                      AND fecha_de_pedido < ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                       AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
                 ) v
                 LEFT JOIN parts p
-                  ON p.numero_parte = v.cod_material
-                ORDER BY v.fecha_pedido ASC, v.pedido, v.posicion
+                  ON p.material = v.cod_material
+                ORDER BY v.fecha_de_pedido ASC, v.pedido, v.posicion
                 LIMIT ?
                 """,
                 (d0.isoformat(), lim),
@@ -792,7 +792,7 @@ class Repository:
                     "_row_id": row_id,
                     "pedido": str(r["pedido"]),
                     "posicion": str(r["posicion"]),
-                    "numero_parte": str(r["numero_parte"]),
+                    "material": str(r["material"]),
                     "solicitado": int(r["solicitado"] or 0),
                     "bodega": int(r["bodega"] or 0),
                     "pendientes": int(r["pendientes"] or 0),
@@ -821,11 +821,11 @@ class Repository:
             rows = con.execute(
                 """
                 WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(fecha_pedido) AS fecha_entrega
-                    FROM sap_vision
+                    SELECT pedido, posicion, MIN(fecha_de_pedido) AS fecha_entrega
+                    FROM sap_vision_snapshot
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_pedido > '2023-12-31'
-                      AND fecha_pedido >= ? AND fecha_pedido <= ?
+                      AND fecha_de_pedido > '2023-12-31'
+                      AND fecha_de_pedido >= ? AND fecha_de_pedido <= ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                       AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
@@ -833,7 +833,7 @@ class Repository:
                 SELECT
                     op.pedido AS pedido,
                     op.posicion AS posicion,
-                    COALESCE(v.cod_material, '') AS numero_parte,
+                    COALESCE(v.cod_material, '') AS material,
                     COALESCE(v.solicitado, 0) AS solicitado,
                     op.fecha_entrega AS fecha_entrega,
                     COALESCE(v.cliente, '') AS cliente,
@@ -846,7 +846,7 @@ class Repository:
                             WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
                             ELSE (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0))
                         END
-                        * COALESCE(p.peso_ton, v.peso_unitario_ton, 0.0)
+                        * COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0)
                     ) AS tons
                 FROM orderpos op
                 LEFT JOIN (
@@ -859,13 +859,13 @@ class Repository:
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision
+                    FROM sap_vision_snapshot
                     GROUP BY pedido, posicion
                 ) v
                   ON v.pedido = op.pedido
                  AND v.posicion = op.posicion
                 LEFT JOIN parts p
-                  ON p.numero_parte = v.cod_material
+                  ON p.material = v.cod_material
                 ORDER BY op.fecha_entrega ASC, op.pedido, op.posicion
                 LIMIT ?
                 """,
@@ -882,7 +882,7 @@ class Repository:
                     "_row_id": row_id,
                     "pedido": str(r["pedido"]),
                     "posicion": str(r["posicion"]),
-                    "numero_parte": str(r["numero_parte"]),
+                    "material": str(r["material"]),
                     "solicitado": int(r["solicitado"] or 0),
                     "pendientes": int(r["pendientes"] or 0),
                     "fecha_entrega": fe.isoformat(),
@@ -938,33 +938,33 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT DISTINCT o.numero_parte
+                SELECT DISTINCT o.material
                 FROM orders o
-                LEFT JOIN parts p ON p.numero_parte = o.numero_parte
+                LEFT JOIN parts p ON p.material = o.material
                 WHERE o.process = ?
-                  AND p.numero_parte IS NULL
-                ORDER BY o.numero_parte
+                  AND p.material IS NULL
+                ORDER BY o.material
                 """,
                 (process,),
             ).fetchall()
         return [str(r[0]) for r in rows]
 
     def get_missing_process_times_from_orders(self, *, process: str = "terminaciones") -> list[str]:
-        """Distinct numero_parte referenced by orders that has a master row but missing any process time."""
+        """Distinct material referenced by orders that has a master row but missing any process time."""
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT DISTINCT o.numero_parte
+                SELECT DISTINCT o.material
                 FROM orders o
-                JOIN parts p ON p.numero_parte = o.numero_parte
+                JOIN parts p ON p.material = o.material
                 WHERE o.process = ?
                   AND (
                        p.vulcanizado_dias IS NULL
                     OR p.mecanizado_dias IS NULL
                     OR p.inspeccion_externa_dias IS NULL
                   )
-                ORDER BY o.numero_parte
+                ORDER BY o.material
                 """,
                 (process,),
             ).fetchall()
@@ -977,9 +977,9 @@ class Repository:
                 """
                 SELECT COUNT(*)
                 FROM (
-                    SELECT DISTINCT o.numero_parte
+                    SELECT DISTINCT o.material
                     FROM orders o
-                    JOIN parts p ON p.numero_parte = o.numero_parte
+                    JOIN parts p ON p.material = o.material
                     WHERE o.process = ?
                       AND (
                            p.vulcanizado_dias IS NULL
@@ -999,11 +999,11 @@ class Repository:
                 """
                 SELECT COUNT(*)
                 FROM (
-                    SELECT DISTINCT o.numero_parte
+                    SELECT DISTINCT o.material
                     FROM orders o
-                    LEFT JOIN parts p ON p.numero_parte = o.numero_parte
+                    LEFT JOIN parts p ON p.material = o.material
                     WHERE o.process = ?
-                      AND p.numero_parte IS NULL
+                      AND p.material IS NULL
                 )
                 """,
                 (process,),
@@ -1018,11 +1018,11 @@ class Repository:
 
     def count_sap_mb52(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM sap_mb52").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM sap_mb52_snapshot").fetchone()[0])
 
     def count_sap_vision(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM sap_vision").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM sap_vision_snapshot").fetchone()[0])
 
     def count_usable_pieces(self, *, process: str = "terminaciones") -> int:
         process = self._normalize_process(process)
@@ -1036,7 +1036,7 @@ class Repository:
                 con.execute(
                     f"""
                     SELECT COUNT(*)
-                    FROM sap_mb52
+                    FROM sap_mb52_snapshot
                     WHERE centro = ?
                       AND almacen = ?
                       AND {avail_sql}
@@ -1064,7 +1064,7 @@ class Repository:
                     COALESCE(MAX(v.cliente), '') AS cliente,
                     COALESCE(MAX(v.cod_material), '') AS cod_material,
                     COALESCE(MAX(v.descripcion_material), '') AS descripcion_material,
-                  MIN(COALESCE(v.fecha_pedido, o.fecha_entrega)) AS fecha_pedido,
+                  MIN(COALESCE(v.fecha_de_pedido, o.fecha_entrega)) AS fecha_de_pedido,
                   COALESCE(MAX(v.solicitado), 0) AS solicitado,
                   COALESCE(MAX(v.peso_neto), 0.0) AS peso_neto,
                   COALESCE(MAX(v.bodega), 0) AS bodega,
@@ -1077,7 +1077,7 @@ class Repository:
                 LEFT JOIN sap_vision v
                        ON v.pedido = o.pedido AND v.posicion = o.posicion
                 GROUP BY o.pedido, o.posicion
-                ORDER BY COALESCE(opp.is_priority, op.is_priority, 0) DESC, fecha_pedido, o.pedido, o.posicion
+                ORDER BY COALESCE(opp.is_priority, op.is_priority, 0) DESC, fecha_de_pedido, o.pedido, o.posicion
                 """
             ).fetchall()
 
@@ -1096,7 +1096,7 @@ class Repository:
                     "cliente": str(r["cliente"] or ""),
                     "cod_material": str(r["cod_material"] or ""),
                     "descripcion_material": str(r["descripcion_material"] or ""),
-                    "fecha_pedido": str(r["fecha_pedido"] or ""),
+                    "fecha_de_pedido": str(r["fecha_de_pedido"] or ""),
                     "solicitado": solicitado,
                     "peso_neto": float(r["peso_neto"] or 0.0),
                     "bodega": bodega,
@@ -1245,7 +1245,7 @@ class Repository:
                 from_mb52 = con.execute(
                     """
                     SELECT DISTINCT documento_comercial AS pedido, posicion_sd AS posicion
-                    FROM sap_mb52
+                    FROM sap_mb52_snapshot
                     WHERE centro = ?
                       AND almacen = ?
                       AND COALESCE(libre_utilizacion, 0) = 1
@@ -1277,7 +1277,7 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo
+                SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo
                 FROM orders
                 ORDER BY fecha_entrega, pedido, posicion, primer_correlativo
                 LIMIT ?
@@ -1288,7 +1288,7 @@ class Repository:
             {
                 "pedido": str(r[0]),
                 "posicion": str(r[1]),
-                "numero_parte": str(r[2]),
+                "material": str(r[2]),
                 "cantidad": int(r[3]),
                 "fecha_entrega": str(r[4]),
                 "primer_correlativo": int(r[5]),
@@ -1299,7 +1299,7 @@ class Repository:
 
     def count_parts(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM parts").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM material_master").fetchone()[0])
 
     def get_missing_parts_from_mb52(self) -> list[dict]:
         """Backward-compatible (Terminaciones) missing master detection."""
@@ -1322,8 +1322,8 @@ class Repository:
             rows = con.execute(
                                 f"""
                 SELECT m.material, COALESCE(MAX(m.texto_breve), '') AS texto_breve
-                FROM sap_mb52 m
-                LEFT JOIN parts p ON p.numero_parte = m.material
+                FROM sap_mb52_snapshot m
+                LEFT JOIN parts p ON p.material = m.material
                 WHERE m.material IS NOT NULL AND TRIM(m.material) <> ''
                   AND m.centro = ?
                   AND m.almacen = ?
@@ -1331,7 +1331,7 @@ class Repository:
                   AND m.documento_comercial IS NOT NULL AND TRIM(m.documento_comercial) <> ''
                   AND m.posicion_sd IS NOT NULL AND TRIM(m.posicion_sd) <> ''
                   AND m.lote IS NOT NULL AND TRIM(m.lote) <> ''
-                  AND p.numero_parte IS NULL
+                  AND p.material IS NULL
                 GROUP BY m.material
                 ORDER BY m.material
                 LIMIT ?
@@ -1349,7 +1349,7 @@ class Repository:
             row = con.execute(
                 """
                 SELECT COALESCE(MAX(texto_breve), '')
-                FROM sap_mb52
+                FROM sap_mb52_snapshot
                 WHERE material = ?
                 """,
                 (mat,),
@@ -1376,9 +1376,9 @@ class Repository:
     def clear_imported_data(self) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM orders")
-            con.execute("DELETE FROM sap_mb52")
-            con.execute("DELETE FROM sap_vision")
-            # parts (familias) are managed manually in-app; keep them.
+            con.execute("DELETE FROM sap_mb52_snapshot")
+            con.execute("DELETE FROM sap_vision_snapshot")
+            # parts (family_ids) are managed manually in-app; keep them.
             con.execute("DELETE FROM last_program")
 
     # ---------- SAP Import + rebuild ----------
@@ -1415,8 +1415,7 @@ class Repository:
         prefixes = [p.strip() for p in prefixes_raw.split(",") if p.strip()]
         keep_all_materials = (not prefixes) or ("*" in prefixes)
 
-        rows_legacy: list[tuple] = []  # For sap_mb52 (backward-compat)
-        rows_snapshot: list[tuple] = []  # For sap_mb52_snapshot (v0.2)
+        rows_snapshot: list[tuple] = []  # For sap_mb52_snapshot (v0.2 only, no legacy)
 
         for _, r in df.iterrows():
             material = str(r.get("material", "")).strip()
@@ -1440,9 +1439,6 @@ class Repository:
             # Derive fields for snapshot table
             correlativo_int = self._lote_to_int(lote) if lote else None
             is_test = 1 if (lote and self._is_lote_test(lote)) else 0
-            
-            # Legacy table (backward-compat)
-            rows_legacy.append((material, texto_breve, centro, almacen, lote, libre, doc, pos, qc))
             
             # Snapshot table (v0.2) - includes derived fields
             rows_snapshot.append((
@@ -1472,10 +1468,10 @@ class Repository:
                     rows_prev = con.execute(
                         f"""
                         SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
-                        FROM sap_mb52
+                        FROM sap_mb52_snapshot
                         WHERE centro = ?
                           AND almacen = ?
-                          AND {avail_sql}
+                          AND {avail__snapshotsql}
                           AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
                           AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
                           AND lote IS NOT NULL AND TRIM(lote) <> ''
@@ -1498,24 +1494,13 @@ class Repository:
                     prev_items_term = None
 
             if mode == "replace":
-                con.execute("DELETE FROM sap_mb52")
-                con.execute("DELETE FROM sap_mb52_snapshot")  # v0.2: also clear snapshot table
+                con.execute("DELETE FROM sap_mb52_snapshot")
             else:
                 # Merge mode: replace only the centro/almacen subsets present in this file.
                 for c, a in sorted(centro_almacen_pairs):
-                    con.execute("DELETE FROM sap_mb52 WHERE centro = ? AND almacen = ?", (c, a))
                     con.execute("DELETE FROM sap_mb52_snapshot WHERE centro = ? AND almacen = ?", (c, a))
             
-            # Insert into legacy table (backward-compat)
-            con.executemany(
-                """
-                INSERT INTO sap_mb52(material, texto_breve, centro, almacen, lote, libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows_legacy,
-            )
-            
-            # Insert into snapshot table (v0.2)
+            # Insert into snapshot table (v0.2 only)
             con.executemany(
                 """
                 INSERT INTO sap_mb52_snapshot(
@@ -1538,7 +1523,7 @@ class Repository:
                     rows_curr = con.execute(
                         f"""
                         SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
-                        FROM sap_mb52
+                        FROM sap_mb52_snapshot
                         WHERE centro = ?
                           AND almacen = ?
                           AND {avail_sql}
@@ -1549,7 +1534,7 @@ class Repository:
                         (str(centro_term), str(almacen_term)),
                     ).fetchall()
                     curr_keys_term: set[tuple[str, str, str]] = set()
-                    for r in rows_curr:
+                    for r in rows_cur_snapshotr:
                         pedido = str(r["pedido"] or "").strip()
                         posicion = str(r["posicion"] or "").strip()
                         lote = str(r["lote"] or "").strip()
@@ -1647,7 +1632,7 @@ class Repository:
             posicion = str(row[1])
             if (pedido, posicion) in exited_keys:
                 # Extract relevant fields from snapshot row
-                # Row structure: pedido, posicion, cod_material, desc, fecha_pedido, fecha_entrega,
+                # Row structure: pedido, posicion, cod_material, desc, fecha_de_pedido, fecha_entrega,
                 # solicitado, x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
                 # mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                 # en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
@@ -1721,8 +1706,8 @@ class Repository:
                     "_row_id": row_id,
                     "pedido": pedido,
                     "posicion": posicion,
-                    "numero_parte": str(r.get("numero_parte") or "").strip(),
-                    "familia": str(r.get("familia") or "").strip(),
+                    "material": str(r.get("material") or "").strip(),
+                    "family_id": str(r.get("family_id") or "").strip(),
                     "cantidad": int(r.get("cantidad") or 0),
                     "fecha_entrega": str(r.get("fecha_entrega") or "").strip(),
                     "corr_inicio": a,
@@ -1811,12 +1796,12 @@ class Repository:
         with self.db.connect() as con:
             if centro_n:
                 rows = con.execute(
-                    "SELECT almacen, COUNT(*) c FROM sap_mb52 WHERE centro = ? GROUP BY almacen ORDER BY c DESC LIMIT ?",
+                    "SELECT almacen, COUNT(*) c FROM sap_mb52_snapshot WHERE centro = ? GROUP BY almacen ORDER BY c DESC LIMIT ?",
                     (centro_n, lim),
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT almacen, COUNT(*) c FROM sap_mb52 GROUP BY almacen ORDER BY c DESC LIMIT ?",
+                    "SELECT almacen, COUNT(*) c FROM sap_mb52_snapshot GROUP BY almacen ORDER BY c DESC LIMIT ?",
                     (lim,),
                 ).fetchall()
         return [{"almacen": str(r[0] or ""), "count": int(r[1] or 0)} for r in rows]
@@ -1846,7 +1831,7 @@ class Repository:
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                     en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
                     bodega, despachado, rechazo
-                FROM sap_vision
+                FROM sap_vision_snapshot
                 WHERE pedido = ? AND posicion = ?
                 LIMIT 1
                 """,
@@ -1943,9 +1928,9 @@ class Repository:
             df = df.rename(columns={"pos": "posicion"})
         if "pos_oc" in df.columns and "posoc" not in df.columns:
             df = df.rename(columns={"pos_oc": "posoc"})
-        # some exports might call it 'fecha_pedido'
-        if "fecha_de_pedido" not in df.columns and "fecha_pedido" in df.columns:
-            df = df.rename(columns={"fecha_pedido": "fecha_de_pedido"})
+        # some exports might call it 'fecha_de_pedido'
+        if "fecha_de_pedido" not in df.columns and "fecha_de_pedido" in df.columns:
+            df = df.rename(columns={"fecha_de_pedido": "fecha_de_pedido"})
 
         # Tipo posicion variants
         if "tipo_posicion" not in df.columns:
@@ -2016,7 +2001,7 @@ class Repository:
                 continue
             cod_material = self._normalize_sap_key(r.get("cod_material"))
             desc = str(r.get("descripcion_material", "")).strip() or None
-            fecha_pedido = coerce_date(r.get("fecha_de_pedido"))
+            fecha_de_pedido = coerce_date(r.get("fecha_de_pedido"))
             fecha_entrega = None
             if "fecha_entrega" in df.columns:
                 raw = r.get("fecha_entrega")
@@ -2102,7 +2087,7 @@ class Repository:
                     posicion,
                     cod_material,
                     desc,
-                    fecha_pedido,
+                    fecha_de_pedido,
                     fecha_entrega,
                     solicitado,
                     x_programar,
@@ -2132,24 +2117,7 @@ class Repository:
             )
 
         with self.db.connect() as con:
-            # Legacy table (backward-compat)
-            con.execute("DELETE FROM sap_vision")
-            con.executemany(
-                """
-                INSERT INTO sap_vision(
-                    pedido, posicion, cod_material, descripcion_material, fecha_pedido, fecha_entrega,
-                    solicitado,
-                    x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
-                    mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
-                    en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
-                    cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion, status_comercial
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-            
-            # Snapshot table (v0.2) - same data, different table
+            # v0.2 only: sap_vision_snapshot
             con.execute("DELETE FROM sap_vision_snapshot")
             con.executemany(
                 """
@@ -2176,18 +2144,18 @@ class Repository:
                 SET peso_unitario_ton = COALESCE(
                     (
                         SELECT v.peso_unitario_ton
-                        FROM sap_vision v
+                        FROM sap_vision_snapshot v
                         WHERE v.cod_material = material_master.material
                           AND v.peso_unitario_ton IS NOT NULL
                           AND v.peso_unitario_ton >= 0
-                        ORDER BY v.fecha_pedido ASC, v.pedido ASC, v.posicion ASC
+                        ORDER BY v.fecha_de_pedido ASC, v.pedido ASC, v.posicion ASC
                         LIMIT 1
                     ),
                     peso_unitario_ton
                 )
                 WHERE EXISTS (
                     SELECT 1
-                    FROM sap_vision v2
+                    FROM sap_vision_snapshot v2
                     WHERE v2.cod_material = material_master.material
                       AND v2.peso_unitario_ton IS NOT NULL
                       AND v2.peso_unitario_ton >= 0
@@ -2212,7 +2180,7 @@ class Repository:
         return self.rebuild_orders_from_sap_for(process="terminaciones")
 
     def rebuild_orders_from_sap_for(self, *, process: str = "terminaciones") -> int:
-        """Build orders table from usable pieces in MB52 + fecha_pedido in Vision.
+        """Build orders table from usable pieces in MB52 + fecha_de_pedido in Vision.
 
         Returns how many order-rows were created.
         """
@@ -2229,7 +2197,7 @@ class Repository:
             mb_rows = con.execute(
                                 f"""
                 SELECT material, documento_comercial, posicion_sd, lote
-                FROM sap_mb52
+                FROM sap_mb52_snapshot
                 WHERE centro = ?
                   AND almacen = ?
                                     AND {avail_sql}
@@ -2247,7 +2215,7 @@ class Repository:
 
             # Vision lookup: (pedido,posicion) -> (fecha_pedido_iso, cod_material)
             vision_rows = con.execute(
-                "SELECT pedido, posicion, fecha_pedido, cod_material FROM sap_vision"
+                "SELECT pedido, posicion, fecha_de_pedido, cod_material FROM sap_vision_snapshot"
             ).fetchall()
             vision_by_key: dict[tuple[str, str], tuple[str, str | None]] = {}
             for r in vision_rows:
@@ -2323,7 +2291,7 @@ class Repository:
             con.execute("DELETE FROM orders WHERE process = ?", (process,))
             con.executemany(
                 """
-                INSERT INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test)
+                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test)
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [(process, almacen, *row) for row in order_rows],
@@ -2368,16 +2336,16 @@ class Repository:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test FROM orders WHERE process = ?",
+                "SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test FROM orders WHERE process = ?",
                 (process,),
             ).fetchall()
         out: list[Order] = []
-        for pedido, posicion, numero_parte, cantidad, fecha_entrega, primer, ultimo, tpm, is_test in rows:
+        for pedido, posicion, material, cantidad, fecha_entrega, primer, ultimo, tpm, is_test in rows:
             out.append(
                 Order(
                     pedido=str(pedido),
                     posicion=str(posicion),
-                    numero_parte=str(numero_parte),
+                    material=str(material),
                     cantidad=int(cantidad),
                     fecha_entrega=date.fromisoformat(str(fecha_entrega)),
                     primer_correlativo=int(primer),
@@ -2391,18 +2359,18 @@ class Repository:
     def get_parts_model(self) -> list[Part]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT numero_parte, familia, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_ton, mec_perf_inclinada, sobre_medida FROM parts"
+                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM material_master"
             ).fetchall()
         return [
             Part(
-                numero_parte=str(r[0]),
-                familia=str(r[1]),
+                material=str(r[0]),
+                family_id=str(r[1]),
                 vulcanizado_dias=r[2],
                 mecanizado_dias=r[3],
                 inspeccion_externa_dias=r[4],
-                peso_ton=(float(r[5]) if r[5] is not None else None),
+                peso_unitario_ton=(float(r[5]) if r[5] is not None else None),
                 mec_perf_inclinada=bool(int(r[6] or 0)),
-                sobre_medida=bool(int(r[7] or 0)),
+                sobre_medida_mecanizado=bool(int(r[7] or 0)),
             )
             for r in rows
         ]
@@ -2744,8 +2712,8 @@ class Repository:
                 base_template = {
                     "pedido": o.pedido,
                     "posicion": o.posicion,
-                    "numero_parte": o.numero_parte,
-                    "familia": "Otros",
+                    "material": o.material,
+                    "family_id": "Otros",
                     "fecha_entrega": o.fecha_entrega.isoformat(),
                     "start_by": o.fecha_entrega.isoformat(),
                     "prio_kind": _prio_kind_for(o),
@@ -2806,7 +2774,7 @@ class Repository:
                 row = dict(base_template)
                 row["pedido"] = o.pedido
                 row["posicion"] = o.posicion
-                row["numero_parte"] = o.numero_parte
+                row["material"] = o.material
                 row["cantidad"] = int(q_eff)
                 row["prio_kind"] = _prio_kind_for(o)
                 row["is_test"] = 1 if bool(getattr(o, "is_test", False)) else 0
@@ -2823,7 +2791,7 @@ class Repository:
 
                 # Unique per-split row id.
                 row["_row_id"] = (
-                    f"{o.pedido}|{o.posicion}|{o.numero_parte}|split{split_id}|{int(row['corr_inicio'])}-{int(row['corr_fin'])}"
+                    f"{o.pedido}|{o.posicion}|{o.material}|split{split_id}|{int(row['corr_inicio'])}-{int(row['corr_fin'])}"
                 )
 
                 locked_rows_by_line.setdefault(line_key, []).append(row)
@@ -2879,3 +2847,9 @@ class Repository:
         # Backward-compatible: older DBs stored only the program dict
         merged_program, merged_errors = self._apply_in_progress_locks(process=process, program=payload, errors=[])
         return {"generated_on": row["generated_on"], "program": merged_program, "errors": merged_errors}
+
+
+
+
+
+
