@@ -170,7 +170,7 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ## 3️⃣ FASE 3: CÁLCULO DE JOBS
 
-### 3.1 Job Creation & Lifecycle ✅ **COMPLETADO** (Commit: 747359a)
+### 3.1 Job Creation & Lifecycle ✅ **COMPLETADO** (Commit: 9eec78f)
 
 **🔑 Trigger:** Jobs se crean **automáticamente al importar MB52** (no al cargar Visión)
 
@@ -180,16 +180,14 @@ Este documento define **qué implementar** basado en la documentación oficial.
   - [x] Iterar sobre `process` table donde `is_active=1`
   - [x] Filtrar MB52 por `almacen` del proceso (usar `process.sap_almacen`)
   - [x] Agrupar por (pedido, posicion, material)
-  - [x] Crear job con `state='pending'`, `qty_total` = suma de stock real
+  - [x] Crear job con `state='pending'`, `qty_total` = COUNT de lotes en MB52
 - [x] Si material NO existe en `material_master` → popup solicita campos antes de crear job (futuro)
 
 **📊 Campos iniciales del job:**
-- [x] `job_id` = generar único (ej: `job_{process}_{timestamp}_{uuid}`)
+- [x] `job_id` = generar único (formato: `job_{process}_{timestamp}_{uuid8}`)
 - [x] `process_id` = ID del proceso
 - [x] `pedido`, `posicion`, `material` = desde MB52
-- [x] `qty_total` = stock real desde MB52 (count de lotes en ese almacén)
-- [x] `qty_completed` = 0 (se actualiza al cargar Visión)
-- [x] `qty_remaining` = qty_total (recalculado)
+- [x] `qty_total` = COUNT de lotes actuales en MB52 (representa cantidad **disponible**, no completada)
 - [x] `priority` = valor "normal" desde `job_priority_map` config (ej: 3)
 - [x] `is_test` = 1 si algún lote es alfanumérico (automático)
 - [x] `state` = 'pending' (inicial)
@@ -200,24 +198,36 @@ Este documento define **qué implementar** basado en la documentación oficial.
 - [x] Si `is_test=1` → usar prioridad "prueba" (ej: 1) desde `job_priority_map`
 - [x] Tests mantienen prioridad "prueba" siempre (no cambia a "normal")
 
+**🔗 ¿Cómo sabe un job qué lotes tiene asociados?**
+- [x] A través de la tabla `job_unit` (relación 1:N - un job tiene muchos lotes)
+- [x] Consulta: `SELECT lote, correlativo_int, qty FROM job_unit WHERE job_id = ?`
+- [x] Sincronización automática al importar MB52:
+  1. `DELETE FROM job_unit WHERE job_id = ?` (elimina lotes anteriores)
+  2. `INSERT INTO job_unit` por cada lote actual en MB52
+- [x] Los lotes **desaparecen automáticamente** cuando se eliminan del MB52 (import con reemplazo total)
+
 **🔄 Actualización desde Visión Planta:**
 - [x] En `import_sap_vision_bytes`: después de guardar snapshot, actualizar jobs existentes
 - [x] Buscar jobs por (pedido, posicion)
-- [x] Actualizar `qty_completed` desde campo de progreso en Visión (ej: `terminacion` para terminaciones)
-- [x] Actualizar `fecha_entrega` desde Visión
-- [x] Recalcular `qty_remaining = qty_total - qty_completed`
+- [x] Actualizar **solo `fecha_entrega`** desde Visión (no progreso)
+- [x] `qty_total` viene solo del MB52 (no se toca desde Visión)
+
+**💡 Lógica de progreso:**
+- [x] Los lotes desaparecen del MB52 cuando se completan físicamente
+- [x] Por lo tanto, `qty_total` representa la cantidad **actual** de lotes disponibles/pendientes
+- [x] No necesitamos `qty_completed` ni `qty_remaining` separados
 
 **🔒 Lifecycle (estado del job):**
 - [x] `state='pending'` → job creado, sin iniciar
 - [ ] `state='in_process'` → job siendo ejecutado (marcado desde GUI/dispatch)
-- [ ] Si `qty_remaining` llega a 0 → job puede cerrarse (marcar completado, no borrar)
 - [x] Si pedido/pos desaparece de Visión → job persiste (histórico)
-- [x] Si pedido/pos desaparece del almacén del proceso (MB52) → job queda con qty=0
+- [x] Si pedido/pos desaparece del almacén del proceso (MB52) → `qty_total` baja (lotes se eliminan de job_unit)
+- [x] Si todos los lotes desaparecen del MB52 → `qty_total=0` (job persiste pero sin lotes)
 - [ ] Si reaparece stock → job puede reabrirse o crear nuevo (según lógica de reactivación)
 
 **📦 Job Units:**
 - [x] Crear `job_unit` por cada lote en MB52 del job:
-  - [x] `job_unit_id` = generar único
+  - [x] `job_unit_id` = generar único (formato: `ju_{job_id}_{uuid8}`)
   - [x] `job_id` = FK al job
   - [x] `lote` = lote físico desde MB52
   - [x] `correlativo_int` = primer grupo numérico del lote
@@ -229,8 +239,10 @@ Este documento define **qué implementar** basado en la documentación oficial.
 - ✅ Método `_create_jobs_from_mb52()` creado y llamado al final de import
 - ✅ Método `_update_jobs_from_vision()` creado y llamado al final de Visión import
 - ✅ Método `_is_lote_test()` para detectar lotes alfanuméricos
+- ✅ Schema job simplificado: eliminado `qty_completed` y `qty_remaining` (innecesarios)
 - ✅ Schema job actualizado: `material` (no numero_parte), `fecha_entrega`, `notes`
 - ✅ Schema job_unit actualizado: `job_unit_id` PK, `correlativo_int`, `qty`, `status`
+- ✅ Sincronización job ↔ job_unit: DELETE + INSERT en cada import MB52
 - ✅ Tests: 4 nuevos tests en test_job_creation.py
   - test_create_jobs_from_mb52_basic ✅
   - test_create_jobs_test_priority ✅
@@ -243,8 +255,9 @@ Este documento define **qué implementar** basado en la documentación oficial.
 - src/foundryplan/data/repository.py: Métodos _create_jobs_from_mb52, _update_jobs_from_vision, _is_lote_test
 - tests/test_db_schema.py: Actualizado test_job_structure
 - tests/test_job_creation.py: 4 nuevos tests (NUEVO)
+- docs/modelo-datos.md: Documentada relación job → job_unit y sincronización
 
-**Commits:** ee03efb (docs), 747359a (implementación)
+**Commits:** ee03efb (docs), 747359a (implementación inicial), 9eec78f (simplificación qty_*), 0ee7cb9 (docs actualizadas)
 
 ---
 

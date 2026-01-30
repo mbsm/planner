@@ -344,14 +344,12 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `job_id` | texto (PK) | ID único interno (ej: `job_20260130_001`) |
-| `process_id` | texto (FK) | ID del proceso (ej: `mecanizado`, `terminacion`) |
+| `job_id` | texto (PK) | ID único interno (ej: `job_terminaciones_20260130123456_a1b2c3d4`) |
+| `process_id` | texto (FK) | ID del proceso (ej: `mecanizado`, `terminaciones`) |
 | `pedido` | texto | Pedido SAP (cruza con MB52/Visión) |
 | `posicion` | texto | Posición SAP (cruza con MB52/Visión) |
 | `material` | texto (FK) | Número de parte (FK a `material_master`) |
-| `qty_total` | real | Cantidad total (piezas o moldes según proceso) |
-| `qty_completed` | real | Completado (auditoría; puede venir de Visión) |
-| `qty_remaining` | real | Pendiente: `qty_total - qty_completed` |
+| `qty_total` | entero | Cantidad de lotes actuales en MB52 para este job |
 | `priority` | entero | Prioridad numérica (menor = mayor prioridad) |
 | `is_test` | 0/1 | 1 si derivado de lotes alfanuméricos (prueba) |
 | `state` | texto | `pending` \| `in_process` |
@@ -359,7 +357,6 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
 | `notes` | texto | Observaciones operacionales |
 | `created_at` | datetime | Auditoría |
 | `updated_at` | datetime | Auditoría |
-| `completed_at` | datetime | Auditoría (cuando pasó a `completed`) |
 
 **Notas sobre sincronización**:
 - Jobs se crean **al importar MB52** para cada proceso configurado:
@@ -367,44 +364,67 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
   - Por defecto `state='pending'`
   - `priority` se inicializa con valor "normal" (ej: 3) desde `job_priority_map` config
   - Las **pruebas** (lotes alfanuméricos) se marcan `is_test=1` y usan prioridad "prueba" (ej: 1)
+  
+- **¿Cómo sabe un job qué lotes tiene asociados?**
+  - A través de la tabla `job_unit` (relación 1:N)
+  - Cada `job_unit` representa un lote físico del MB52
+  - Consulta: `SELECT lote FROM job_unit WHERE job_id = ?`
+  - Ver sección 2.4.2 para detalles de `job_unit`
+  
+- **Sincronización job ↔ job_unit**:
+  - Al importar MB52, para cada job:
+    1. Se calcula `qty_total = COUNT(*)` de lotes en MB52
+    2. Se eliminan todos los `job_unit` anteriores: `DELETE FROM job_unit WHERE job_id = ?`
+    3. Se recrean los `job_unit` desde los lotes actuales en MB52
+  - Esto garantiza que `job_unit` siempre refleja los lotes que **actualmente existen** en MB52
+  - Los lotes **desaparecen del MB52** cuando se completan físicamente
+  - Por lo tanto, `qty_total` representa la cantidad **actual** de lotes disponibles
+
+- **Actualización desde Visión**:
+  - Visión **solo aporta `fecha_entrega`** (no progreso)
+  - No modifica `qty_total` ni `job_unit` (esos vienen solo del MB52)
+  - Consulta: `UPDATE job SET fecha_entrega = (SELECT fecha_entrega FROM sap_vision_snapshot WHERE ...)`
+
 - El usuario puede **splittear** un job desde la GUI en múltiples jobs (mismo pedido/posición/proceso, distintos `job_id`):
   - Los splits se crean y mantienen **antes del scheduler**
   - El scheduler actúa solo sobre jobs (no crea splits)
   - Los splits los dispara el usuario desde la GUI, salvo en pruebas (automático)
+  
 - El usuario marca **urgentes** desde la GUI (no automático):
   - Cambiar `priority` a valor "urgente" (ej: 2) desde `job_priority_map`
   - "normal" es el valor por defecto (ej: 3)
+  
 - Los **splits** y pines operativos (`dispatch_in_progress`) se mantienen al recalcular colas (datos persistentes).
-- Los **splits** se actualizan solo desde MB52 (stock real); si pedido/posición desaparece de Visión, no se modifican splits.
 - Cuando entra nuevo stock con splits existentes, el sistema asigna al split con menor cantidad actual.
 - Si splits quedaron en cero y luego llega stock nuevo, se crea un solo job (splits anteriores no se reutilizan).
 - Si material no existe en `material_master` → popup solicita campos antes de crear job.
-- `qty_total` se calcula desde MB52 (stock real por almacén del proceso).
-- `qty_completed` se actualiza desde Visión (progreso) cada vez que se carga Visión Planta.
-- Cambios en Visión (fechas, progreso) no invalidan jobs existentes, solo actualizan cantidades.
-- Si pedido/posición desaparece de Visión, job se cierra (histórico; no se regenera).
-- Si pedido/posición desaparece del almacén del proceso (MB52), job queda sin stock y se cierra.
-- Si reaparecen unidades, job puede reabrirse o se crea uno nuevo (según estado previo).
 
 #### 2.4.2 job_unit
 
-Tabla de lotes concretos (unidades físicas) dentro de cada job. Vincula cada lote/correlativo con el job y su cantidad.
+Tabla de lotes concretos (unidades físicas) dentro de cada job. Vincula cada lote/correlativo con el job.
+
+**Relación con job**: 1 job → N job_units (un job puede tener muchos lotes)
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `job_unit_id` | texto (PK) | ID único (ej: `ju_20260130_001`) |
+| `job_unit_id` | texto (PK) | ID único (ej: `ju_job_terminaciones_20260130_a1b2c3d4`) |
 | `job_id` | texto (FK) | Job al que pertenece |
 | `lote` | texto | Lote/correlativo físico (desde MB52) |
 | `correlativo_int` | entero | Primer grupo numérico del lote (para orden) |
-| `qty` | real | Cantidad de este lote |
+| `qty` | entero | Cantidad de este lote (normalmente 1 por lote) |
 | `status` | texto | `available` \| `reserved` \| `in_progress` \| `completed` \| `on_hold` |
 | `created_at` | datetime | Auditoría |
 | `updated_at` | datetime | Auditoría |
 
 **Notas sobre sincronización**:
-- Un `job_unit` se crea por cada lote único en MB52 que forme parte del job.
-- El `status` es informativo (auditoria); el estado real viene del `job.state`.
-- Si un lote se descarta o desaparece en SAP → marcar como `on_hold`, no borrar (trazabilidad).
+- Se crea un `job_unit` por cada lote único en MB52 que forme parte del job
+- Al importar MB52, los `job_unit` se recrean completamente:
+  1. `DELETE FROM job_unit WHERE job_id = ?`
+  2. `INSERT INTO job_unit` por cada lote en MB52 para ese (pedido, posición, material, proceso)
+- El `status` es informativo (auditoria); el estado real viene del `job.state`
+- `correlativo_int` se deriva del primer grupo numérico en el `lote` para ordenamiento
+- **Los lotes desaparecen automáticamente** cuando se eliminan del MB52 (import con reemplazo total)
+- Para obtener los lotes de un job: `SELECT lote, correlativo_int, qty, status FROM job_unit WHERE job_id = ? ORDER BY correlativo_int`
 
 #### 2.4.3 dispatch_queue_run
 
