@@ -354,7 +354,7 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
 | `qty_remaining` | real | Pendiente: `qty_total - qty_completed` |
 | `priority` | entero | Prioridad numérica (menor = mayor prioridad) |
 | `is_test` | 0/1 | 1 si derivado de lotes alfanuméricos (prueba) |
-| `state` | texto | `queued` \| `in_progress` \| `completed` \| `blocked` \| `cancelled` |
+| `state` | texto | `pending` \| `in_process` |
 | `fecha_entrega` | date | Desde Visión (información de negocio) |
 | `notes` | texto | Observaciones operacionales |
 | `created_at` | datetime | Auditoría |
@@ -362,23 +362,29 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
 | `completed_at` | datetime | Auditoría (cuando pasó a `completed`) |
 
 **Notas sobre sincronización**:
-- Un `job` se crea cada vez que se importa un cruce nuevo en MB52 + Visión (pedido/posición/material no existente en `job`).
-- **Por defecto**: 1 job == 1 `pedido/posicion` por proceso.
-- El usuario puede **splittear** un `pedido/posicion` en múltiples jobs (mismo `pedido/posicion`, distintos `job_id`).
-- **Excepción automática**: si existen lotes **alfanuméricos** en el almacén del proceso, se **crea/actualiza** un job de pruebas que agrupa esos correlativos (marcado `is_test=1`).
-- Los **splits** y pines operativos (`dispatch_in_progress`) se consideran datos persistentes y se mantienen al recalcular colas.
-- Los **splits** se actualizan **solo** a partir de MB52 (stock real por almacén); si un pedido/posición desaparece de Visión, **no** se modifican los splits.
-- Cuando entra nuevo stock de un pedido/posición con splits existentes, el sistema asigna las nuevas unidades al **split con menor cantidad** actual.
-- Si un pedido/posición tuvo splits, pero **ambos quedaron en cero** (sin stock en el almacén del proceso), y luego llega stock nuevo, se crea **un solo job** (los splits anteriores no se reutilizan).
-- Si un material no existe en `material_master` → popup solicita los 7 campos, y luego se crea el `job`.
-- `qty_total` se calcula desde Visión (`solicitado`) o se estima desde MB52 si Visión aún no existe.
+- Jobs se crean **al importar MB52** para cada proceso configurado:
+  - 1 job por (pedido, posición, material, proceso)
+  - Por defecto `state='pending'`
+  - `priority` se inicializa con valor "normal" (ej: 3) desde `job_priority_map` config
+  - Las **pruebas** (lotes alfanuméricos) se marcan `is_test=1` y usan prioridad "prueba" (ej: 1)
+- El usuario puede **splittear** un job desde la GUI en múltiples jobs (mismo pedido/posición/proceso, distintos `job_id`):
+  - Los splits se crean y mantienen **antes del scheduler**
+  - El scheduler actúa solo sobre jobs (no crea splits)
+  - Los splits los dispara el usuario desde la GUI, salvo en pruebas (automático)
+- El usuario marca **urgentes** desde la GUI (no automático):
+  - Cambiar `priority` a valor "urgente" (ej: 2) desde `job_priority_map`
+  - "normal" es el valor por defecto (ej: 3)
+- Los **splits** y pines operativos (`dispatch_in_progress`) se mantienen al recalcular colas (datos persistentes).
+- Los **splits** se actualizan solo desde MB52 (stock real); si pedido/posición desaparece de Visión, no se modifican splits.
+- Cuando entra nuevo stock con splits existentes, el sistema asigna al split con menor cantidad actual.
+- Si splits quedaron en cero y luego llega stock nuevo, se crea un solo job (splits anteriores no se reutilizan).
+- Si material no existe en `material_master` → popup solicita campos antes de crear job.
+- `qty_total` se calcula desde MB52 (stock real por almacén del proceso).
 - `qty_completed` se actualiza desde Visión (progreso) cada vez que se carga Visión Planta.
-- `priority` se calcula al crear/regenerar según la configuración (ej: `prueba=1`, `urgente=2`, `normal=3`).
-- Los jobs **heredan la prioridad** del `pedido/posicion` **salvo** el job de prueba, que usa la prioridad configurada para `prueba`.
-- Cambios en Visión (fechas, progreso) **no invalidan jobs existentes**, solo se actualizan sus cantidades.
-- Si un `pedido/posicion` **desaparece de Visión**, el job se **cierra** (se mantiene histórico; no se regenera).
-- Si un `pedido/posicion` **desaparece del almacén del proceso** (MB52), el job queda sin stock y se **cierra** para ese proceso.
-- Si reaparecen unidades en futuras cargas, el job puede **reabrirse** o se crea uno nuevo (según estado previo).
+- Cambios en Visión (fechas, progreso) no invalidan jobs existentes, solo actualizan cantidades.
+- Si pedido/posición desaparece de Visión, job se cierra (histórico; no se regenera).
+- Si pedido/posición desaparece del almacén del proceso (MB52), job queda sin stock y se cierra.
+- Si reaparecen unidades, job puede reabrirse o se crea uno nuevo (según estado previo).
 
 #### 2.4.2 job_unit
 
@@ -638,11 +644,10 @@ Vista derivada que suma el estado de todas las colas activas (para dashboard/Hom
 | Campo | Tipo | Cálculo |
 |---|---|---|
 | `process_id` | texto | ID del proceso |
-| `total_jobs_queued` | entero | COUNT donde `job.state='queued'` |
-| `total_jobs_in_progress` | entero | COUNT donde `job.state='in_progress'` |
-| `total_jobs_completed` | entero | COUNT donde `job.state='completed'` en última semana |
-| `qty_total_pending` | real | SUM de `qty_remaining` donde `state='queued'` |
-| `qty_total_in_progress` | real | SUM de `qty_remaining` donde `state='in_progress'` |
+| `total_jobs_pending` | entero | COUNT donde `job.state='pending'` |
+| `total_jobs_in_process` | entero | COUNT donde `job.state='in_process'` |
+| `qty_total_pending` | real | SUM de `qty_remaining` donde `state='pending'` |
+| `qty_total_in_process` | real | SUM de `qty_remaining` donde `state='in_process'` |
 | `current_run_id` | texto | `last_dispatch.run_id` |
 | `lines_active` | entero | COUNT DISTINCT `resource_id` donde `dispatch_in_progress_item` está activo |
 | `estimated_completion_time` | datetime | MAX de `eta_end` en `dispatch_queue_item` actual |
@@ -654,8 +659,9 @@ Vista derivada que ayuda al UI a mostrar orden de ejecución sugerido.
 | Campo | Tipo | Cálculo |
 |---|---|---|
 | `job_id` | texto | ID del job |
+| `state` | texto | Desde `job` (`pending` \| `in_process`) |
 | `is_test` | 0/1 | Desde `job` |
-| `priority` | entero | Desde `job` (menor = mayor prioridad) |
+| `priority` | entero | Desde `job` (menor = mayor prioridad; prueba=1, urgente=2, normal=3) |
 | `start_by` | date | Calculado: `fecha_entrega - (vulcanizado_dias + mecanizado_dias + inspeccion_externa_dias)` |
 | `dias_para_start_by` | entero | Hoy - `start_by` (negativo = futuro; positivo = retrasado) |
 | `sort_key` | real | Fórmula de ordenamiento: `priority` ascendente, luego `start_by` ascendente |
@@ -696,17 +702,20 @@ sap_mb52_snapshot / sap_vision_snapshot (auditoría/trazabilidad)
   - `sap_material_prefixes` (config)
   - `sap_center` (config)
   - Se guarda TODO en `sap_mb52_snapshot` (sin filtrar por almacén aún)
-- **No se crean jobs aún** (necesitamos Visión para saber pedido/posición).
+- **Se crean jobs automáticamente** para cada proceso configurado:
+  - Por cada (pedido/posición/material) en MB52 que coincide con un almacén de proceso configurado.
+  - Se crea 1 job con `state='pending'` por cada proceso.
+  - Si material NO existe en `material_master` → popup solicita los campos.
+  - Se crean `job_unit` por cada lote del MB52.
 
 **Paso 2: Cargar Visión Planta**
 - Usuario sube archivo Visión Planta.
 - App normaliza encabezados y guarda TODO en `sap_vision_snapshot`.
-- **Ahora ejecutar cruce**:
-  - Por cada fila en Visión: buscar en MB52 por (documento_comercial, posicion_sd).
-  - Agrupar lotes por (pedido, posicion, material).
-  - Si el material NO existe en `material_master` → popup solicita 7 campos.
-  - Una vez material confirmado, crear/actualizar `job`.
-  - Para cada lote en el grupo, crear `job_unit`.
+- **Actualizar jobs existentes** (creados en Paso 1):
+  - Por cada fila en Visión: buscar jobs por (pedido, posicion).
+  - Actualizar `qty_completed` y `fecha_entrega` desde Visión.
+  - Recalcular `qty_remaining`.
+  - Si material NO existe en `material_master` → popup solicita campos (antes de crear job).
 
 **Paso 3: Popup material_master**
 - Si material es nuevo, popup pide:
@@ -722,11 +731,12 @@ sap_mb52_snapshot / sap_vision_snapshot (auditoría/trazabilidad)
 - Usuario completa, se inserta en `material_master`.
 - Se prosigue con creación de job.
 
-**Paso 4: Crear/Actualizar Jobs**
-- Para cada pedido/posicion/material/proceso combination:
-  - Si job NO existe: crear con `state='queued'`.
-  - Si job existe: actualizar `qty_completed` desde Visión, recalcular `qty_remaining`.
-- Guardar jobs con `created_at` / `updated_at` para auditoría.
+**Paso 4: Actualizar Jobs (ya creados en Paso 1)**
+- Para cada job existente:
+  - Actualizar `qty_completed` desde Visión (si existe cruce).
+  - Recalcular `qty_remaining`.
+  - Si `qty_remaining` llega a 0, job puede marcarse como completado (cierre).
+- Guardar cambios con `updated_at` para auditoría.
 
 ### 3.2 Invalidación de datos derivados
 
@@ -738,7 +748,7 @@ sap_mb52_snapshot / sap_vision_snapshot (auditoría/trazabilidad)
 | Actualizar `family_id` o atributos (`mec_perf_inclinada`, `sobre_medida_mecanizado`) | `dispatch_queue_run` (revalidar restricciones por línea) |
 | Actualizar moldeo-específico (`aleacion`, `piezas_por_molde`, `peso_bruto_ton`, `tiempo_enfriamiento_molde_dias`) | `weekly_plan_run` (afecta cálculo moldeo) |
 | Cargar nueva Visión Planta | Recalcular `moldeo_progress` (vista), actualizar `qty_completed` en jobs |
-| Cargar nuevo MB52 | Posible cambio en `stock_moldes_no_fundidos` → recalcular `moldeo_progress` |
+| Cargar nuevo MB52 | Crear/actualizar jobs para todos los procesos configurados, recalcular `stock_moldes_no_fundidos` → recalcular `moldeo_progress` |
 | Usuario guarda una cola (`last_dispatch`) | Permite revert; no invalida jobs |
 | Usuario guarda un plan (`weekly_plan_run`) | No invalida jobs; es una decisión guardada |
 

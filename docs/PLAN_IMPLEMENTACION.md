@@ -170,36 +170,107 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ## 3️⃣ FASE 3: CÁLCULO DE JOBS
 
-### 3.1 Job Creation & Lifecycle
-- [ ] Crear 1 job por (process, pedido, posicion, material) por defecto
-- [ ] Actualizar `qty_total`, `qty_completed`, `qty_remaining` desde SAP
-- [ ] Calcular `priority` según configuración:
-  - [ ] Tests → prioridad "prueba" (configurable, default 1)
-  - [ ] Manual urgentes → prioridad "urgente" (configurable, default 2)
-  - [ ] Normal → prioridad "normal" (configurable, default 3)
+### 3.1 Job Creation & Lifecycle ⚙️ **EN PROGRESO**
 
-**Requerimientos modelo-datos.md línea 378-389:**
-- [ ] Si pedido/pos desaparece de Visión → cerrar job (state='completed')
-- [ ] Si pedido/pos desaparece de MB52 → cerrar job para ese proceso
-- [ ] Si reaparece stock en futuro → reabre o crea nuevo job
+**🔑 Trigger:** Jobs se crean **automáticamente al importar MB52** (no al cargar Visión)
+
+**📋 Reglas de creación:**
+- [ ] En `import_sap_mb52_bytes`: después de guardar snapshot, crear jobs automáticamente
+- [ ] Crear 1 job por (process_id, pedido, posicion, material) para **cada proceso configurado** (no solo terminaciones)
+  - [ ] Iterar sobre `process` table donde `is_active=1`
+  - [ ] Filtrar MB52 por `almacen` del proceso (usar `process.sap_almacen`)
+  - [ ] Agrupar por (pedido, posicion, material)
+  - [ ] Crear job con `state='pending'`, `qty_total` = suma de stock real
+- [ ] Si material NO existe en `material_master` → popup solicita campos antes de crear job
+
+**📊 Campos iniciales del job:**
+- [ ] `job_id` = generar único (ej: `job_{process}_{timestamp}_{counter}`)
+- [ ] `process_id` = ID del proceso
+- [ ] `pedido`, `posicion`, `material` = desde MB52
+- [ ] `qty_total` = stock real desde MB52 (count de lotes en ese almacén)
+- [ ] `qty_completed` = 0 (se actualiza al cargar Visión)
+- [ ] `qty_remaining` = qty_total (recalculado)
+- [ ] `priority` = valor "normal" desde `job_priority_map` config (ej: 3)
+- [ ] `is_test` = 1 si algún lote es alfanumérico (automático)
+- [ ] `state` = 'pending' (inicial)
+- [ ] `fecha_entrega` = NULL (se actualiza al cargar Visión)
+- [ ] `created_at` = now
+
+**🧪 Prioridad automática para tests:**
+- [ ] Si `is_test=1` → usar prioridad "prueba" (ej: 1) desde `job_priority_map`
+- [ ] Tests mantienen prioridad "prueba" siempre (no cambia a "normal")
+
+**🔄 Actualización desde Visión Planta:**
+- [ ] En `import_sap_vision_bytes`: después de guardar snapshot, actualizar jobs existentes
+- [ ] Buscar jobs por (pedido, posicion)
+- [ ] Actualizar `qty_completed` desde campo de progreso en Visión (ej: `terminacion` para terminaciones)
+- [ ] Actualizar `fecha_entrega` desde Visión
+- [ ] Recalcular `qty_remaining = qty_total - qty_completed`
+
+**🔒 Lifecycle (estado del job):**
+- [ ] `state='pending'` → job creado, sin iniciar
+- [ ] `state='in_process'` → job siendo ejecutado (marcado desde GUI/dispatch)
+- [ ] Si `qty_remaining` llega a 0 → job puede cerrarse (marcar completado, no borrar)
+- [ ] Si pedido/pos desaparece de Visión → job persiste (histórico)
+- [ ] Si pedido/pos desaparece del almacén del proceso (MB52) → job queda con qty=0
+- [ ] Si reaparece stock → job puede reabrirse o crear nuevo (según lógica de reactivación)
+
+**📦 Job Units:**
+- [ ] Crear `job_unit` por cada lote en MB52 del job:
+  - [ ] `job_unit_id` = generar único
+  - [ ] `job_id` = FK al job
+  - [ ] `lote` = lote físico desde MB52
+  - [ ] `correlativo_int` = primer grupo numérico del lote
+  - [ ] `qty` = 1 (una pieza por lote en MB52)
+  - [ ] `status` = 'available' (inicial)
 
 ---
 
 ### 3.2 Split Management
-- [ ] Método: `create_balanced_split(pedido, posicion)` → crea split_id=1 y split_id=2
-- [ ] Distribución balanceada: qty1 = total//2, qty2 = total - qty1
 
-**Distribución de nuevo stock (modelo-datos.md línea 376):**
-- [ ] Cuando llega nuevo stock con splits existentes: asignar al split con **menor cantidad actual**
-- [ ] Si ambos splits quedan en 0: siguiente stock crea **único job nuevo** (sin reutilizar splits)
+**🎯 Cuándo se crean splits:** Usuario dispara desde GUI, **ANTES del scheduler** (el scheduler actúa solo sobre jobs)
+
+**📋 Reglas de splits:**
+- [ ] Método: `split_job(job_id, qty_split_1)` → crea 2 jobs desde 1 original
+  - [ ] Job original conserva `qty_split_1`
+  - [ ] Nuevo job recibe `qty_split_2 = qty_total - qty_split_1`
+  - [ ] Ambos jobs tienen mismo (pedido, posicion, material, process_id)
+  - [ ] Ambos heredan `priority`, `is_test`, `fecha_entrega`
+- [ ] Splits persisten en tabla `job` (no en tabla separada)
+- [ ] Identificar splits por: mismo (pedido, posicion, material, process_id) con múltiples `job_id`
+
+**🔄 Distribución de nuevo stock con splits existentes (modelo-datos.md):**
+- [ ] Cuando llega nuevo stock de un pedido/posición con splits existentes:
+  - [ ] Asignar nuevas unidades al split con **menor qty_remaining actual**
+  - [ ] Actualizar `qty_total` del job correspondiente
+  - [ ] Crear `job_unit` asociados al job correcto
+- [ ] Si ambos splits quedan en `qty_remaining=0` y luego llega stock nuevo:
+  - [ ] Crear **1 solo job nuevo** (no reutilizar splits anteriores)
+
+**🧪 Splits en tests:**
+- [ ] Tests se splittean automáticamente al detectarse lotes alfanuméricos
+- [ ] Cada test tiene su propio job con `is_test=1`
 
 ---
 
-### 3.3 Job Priority & Pinning
-- [ ] `priority` es campo persistente (recalculable al cambiar config)
-- [ ] Jobs "en proceso" (pinned): `program_in_progress_item` con `line_id`, `marked_at`
-- [ ] Pinned jobs sobreviven recálculos de dispatch
-- [ ] Pinned jobs flotan a TOP de su línea (ordenado por `marked_at`)
+### 3.3 Job Priority Management
+
+**🎨 Valores de prioridad (desde config `job_priority_map`):**
+- [ ] "prueba": 1 (menor = mayor prioridad)
+- [ ] "urgente": 2
+- [ ] "normal": 3 (default)
+
+**📌 Reglas de asignación:**
+- [ ] **Default:** Todo job se crea con `priority` = valor "normal" (ej: 3)
+- [ ] **Tests automáticos:** Si `is_test=1` → `priority` = valor "prueba" (ej: 1)
+- [ ] **Urgentes manuales:** Usuario marca desde GUI → cambiar `priority` = valor "urgente" (ej: 2)
+  - [ ] Implementar método: `mark_job_urgent(job_id)` → UPDATE job SET priority = <urgente_value>
+  - [ ] Implementar método: `unmark_job_urgent(job_id)` → UPDATE job SET priority = <normal_value>
+
+**🔄 Persistencia:**
+- [ ] `priority` es campo en tabla `job` (persistente)
+- [ ] Recalcular al cambiar config `job_priority_map`
+- [ ] No recalcular automáticamente al cargar SAP (mantener marcas manuales)
 
 ---
 
