@@ -1415,6 +1415,9 @@ class Repository:
         prefixes = [p.strip() for p in prefixes_raw.split(",") if p.strip()]
         keep_all_materials = (not prefixes) or ("*" in prefixes)
 
+        rows_legacy: list[tuple] = []  # For sap_mb52 (backward-compat)
+        rows_snapshot: list[tuple] = []  # For sap_mb52_snapshot (v0.2)
+
         for _, r in df.iterrows():
             material = str(r.get("material", "")).strip()
             if not material:
@@ -1428,11 +1431,25 @@ class Repository:
             if centro and almacen:
                 centro_almacen_pairs.add((str(centro), str(almacen)))
             lote = str(r.get("lote", "")).strip() or None
+            pb_almacen = float(r.get("pb_a_nivel_de_almacen", 0) or r.get("pb_almacen", 0) or 0) or None
             libre = to_int01(r.get("libre_utilizacion"))
             doc = self._normalize_sap_key(r.get("documento_comercial"))
             pos = self._normalize_sap_key(r.get("posicion_sd"))
             qc = to_int01(r.get("en_control_calidad"))
-            rows.append((material, texto_breve, centro, almacen, lote, libre, doc, pos, qc))
+            
+            # Derive fields for snapshot table
+            correlativo_int = self._lote_to_int(lote) if lote else None
+            is_test = 1 if (lote and self._is_lote_test(lote)) else 0
+            
+            # Legacy table (backward-compat)
+            rows_legacy.append((material, texto_breve, centro, almacen, lote, libre, doc, pos, qc))
+            
+            # Snapshot table (v0.2) - includes derived fields
+            rows_snapshot.append((
+                material, texto_breve, centro, almacen, lote, pb_almacen,
+                libre, doc, pos, qc, correlativo_int, is_test
+            ))
+
 
         # Progress report (Terminaciones): compute salidas brutas vs previous MB52 when replacing.
         # We compute it BEFORE invalidating cached programs.
@@ -1482,16 +1499,33 @@ class Repository:
 
             if mode == "replace":
                 con.execute("DELETE FROM sap_mb52")
+                con.execute("DELETE FROM sap_mb52_snapshot")  # v0.2: also clear snapshot table
             else:
                 # Merge mode: replace only the centro/almacen subsets present in this file.
                 for c, a in sorted(centro_almacen_pairs):
                     con.execute("DELETE FROM sap_mb52 WHERE centro = ? AND almacen = ?", (c, a))
+                    con.execute("DELETE FROM sap_mb52_snapshot WHERE centro = ? AND almacen = ?", (c, a))
+            
+            # Insert into legacy table (backward-compat)
             con.executemany(
                 """
                 INSERT INTO sap_mb52(material, texto_breve, centro, almacen, lote, libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad)
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                rows,
+                rows_legacy,
+            )
+            
+            # Insert into snapshot table (v0.2)
+            con.executemany(
+                """
+                INSERT INTO sap_mb52_snapshot(
+                    material, texto_breve, centro, almacen, lote, pb_almacen,
+                    libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad,
+                    correlativo_int, is_test
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_snapshot,
             )
 
             if mode == "replace" and last_program_term and prev_keys_term is not None and prev_items_term is not None:
@@ -2098,6 +2132,7 @@ class Repository:
             )
 
         with self.db.connect() as con:
+            # Legacy table (backward-compat)
             con.execute("DELETE FROM sap_vision")
             con.executemany(
                 """
@@ -2113,29 +2148,47 @@ class Repository:
                 """,
                 rows,
             )
+            
+            # Snapshot table (v0.2) - same data, different table
+            con.execute("DELETE FROM sap_vision_snapshot")
+            con.executemany(
+                """
+                INSERT INTO sap_vision_snapshot(
+                    pedido, posicion, cod_material, descripcion_material, fecha_de_pedido, fecha_entrega,
+                    solicitado,
+                    x_programar, programado, x_fundir, desmoldeo, tt, terminacion,
+                    mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
+                    en_vulcaniz, pend_vulcanizado, rech_insp_externa, lib_vulcaniz_de,
+                    cliente, n_oc_cliente, peso_neto_ton, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion, status_comercial
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
 
-            # Update materials master weights (peso_ton) by iterating the master:
+            # Update materials master weights (peso_unitario_ton) by iterating the master:
             # for each material, pick the first pedido/pos in Vision (ordered) and
             # use its peso_unitario_ton (tons per piece; from (peso_neto_kg/1000)/solicitado).
+            # v0.2: Update material_master (was 'parts')
             con.execute(
                 """
-                UPDATE parts
-                SET peso_ton = COALESCE(
+                UPDATE material_master
+                SET peso_unitario_ton = COALESCE(
                     (
                         SELECT v.peso_unitario_ton
                         FROM sap_vision v
-                        WHERE v.cod_material = parts.numero_parte
+                        WHERE v.cod_material = material_master.material
                           AND v.peso_unitario_ton IS NOT NULL
                           AND v.peso_unitario_ton >= 0
                         ORDER BY v.fecha_pedido ASC, v.pedido ASC, v.posicion ASC
                         LIMIT 1
                     ),
-                    peso_ton
+                    peso_unitario_ton
                 )
                 WHERE EXISTS (
                     SELECT 1
                     FROM sap_vision v2
-                    WHERE v2.cod_material = parts.numero_parte
+                    WHERE v2.cod_material = material_master.material
                       AND v2.peso_unitario_ton IS NOT NULL
                       AND v2.peso_unitario_ton >= 0
                 )
