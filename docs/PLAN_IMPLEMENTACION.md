@@ -99,29 +99,32 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ---
 
-## 2️⃣ FASE 2: IMPORTACIÓN SAP
+## 2️⃣ FASE 2: IMPORTACIÓN SAP ✅ **COMPLETADO** (Commit: e2769d7)
 
-### 2.1 MB52 Import (`import_sap_mb52_bytes`)
-- [ ] Validar columnas: material, centro, almacen, lote, libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad
-- [ ] Normalizar claves SAP (Excel convierte "000010" → 10.0 → normalizar a "10")
-- [ ] Filtrar por `sap_material_prefixes` configurado
-- [ ] Aplicar `_mb52_availability_predicate_sql` según proceso:
-  - [ ] Default: `libre_utilizacion=1 AND en_control_calidad=0`
-  - [ ] `toma_de_dureza`: `libre_utilizacion=0 OR en_control_calidad=1` (inverso)
+### 2.1 MB52 Import (`import_sap_mb52_bytes`) ✅
+- [x] Validar columnas: material, centro, almacen, lote, libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad
+- [x] Normalizar claves SAP (Excel convierte "000010" → 10.0 → normalizar a "10")
+- [x] Filtrar por `sap_material_prefixes` configurado
+- [x] Aplicar `_mb52_availability_predicate_sql` según proceso:
+  - [x] Default: `libre_utilizacion=1 AND en_control_calidad=0`
+  - [x] `toma_de_dureza`: `libre_utilizacion=0 OR en_control_calidad=1` (inverso)
 
 **Requerimientos modelo-datos.md:**
-- [ ] Soportar `mode="merge"` (actualizar solo algunos centro/almacen pairs)
-- [ ] Soportar `mode="replace"` (limpiar tabla e insertar)
-- [ ] Al completar import: invalidar `orders` + `last_program` para recalcular
+- [x] Soportar `mode="merge"` (actualizar solo algunos centro/almacen pairs)
+- [x] Soportar `mode="replace"` (limpiar tabla e insertar)
+- [x] Al completar import: invalidar `orders` + `last_program` para recalcular
+- [x] Dual-table strategy: inserta en `sap_mb52` + `sap_mb52_snapshot`
+- [x] Auto-detección de tests: `is_test = 1 if _is_lote_test(lote) else 0`
 
 ---
 
-### 2.2 Visión Planta Import (`import_sap_vision_bytes`)
-- [ ] Validar columnas mínimas: pedido, posicion, cod_material, fecha_de_pedido
-- [ ] Normalizar columnas con aliases (fecha_pedido, tipo_posicion, status_comercial, etc.)
-- [ ] Convertir `peso_neto` de kg → toneladas
-- [ ] Calcular `peso_unitario_ton = peso_neto_tons / solicitado`
-- [ ] Auto-actualizar `material_master.peso_ton` desde `peso_unitario_ton` (primera aparición por fecha_pedido)
+### 2.2 Visión Planta Import (`import_sap_vision_bytes`) ✅
+- [x] Validar columnas mínimas: pedido, posicion, cod_material, fecha_de_pedido
+- [x] Normalizar columnas con aliases (fecha_pedido, tipo_posicion, status_comercial, etc.)
+- [x] Convertir `peso_neto` de kg → toneladas
+- [x] Calcular `peso_unitario_ton = peso_neto_tons / solicitado`
+- [x] Auto-actualizar `material_master.peso_unitario_ton` desde `peso_unitario_ton` (primera aparición por fecha_pedido)
+- [x] Dual-table strategy: inserta en `sap_vision` + `sap_vision_snapshot`
 
 **Requerimientos especificacion.md línea 97:**
 - [ ] "peso_unitario_ton se actualiza desde Visión; si cambia, se solicita actualizar peso_bruto_ton"
@@ -133,15 +136,23 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ---
 
-### 2.3 Rebuild Orders from SAP
-- [ ] Método: `rebuild_orders_from_sap_for(process)`
-- [ ] Lógica: join MB52 + Visión por (documento_comercial, posicion_sd) = (pedido, posicion)
-- [ ] Agrupa por (pedido, posicion, material), suma lotes
+### 2.3 Rebuild Orders from SAP ✅
+- [x] Método: `rebuild_orders_from_sap_for(process)`
+- [x] Lógica: join MB52 + Visión por (documento_comercial, posicion_sd) = (pedido, posicion)
+- [x] Agrupa por (pedido, posicion, material), suma lotes
 
 **Detección automática de tests (especificacion.md línea 96):**
-- [ ] Buscar lotes con alfanuméricos (regex: contienen [A-Za-z])
-- [ ] Crear `orderpos_priority` con `kind='test'`, `is_priority=1` automáticamente
-- [ ] ⚠️ **Importante:** Tests NO se pueden desmarcar (`delete_all_pedido_priorities(keep_tests=True)`)
+- [x] Buscar lotes con alfanuméricos (regex: `re.search(r"[A-Za-z]", lote_s)`)
+- [x] Crear `orderpos_priority` con `kind='test'`, `is_priority=1` automáticamente
+- [x] ✅ **Implementado:** Tests NO se pueden desmarcar (`delete_all_pedido_priorities(keep_tests=True)`)
+
+**Estado:** Implementación completa con test end-to-end validando:
+- Auto-detección de lotes alfanuméricos como tests
+- Creación automática de orderpos_priority con kind='test'
+- Protección de tests en delete_all_pedido_priorities
+- Actualizado get_config/set_config para usar config_key/config_value (v0.2)
+
+**Tests:** 8/8 pasando en `tests/test_db_schema.py` (incluye `test_auto_test_detection_in_rebuild_orders`)
 
 ---
 
