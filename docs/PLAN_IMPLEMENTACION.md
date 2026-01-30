@@ -18,7 +18,7 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ---
 
-## 1️⃣ FASE 1: TABLAS & PERSISTENCIA ✅ **COMPLETADO** (Commit: b47dc8d)
+## 1️⃣ FASE 1: TABLAS & PERSISTENCIA ✅ **COMPLETADO** (Commit: e7fbd74)
 
 ### 1.1 Tablas de Configuración Base
 - [x] `app_config` - Parámetros de planta (centro, almacenes, prefijos, etc.)
@@ -32,6 +32,7 @@ Este documento define **qué implementar** basado en la documentación oficial.
 - [x] Validar que existen todas en DB
 - [x] Validar estructura matches `modelo-datos.md` sección 5.1
 - [x] Seeds: 5 familias, 7 procesos, config SAP
+- [x] **✅ Sin backward compatibility:** Solo tablas v0.2, eliminadas tablas legacy
 
 ---
 
@@ -42,7 +43,8 @@ Este documento define **qué implementar** basado en la documentación oficial.
 **Status actual:**
 - [x] Validar columnas vs especificacion.md
 - [x] Tablas creadas con estructura completa
-- [x] Legacy tables (sap_mb52, sap_vision) mantenidas para backward-compat
+- [x] **✅ Eliminadas tablas legacy** (sap_mb52, sap_vision) - solo v0.2
+- [x] **✅ Columnas v0.2:** fecha_de_pedido, peso_neto_ton, peso_unitario_ton, etc.
 
 ---
 
@@ -99,7 +101,7 @@ Este documento define **qué implementar** basado en la documentación oficial.
 
 ---
 
-## 2️⃣ FASE 2: IMPORTACIÓN SAP ✅ **COMPLETADO** (Commit: e2769d7)
+## 2️⃣ FASE 2: IMPORTACIÓN SAP ✅ **COMPLETADO** (Commit: e7fbd74)
 
 ### 2.1 MB52 Import (`import_sap_mb52_bytes`) ✅
 - [x] Validar columnas: material, centro, almacen, lote, libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad
@@ -113,18 +115,20 @@ Este documento define **qué implementar** basado en la documentación oficial.
 - [x] Soportar `mode="merge"` (actualizar solo algunos centro/almacen pairs)
 - [x] Soportar `mode="replace"` (limpiar tabla e insertar)
 - [x] Al completar import: invalidar `orders` + `last_program` para recalcular
-- [x] Dual-table strategy: inserta en `sap_mb52` + `sap_mb52_snapshot`
+- [x] **✅ Solo sap_mb52_snapshot:** Eliminada lógica dual-insert (simplificado)
 - [x] Auto-detección de tests: `is_test = 1 if _is_lote_test(lote) else 0`
+- [x] **✅ Nombres v0.2:** material (no numero_parte), correlativo_int, pb_almacen
 
 ---
 
 ### 2.2 Visión Planta Import (`import_sap_vision_bytes`) ✅
 - [x] Validar columnas mínimas: pedido, posicion, cod_material, fecha_de_pedido
-- [x] Normalizar columnas con aliases (fecha_pedido, tipo_posicion, status_comercial, etc.)
-- [x] Convertir `peso_neto` de kg → toneladas
+- [x] Normalizar columnas con aliases (fecha_de_pedido, tipo_posicion, status_comercial, etc.)
+- [x] Convertir `peso_neto` de kg → toneladas (peso_neto_ton)
 - [x] Calcular `peso_unitario_ton = peso_neto_tons / solicitado`
-- [x] Auto-actualizar `material_master.peso_unitario_ton` desde `peso_unitario_ton` (primera aparición por fecha_pedido)
-- [x] Dual-table strategy: inserta en `sap_vision` + `sap_vision_snapshot`
+- [x] Auto-actualizar `material_master.peso_unitario_ton` desde snapshot
+- [x] **✅ Solo sap_vision_snapshot:** Eliminada lógica dual-insert
+- [x] **✅ Columnas v0.2:** fecha_de_pedido, terminacion, x_fundir, peso_neto_ton
 
 **Requerimientos especificacion.md línea 97:**
 - [ ] "peso_unitario_ton se actualiza desde Visión; si cambia, se solicita actualizar peso_bruto_ton"
@@ -149,8 +153,16 @@ Este documento define **qué implementar** basado en la documentación oficial.
 **Estado:** Implementación completa con test end-to-end validando:
 - Auto-detección de lotes alfanuméricos como tests
 - Creación automática de orderpos_priority con kind='test'
-- Protección de tests en delete_all_pedido_priorities
-- Actualizado get_config/set_config para usar config_key/config_value (v0.2)
+- **✅ Sin backward compatibility:** 100% alineado con modelo-datos.md
+- **✅ Nombres v0.2:** material, family_id, peso_unitario_ton, fecha_de_pedido
+
+**Archivos modificados:**
+- `src/foundryplan/data/db.py`: Eliminadas migraciones legacy, solo v0.2
+- `src/foundryplan/data/repository.py`: 189 inserciones, 362 eliminaciones (simplificado)
+- `tests/test_db_schema.py`: Test actualizado para usar snapshot tables
+
+**Tests:** 7/7 pasando en `tests/test_db_schema.py` (incluye `test_auto_test_detection_in_rebuild_orders`)
+**Commits:** b47dc8d (FASE 1), e2769d7 (FASE 2.3), e7fbd74 (sin backward compat
 
 **Tests:** 8/8 pasando en `tests/test_db_schema.py` (incluye `test_auto_test_detection_in_rebuild_orders`)
 
