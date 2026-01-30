@@ -5,9 +5,9 @@ from datetime import date, datetime
 
 from nicegui import ui
 
-from plannerterm.core.scheduler import generate_program
-from plannerterm.data.repository import Repository
-from plannerterm.ui.widgets import page_container, render_line_tables, render_nav
+from foundryplan.core.scheduler import generate_program
+from foundryplan.data.repository import Repository
+from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
 
 
 def register_pages(repo: Repository) -> None:

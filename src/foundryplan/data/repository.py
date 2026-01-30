@@ -4,9 +4,9 @@ import json
 import re
 from datetime import date, datetime
 
-from plannerterm.core.models import Line, Order, Part
-from plannerterm.data.db import Db
-from plannerterm.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
+from foundryplan.core.models import Line, Order, Part
+from foundryplan.data.db import Db
+from foundryplan.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
 
 
 class Repository:

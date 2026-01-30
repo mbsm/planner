@@ -13,4 +13,4 @@ class Settings:
 
 def default_db_path() -> Path:
     # Fixed, repo-local database location (keeps paths stable across machines).
-    return Path("db") / "plannerterm.db"
+    return Path("db") / "foundryplan.db"

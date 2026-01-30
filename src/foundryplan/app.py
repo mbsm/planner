@@ -7,10 +7,10 @@ from pathlib import Path
 
 from nicegui import app, ui
 
-from plannerterm.settings import Settings, default_db_path
-from plannerterm.data.db import Db
-from plannerterm.data.repository import Repository
-from plannerterm.ui.pages import register_pages
+from foundryplan.settings import Settings, default_db_path
+from foundryplan.data.db import Db
+from foundryplan.data.repository import Repository
+from foundryplan.ui.pages import register_pages
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

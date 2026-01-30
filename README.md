@@ -1,6 +1,8 @@
-# PlannerTerm (Programación Terminaciones)
+# Foundry Plan
 
-App web (NiceGUI) para generar colas de trabajo por línea a partir de **stock usable (SAP MB52)** + **Visión Planta** + maestro local (familias + tiempos), persistiendo en SQLite.
+Sistema de planificación y despacho (planner + dispatcher) para plantas make-to-order, a partir de **stock SAP (MB52)** + **Visión Planta** + maestro local, persistiendo en SQLite.
+
+App web (NiceGUI) que genera colas de trabajo por línea para múltiples procesos (Terminaciones, Mecanizado, etc.).
 
 Incluye:
 - **Programas de Producción** por línea (por proceso/almacén)
@@ -28,11 +30,11 @@ Desde la carpeta raíz del workspace (donde está `.venv`):
 Luego abre http://localhost:8080
 
 Navegación en la app:
-- **Dashboard**: métricas rápidas.
-- **Programa**: colas por línea (se guarda en SQLite como “último programa”).
+- **Pedidos**: resumen de pedidos atrasados/próximos + KPI.
+- **Programa**: colas por línea (se guarda en SQLite como “último dispatch”).
 - **Actualizar**: carga de MB52 + Visión Planta desde Excel.
-- **Avance Producción**: reporte de salidas (MB52) por línea vs el último programa.
-- **Config** (dropdown): Configuración de líneas / Familias / Tiempos de proceso.
+- **Plan**: simulación de moldeo y análisis de impacto.
+- **Config** (dropdown): Parámetros / Procesos y Líneas / Familias / Maestro de Materiales.
 
 ## Operación rápida
 1. Ir a **Actualizar** y verificar Centro/Almacén (defaults: `4000` / `4035`).
@@ -44,7 +46,8 @@ Navegación en la app:
 Notas:
 - La app lee **solo la primera hoja** del Excel.
 - La importación es **SAP-driven**: la tabla `orders` se reconstruye uniendo MB52 + Visión.
-- Los lotes alfanuméricos en Terminaciones se tratan como **pruebas** (prioridad) y su correlativo se toma desde el **prefijo numérico**.
+- Los lotes alfanuméricos (contienen letras) se tratan como **pruebas** (prioridad) y su correlativo se toma desde el **prefijo numérico**.
+- La fecha base usada hoy para reconstruir `orders` y planificar es **Visión → Fecha de pedido** (`fecha_de_pedido`).
 
 ## Tests
 
@@ -89,12 +92,18 @@ Si importas pedidos con números de parte que no tienen estos tiempos definidos,
 Al importar pedidos o cambiar configuración (familias/tiempos/líneas), la app intenta **actualizar automáticamente el programa**. Si faltan datos, muestra un aviso indicando qué completar.
 
 ## Notas
-- Persistencia en SQLite local (archivo `.db`).
+- Persistencia en SQLite local (archivo `db/foundryplan.db`).
 - El scheduler v1 es heurístico (orden por fecha y asignación a líneas elegibles por familia).
 
 ## Documentación
-- Formatos SAP (MB52/Visión): ver [docs/formato_excel.md](docs/formato_excel.md)
-- Descripción funcional (SAP): ver [docs/descripcion funcionalidadad.md](docs/descripcion%20funcionalidadad.md)
-- Parámetros/configuración: ver [docs/configuracion.md](docs/configuracion.md)
-- Solución de problemas: ver [docs/troubleshooting.md](docs/troubleshooting.md)
+
+**Para usuarios:**
+- [Guía de operación](docs/operacion.md) — cómo usar la aplicación, configuración, troubleshooting
+
+**Para desarrolladores:**
+- [Especificación (diseño)](docs/especificacion.md) — qué queremos construir (planner + dispatcher)
+- [Estado / checklist](docs/estado.md) — avance de implementación
+- [As-built (implementado)](docs/implementado.md) — qué está hecho hoy
+- [Modelo de datos](docs/modelo-datos.md) — schema SQLite + mapeo SAP (WIP)
+- [Guía de desarrollo](docs/desarrollo.md) — arquitectura interna, tests, debugging (WIP)
 

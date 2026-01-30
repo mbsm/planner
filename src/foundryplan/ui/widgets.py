@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 from nicegui import ui
 
-from plannerterm.data.repository import Repository
+from foundryplan.data.repository import Repository
 
 
 _THEME_APPLIED = False
