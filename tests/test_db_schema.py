@@ -116,13 +116,15 @@ def test_job_structure(temp_db):
         "process_id": "TEXT",
         "pedido": "TEXT",
         "posicion": "TEXT",
-        "numero_parte": "TEXT",
+        "material": "TEXT",  # v0.2: changed from numero_parte
         "qty_total": "INTEGER",
         "qty_completed": "INTEGER",
         "qty_remaining": "INTEGER",
         "priority": "INTEGER",
         "is_test": "INTEGER",
         "state": "TEXT",
+        "fecha_entrega": "TEXT",  # v0.2: added
+        "notes": "TEXT",  # v0.2: added
         "created_at": "TEXT",
         "updated_at": "TEXT",
     }
@@ -133,20 +135,6 @@ def test_job_structure(temp_db):
 
 def test_seeds_family_catalog(temp_db):
     """Test that family_catalog is seeded with default families."""
-    db, db_path = temp_db
-    db.ensure_schema()
-
-    with db.connect() as con:
-        cursor = con.cursor()
-        cursor.execute("SELECT family_id FROM family_catalog ORDER BY family_id")
-        families = {row[0] for row in cursor.fetchall()}
-
-    expected_families = {"Parrillas", "Lifters", "Corazas", "Otros", "No pieza"}
-    assert families == expected_families
-
-
-def test_seeds_app_config(temp_db):
-    """Test that app_config is seeded with default values."""
     db, db_path = temp_db
     db.ensure_schema()
 

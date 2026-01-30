@@ -165,25 +165,30 @@ class Db:
                     process_id TEXT NOT NULL,
                     pedido TEXT NOT NULL,
                     posicion TEXT NOT NULL,
-                    numero_parte TEXT NOT NULL,
+                    material TEXT NOT NULL,
                     qty_total INTEGER NOT NULL,
                     qty_completed INTEGER NOT NULL DEFAULT 0,
                     qty_remaining INTEGER NOT NULL,
                     priority INTEGER,
                     is_test INTEGER NOT NULL DEFAULT 0,
                     state TEXT DEFAULT 'pending',
+                    fecha_entrega TEXT,
+                    notes TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(process_id) REFERENCES process(process_id),
-                    FOREIGN KEY(numero_parte) REFERENCES material_master(material)
+                    FOREIGN KEY(material) REFERENCES material_master(material)
                 );
 
                 CREATE TABLE IF NOT EXISTS job_unit (
+                    job_unit_id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
                     lote TEXT NOT NULL,
-                    cantidad INTEGER NOT NULL,
+                    correlativo_int INTEGER,
+                    qty INTEGER NOT NULL DEFAULT 1,
+                    status TEXT DEFAULT 'available',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY(job_id, lote),
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(job_id) REFERENCES job(job_id)
                 );
 

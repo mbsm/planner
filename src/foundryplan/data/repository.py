@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime
+from uuid import uuid4
 
 from foundryplan.core.models import Line, Order, Part
 from foundryplan.data.db import Db
@@ -86,6 +87,16 @@ class Repository:
             if not m:
                 raise
             return int(m.group(0))
+
+    @staticmethod
+    def _is_lote_test(lote: str) -> bool:
+        """Determine if a lote is a production test (alphanumeric).
+        
+        Business rule: alphanumeric lotes are production tests and must be prioritized.
+        """
+        if not lote:
+            return False
+        return bool(re.search(r"[A-Za-z]", str(lote)))
 
     @staticmethod
     def _lote_to_int_last4(value) -> int:
@@ -1556,6 +1567,161 @@ class Repository:
             # Imported SAP data invalidates all derived orders/programs.
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
+            
+            # FASE 3.1: Create jobs automatically from MB52 for all configured processes
+            self._create_jobs_from_mb52(con=con)
+
+    def _create_jobs_from_mb52(self, *, con) -> None:
+        """Create/update jobs from MB52 snapshot for all active processes.
+        
+        Called automatically after MB52 import. Creates 1 job per (process_id, pedido, posicion, material)
+        for each active process that has stock in MB52.
+        """
+        from uuid import uuid4
+        
+        # Get job_priority_map config
+        priority_map_str = self.get_config(key="job_priority_map", default='{"prueba": 1, "urgente": 2, "normal": 3}')
+        try:
+            priority_map = json.loads(priority_map_str) if isinstance(priority_map_str, str) else priority_map_str
+        except Exception:
+            priority_map = {"prueba": 1, "urgente": 2, "normal": 3}
+        
+        priority_normal = int(priority_map.get("normal", 3))
+        priority_prueba = int(priority_map.get("prueba", 1))
+        
+        # Get all active processes
+        processes = con.execute(
+            "SELECT process_id, sap_almacen FROM process WHERE is_active = 1 AND sap_almacen IS NOT NULL"
+        ).fetchall()
+        
+        centro_config = self.get_config(key="sap_centro", default="4000") or "4000"
+        centro_normalized = self._normalize_sap_key(centro_config) or centro_config
+        
+        for proc_row in processes:
+            process_id = str(proc_row["process_id"])
+            almacen = str(proc_row["sap_almacen"])
+            
+            # Filter MB52 by almacen and availability predicate
+            avail_sql = self._mb52_availability_predicate_sql(process=process_id)
+            
+            # Group by (pedido, posicion, material) and aggregate lotes
+            rows = con.execute(
+                f"""
+                SELECT 
+                    documento_comercial AS pedido,
+                    posicion_sd AS posicion,
+                    material,
+                    COUNT(*) AS qty_total,
+                    MAX(CASE WHEN is_test = 1 THEN 1 ELSE 0 END) AS has_test_lotes
+                FROM sap_mb52_snapshot
+                WHERE centro = ?
+                  AND almacen = ?
+                  AND {avail_sql}
+                  AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
+                  AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
+                  AND material IS NOT NULL AND TRIM(material) <> ''
+                GROUP BY documento_comercial, posicion_sd, material
+                """,
+                (str(centro_normalized), almacen),
+            ).fetchall()
+            
+            for r in rows:
+                pedido = str(r["pedido"]).strip()
+                posicion = str(r["posicion"]).strip()
+                material = str(r["material"]).strip()
+                qty_total = int(r["qty_total"])
+                is_test = int(r["has_test_lotes"])
+                
+                if not pedido or not posicion or not material:
+                    continue
+                
+                # Check if job already exists
+                existing = con.execute(
+                    """
+                    SELECT job_id, qty_total, qty_completed
+                    FROM job
+                    WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ?
+                    """,
+                    (process_id, pedido, posicion, material),
+                ).fetchone()
+                
+                # Determine priority: tests use "prueba", otherwise "normal"
+                priority = priority_prueba if is_test else priority_normal
+                
+                if existing:
+                    # Update existing job
+                    job_id = str(existing["job_id"])
+                    qty_completed = int(existing["qty_completed"] or 0)
+                    qty_remaining = max(0, qty_total - qty_completed)
+                    
+                    con.execute(
+                        """
+                        UPDATE job
+                        SET qty_total = ?,
+                            qty_remaining = ?,
+                            is_test = ?,
+                            priority = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_id = ?
+                        """,
+                        (qty_total, qty_remaining, is_test, priority, job_id),
+                    )
+                else:
+                    # Create new job
+                    job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
+                    qty_remaining = qty_total  # qty_completed starts at 0
+                    
+                    con.execute(
+                        """
+                        INSERT INTO job(
+                            job_id, process_id, pedido, posicion, material,
+                            qty_total, qty_completed, qty_remaining,
+                            priority, is_test, state,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test),
+                    )
+                
+                # Delete old job_units and recreate from current MB52
+                con.execute("DELETE FROM job_unit WHERE job_id = ?", (job_id,))
+                
+                # Get lotes for this job from MB52
+                lotes_rows = con.execute(
+                    f"""
+                    SELECT lote, correlativo_int
+                    FROM sap_mb52_snapshot
+                    WHERE centro = ?
+                      AND almacen = ?
+                      AND documento_comercial = ?
+                      AND posicion_sd = ?
+                      AND material = ?
+                      AND {avail_sql}
+                      AND lote IS NOT NULL AND TRIM(lote) <> ''
+                    """,
+                    (str(centro_normalized), almacen, pedido, posicion, material),
+                ).fetchall()
+                
+                for lote_row in lotes_rows:
+                    lote = str(lote_row["lote"]).strip()
+                    correlativo_int = lote_row["correlativo_int"]  # can be None
+                    
+                    if not lote:
+                        continue
+                    
+                    job_unit_id = f"ju_{job_id}_{uuid4().hex[:8]}"
+                    
+                    con.execute(
+                        """
+                        INSERT INTO job_unit(
+                            job_unit_id, job_id, lote, correlativo_int, qty, status,
+                            created_at, updated_at
+                        )
+                        VALUES(?, ?, ?, ?, 1, 'available', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (job_unit_id, job_id, lote, correlativo_int),
+                    )
 
     def _save_mb52_progress_last(self, *, con, process: str, report: dict) -> None:
         payload = json.dumps(report)
@@ -2174,6 +2340,63 @@ class Repository:
 
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
+            
+            # FASE 3.1: Update existing jobs with fecha_entrega and qty_completed from Visión
+            self._update_jobs_from_vision(con=con)
+
+    def _update_jobs_from_vision(self, *, con) -> None:
+        """Update existing jobs with fecha_entrega and qty_completed from Vision snapshot.
+        
+        Called automatically after Visión import. Updates jobs created from MB52 with:
+        - fecha_entrega from Visión
+        - qty_completed from process-specific progress fields (terminacion, mecanizado_interno, etc.)
+        """
+        # Get all active processes with their progress field mapping
+        process_progress_fields = {
+            "terminaciones": "terminacion",
+            "mecanizado": "mecanizado_interno",
+            "mecanizado_externo": "mecanizado_externo",
+            "inspeccion_externa": "insp_externa",
+            "vulcanizado": "vulcanizado",
+        }
+        
+        for process_id, progress_field in process_progress_fields.items():
+            # Update jobs for this process
+            con.execute(
+                f"""
+                UPDATE job
+                SET fecha_entrega = (
+                        SELECT v.fecha_entrega
+                        FROM sap_vision_snapshot v
+                        WHERE v.pedido = job.pedido
+                          AND v.posicion = job.posicion
+                        LIMIT 1
+                    ),
+                    qty_completed = COALESCE((
+                        SELECT v.{progress_field}
+                        FROM sap_vision_snapshot v
+                        WHERE v.pedido = job.pedido
+                          AND v.posicion = job.posicion
+                        LIMIT 1
+                    ), 0),
+                    qty_remaining = qty_total - COALESCE((
+                        SELECT v.{progress_field}
+                        FROM sap_vision_snapshot v
+                        WHERE v.pedido = job.pedido
+                          AND v.posicion = job.posicion
+                        LIMIT 1
+                    ), 0),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE process_id = ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM sap_vision_snapshot v2
+                      WHERE v2.pedido = job.pedido
+                        AND v2.posicion = job.posicion
+                  )
+                """,
+                (process_id,),
+            )
 
     def rebuild_orders_from_sap(self) -> int:
         """Backwards-compatible Terminaciones rebuild."""
