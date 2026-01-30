@@ -21,66 +21,253 @@ class Db:
             # Required for ON DELETE/UPDATE behaviors if we add FKs later.
             con.execute("PRAGMA foreign_keys=ON;")
 
+            # FASE 1.1: Tablas de Configuración Base
             con.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS families (
-                    name TEXT PRIMARY KEY
+                CREATE TABLE IF NOT EXISTS family_catalog (
+                    family_id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS app_config (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
+                    config_key TEXT PRIMARY KEY,
+                    config_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
-                CREATE TABLE IF NOT EXISTS parts (
-                    numero_parte TEXT PRIMARY KEY,
-                    familia TEXT NOT NULL
+                CREATE TABLE IF NOT EXISTS material_master (
+                    material TEXT PRIMARY KEY,
+                    family_id TEXT,
+                    aleacion TEXT,
+                    piezas_por_molde REAL,
+                    peso_bruto_ton REAL,
+                    tiempo_enfriamiento_molde_dias INTEGER,
+                    vulcanizado_dias INTEGER,
+                    mecanizado_dias INTEGER,
+                    inspeccion_externa_dias INTEGER,
+                    peso_unitario_ton REAL,
+                    mec_perf_inclinada INTEGER NOT NULL DEFAULT 0,
+                    sobre_medida_mecanizado INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(family_id) REFERENCES family_catalog(family_id)
                 );
 
-                CREATE TABLE IF NOT EXISTS sap_mb52 (
+                CREATE TABLE IF NOT EXISTS process (
+                    process_id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    sap_almacen TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    is_special_moldeo INTEGER NOT NULL DEFAULT 0,
+                    availability_predicate_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS resource (
+                    resource_id TEXT PRIMARY KEY,
+                    process_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    capacity_per_day REAL,
+                    sort_order INTEGER,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(process_id) REFERENCES process(process_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS resource_constraint (
+                    resource_id TEXT NOT NULL,
+                    attr_key TEXT NOT NULL,
+                    rule_type TEXT,
+                    rule_value_json TEXT,
+                    PRIMARY KEY(resource_id, attr_key),
+                    FOREIGN KEY(resource_id) REFERENCES resource(resource_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS process_attribute_def (
+                    process_id TEXT NOT NULL,
+                    attr_key TEXT NOT NULL,
+                    attr_type TEXT,
+                    allowed_values_json TEXT,
+                    min_value REAL,
+                    max_value REAL,
+                    is_required INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(process_id, attr_key),
+                    FOREIGN KEY(process_id) REFERENCES process(process_id)
+                );
+
+                -- FASE 1.2: Tablas SAP Staging (snapshot-based)
+                CREATE TABLE IF NOT EXISTS sap_mb52_snapshot (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     material TEXT NOT NULL,
                     texto_breve TEXT,
                     centro TEXT,
                     almacen TEXT,
                     lote TEXT,
+                    pb_almacen REAL,
                     libre_utilizacion INTEGER,
                     documento_comercial TEXT,
                     posicion_sd TEXT,
-                    en_control_calidad INTEGER
+                    en_control_calidad INTEGER,
+                    correlativo_int INTEGER,
+                    is_test INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE IF NOT EXISTS sap_vision (
+                CREATE TABLE IF NOT EXISTS sap_vision_snapshot (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     pedido TEXT NOT NULL,
                     posicion TEXT NOT NULL,
+                    tipo_posicion TEXT,
+                    tipo_de_reparto TEXT,
+                    cliente TEXT,
+                    n_oc_cliente TEXT,
+                    pos_oc TEXT,
+                    material_client_code TEXT,
                     cod_material TEXT,
                     descripcion_material TEXT,
-                    fecha_pedido TEXT NOT NULL,
+                    atributo TEXT,
+                    fecha_de_pedido TEXT NOT NULL,
                     fecha_entrega TEXT,
                     solicitado INTEGER,
                     x_programar INTEGER,
                     programado INTEGER,
-                    por_fundir INTEGER,
+                    x_fundir INTEGER,
                     desmoldeo INTEGER,
                     tt INTEGER,
-                    terminaciones INTEGER,
+                    terminacion INTEGER,
                     mecanizado_interno INTEGER,
                     mecanizado_externo INTEGER,
                     vulcanizado INTEGER,
+                    en_vulcaniz INTEGER,
+                    pend_vulcanizado INTEGER,
                     insp_externa INTEGER,
-                    cliente TEXT,
-                    oc_cliente TEXT,
-                    peso_neto REAL,
-                    peso_unitario_ton REAL,
+                    rech_insp_externa INTEGER,
+                    lib_vulcaniz_de INTEGER,
                     bodega INTEGER,
                     despachado INTEGER,
-                    rechazo INTEGER
+                    rechazo INTEGER,
+                    ret_qm INTEGER,
+                    grupo_art TEXT,
+                    proveedor TEXT,
+                    status TEXT,
+                    status_comercial TEXT,
+                    jerarquia_productos TEXT,
+                    peso_neto_ton REAL,
+                    peso_unitario_ton REAL
                 );
 
+                -- FASE 1.3: Tablas de Jobs
+                CREATE TABLE IF NOT EXISTS job (
+                    job_id TEXT PRIMARY KEY,
+                    process_id TEXT NOT NULL,
+                    pedido TEXT NOT NULL,
+                    posicion TEXT NOT NULL,
+                    numero_parte TEXT NOT NULL,
+                    qty_total INTEGER NOT NULL,
+                    qty_completed INTEGER NOT NULL DEFAULT 0,
+                    qty_remaining INTEGER NOT NULL,
+                    priority INTEGER,
+                    is_test INTEGER NOT NULL DEFAULT 0,
+                    state TEXT DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(process_id) REFERENCES process(process_id),
+                    FOREIGN KEY(numero_parte) REFERENCES material_master(material)
+                );
+
+                CREATE TABLE IF NOT EXISTS job_unit (
+                    job_id TEXT NOT NULL,
+                    lote TEXT NOT NULL,
+                    cantidad INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(job_id, lote),
+                    FOREIGN KEY(job_id) REFERENCES job(job_id)
+                );
+
+                -- FASE 1.4: Tablas de Dispatch
+                CREATE TABLE IF NOT EXISTS dispatch_queue_run (
+                    run_id TEXT PRIMARY KEY,
+                    process_id TEXT NOT NULL,
+                    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    algo_version TEXT,
+                    FOREIGN KEY(process_id) REFERENCES process(process_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS dispatch_queue_item (
+                    run_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    job_id TEXT,
+                    qty INTEGER,
+                    split_id INTEGER NOT NULL DEFAULT 1,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(run_id, seq),
+                    FOREIGN KEY(run_id) REFERENCES dispatch_queue_run(run_id),
+                    FOREIGN KEY(resource_id) REFERENCES resource(resource_id),
+                    FOREIGN KEY(job_id) REFERENCES job(job_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS last_dispatch (
+                    process_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(process_id) REFERENCES process(process_id),
+                    FOREIGN KEY(run_id) REFERENCES dispatch_queue_run(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS dispatch_in_progress (
+                    process_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(process_id) REFERENCES process(process_id),
+                    FOREIGN KEY(run_id) REFERENCES dispatch_queue_run(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS dispatch_in_progress_item (
+                    process_id TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    job_id TEXT,
+                    split_id INTEGER NOT NULL DEFAULT 1,
+                    qty_assigned INTEGER,
+                    marked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(process_id, resource_id, job_id, split_id),
+                    FOREIGN KEY(process_id) REFERENCES process(process_id),
+                    FOREIGN KEY(resource_id) REFERENCES resource(resource_id),
+                    FOREIGN KEY(job_id) REFERENCES job(job_id)
+                );
+
+                -- FASE 1.5-1.6: Tablas de Estado & KPI (Legacy + New)
                 CREATE TABLE IF NOT EXISTS vision_kpi_daily (
                     snapshot_date TEXT PRIMARY KEY,
                     snapshot_at TEXT NOT NULL,
                     tons_por_entregar REAL NOT NULL,
                     tons_atrasadas REAL NOT NULL
+                );
+
+                -- Legacy program tables (backward compat)
+                CREATE TABLE IF NOT EXISTS program_in_progress (
+                    process TEXT NOT NULL,
+                    pedido TEXT NOT NULL,
+                    posicion TEXT NOT NULL,
+                    is_test INTEGER NOT NULL DEFAULT 0,
+                    line_id INTEGER NOT NULL,
+                    marked_at TEXT NOT NULL,
+                    PRIMARY KEY (process, pedido, posicion, is_test)
+                );
+
+                CREATE TABLE IF NOT EXISTS program_in_progress_item (
+                    process TEXT NOT NULL,
+                    pedido TEXT NOT NULL,
+                    posicion TEXT NOT NULL,
+                    is_test INTEGER NOT NULL DEFAULT 0,
+                    split_id INTEGER NOT NULL,
+                    line_id INTEGER NOT NULL,
+                    qty INTEGER NOT NULL DEFAULT 0,
+                    marked_at TEXT NOT NULL,
+                    PRIMARY KEY (process, pedido, posicion, is_test, split_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS mb52_progress_last (
@@ -109,6 +296,59 @@ class Db:
                 );
                 """
             )
+
+            # ===== BEST-EFFORT MIGRATIONS: Rename legacy tables to v0.2 names =====
+            # families → family_catalog
+            if self._table_exists(con, "families"):
+                try:
+                    con.execute(
+                        "INSERT OR IGNORE INTO family_catalog(family_id, label, is_active) "
+                        "SELECT name, name, 1 FROM families"
+                    )
+                except Exception:
+                    pass
+
+            # parts → material_master (migrate if parts exists)
+            if self._table_exists(con, "parts"):
+                try:
+                    # First, ensure all families from parts exist in family_catalog
+                    con.execute(
+                        """INSERT OR IGNORE INTO family_catalog(family_id, label, is_active)
+                           SELECT DISTINCT familia, familia, 1 FROM parts WHERE familia IS NOT NULL"""
+                    )
+                    # Get column info from parts table (some columns may not exist in legacy tables)
+                    part_cols = {r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()}
+                    
+                    # Build the SELECT dynamically, using NULL for missing columns
+                    select_parts = [
+                        "numero_parte AS material",
+                        "familia AS family_id",
+                        "NULL AS aleacion",
+                        "NULL AS piezas_por_molde",
+                        "NULL AS peso_bruto_ton",
+                        "NULL AS tiempo_enfriamiento_molde_dias",
+                        f"COALESCE(vulcanizado_dias, NULL)" if "vulcanizado_dias" in part_cols else "NULL",
+                        f"COALESCE(mecanizado_dias, NULL)" if "mecanizado_dias" in part_cols else "NULL",
+                        f"COALESCE(inspeccion_externa_dias, NULL)" if "inspeccion_externa_dias" in part_cols else "NULL",
+                        f"COALESCE(peso_ton, NULL)" if "peso_ton" in part_cols else "NULL",
+                        f"COALESCE(mec_perf_inclinada, 0)" if "mec_perf_inclinada" in part_cols else "0",
+                        f"COALESCE(sobre_medida, 0)" if "sobre_medida" in part_cols else "0",
+                        "CURRENT_TIMESTAMP AS created_at",
+                        "CURRENT_TIMESTAMP AS updated_at",
+                    ]
+                    
+                    select_sql = f"SELECT {', '.join(select_parts)} FROM parts"
+                    
+                    con.execute(
+                        f"""INSERT OR IGNORE INTO material_master(
+                            material, family_id, aleacion, piezas_por_molde, peso_bruto_ton,
+                            tiempo_enfriamiento_molde_dias, vulcanizado_dias, mecanizado_dias,
+                            inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada,
+                            sobre_medida_mecanizado, created_at, updated_at
+                        ) {select_sql}"""
+                    )
+                except Exception:
+                    pass
 
             # orderpos_priority v2: add kind (manual/test)
             opp_cols = [r[1] for r in con.execute("PRAGMA table_info(orderpos_priority)").fetchall()]
@@ -182,67 +422,99 @@ class Db:
                 except Exception:
                     pass
 
-            # parts table v2: add optional post-process lead times (days)
-            part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
-            if "vulcanizado_dias" not in part_cols:
-                con.execute("ALTER TABLE parts ADD COLUMN vulcanizado_dias INTEGER")
-            if "mecanizado_dias" not in part_cols:
-                con.execute("ALTER TABLE parts ADD COLUMN mecanizado_dias INTEGER")
-            if "inspeccion_externa_dias" not in part_cols:
-                con.execute("ALTER TABLE parts ADD COLUMN inspeccion_externa_dias INTEGER")
-            # parts table v3: optional weight per piece (tons)
-            if "peso_ton" not in part_cols:
-                try:
-                    con.execute("ALTER TABLE parts ADD COLUMN peso_ton REAL")
-                except Exception:
-                    pass
+            # parts table v2-v4: add optional columns (only if table exists - legacy support)
+            if self._table_exists(con, "parts"):
+                part_cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
+                if "vulcanizado_dias" not in part_cols:
+                    try:
+                        con.execute("ALTER TABLE parts ADD COLUMN vulcanizado_dias INTEGER")
+                    except Exception:
+                        pass
+                if "mecanizado_dias" not in part_cols:
+                    try:
+                        con.execute("ALTER TABLE parts ADD COLUMN mecanizado_dias INTEGER")
+                    except Exception:
+                        pass
+                if "inspeccion_externa_dias" not in part_cols:
+                    try:
+                        con.execute("ALTER TABLE parts ADD COLUMN inspeccion_externa_dias INTEGER")
+                    except Exception:
+                        pass
+                # parts table v3: optional weight per piece (tons)
+                if "peso_ton" not in part_cols:
+                    try:
+                        con.execute("ALTER TABLE parts ADD COLUMN peso_ton REAL")
+                    except Exception:
+                        pass
 
-            # parts table v4: binary master attributes
-            if "mec_perf_inclinada" not in part_cols:
-                try:
-                    con.execute(
-                        "ALTER TABLE parts ADD COLUMN mec_perf_inclinada INTEGER NOT NULL DEFAULT 0"
-                    )
-                except Exception:
-                    pass
-            if "sobre_medida" not in part_cols:
-                try:
-                    con.execute(
-                        "ALTER TABLE parts ADD COLUMN sobre_medida INTEGER NOT NULL DEFAULT 0"
-                    )
-                except Exception:
-                    pass
+                # parts table v4: binary master attributes
+                if "mec_perf_inclinada" not in part_cols:
+                    try:
+                        con.execute(
+                            "ALTER TABLE parts ADD COLUMN mec_perf_inclinada INTEGER NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                if "sobre_medida" not in part_cols:
+                    try:
+                        con.execute(
+                            "ALTER TABLE parts ADD COLUMN sobre_medida INTEGER NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
 
             # Seed default catalog entries only if catalog is empty.
-            families_count = int(con.execute("SELECT COUNT(*) FROM families").fetchone()[0])
+            families_count = int(con.execute("SELECT COUNT(*) FROM family_catalog").fetchone()[0])
             if families_count == 0:
                 con.executemany(
-                    "INSERT OR IGNORE INTO families(name) VALUES(?)",
-                    [("Parrillas",), ("Lifters",), ("Corazas",), ("Otros",), ("No pieza",)],
+                    "INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)",
+                    [
+                        ("Parrillas", "Parrillas"),
+                        ("Lifters", "Lifters"),
+                        ("Corazas", "Corazas"),
+                        ("Otros", "Otros"),
+                        ("No pieza", "No pieza"),
+                    ],
                 )
 
             # Ensure special catalog entries exist even on existing databases.
-            con.execute("INSERT OR IGNORE INTO families(name) VALUES(?)", ("No pieza",))
+            con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", ("No pieza", "No pieza"))
 
-            # Migrate any existing familias from parts into the catalog.
+            # Migrate any existing familias from material_master into the catalog.
             con.execute(
-                "INSERT OR IGNORE INTO families(name) SELECT DISTINCT familia FROM parts WHERE familia IS NOT NULL AND TRIM(familia) <> ''"
+                "INSERT OR IGNORE INTO family_catalog(family_id, label) SELECT DISTINCT family_id, family_id FROM material_master WHERE family_id IS NOT NULL AND TRIM(family_id) <> ''"
             )
 
-            # Seed default SAP config values if missing.
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_centro', '4000')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_terminaciones', '4035')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_material_prefixes', '436')")
+            # Seed default SAP config values if missing (v0.2 uses config_key/config_value).
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_center', '4000')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_material_prefixes', '436')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
 
-            # New process: Toma de dureza. Defaults to Terminaciones warehouse.
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_toma_dureza', '4035')")
+            # Process warehouse mapping (by process_id + sap_almacen).
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_terminaciones', '4035')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_toma_dureza', '4035')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_mecanizado', '4049')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_mecanizado_externo', '4050')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_inspeccion_externa', '4046')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_por_vulcanizar', '4047')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_en_vulcanizado', '4048')")
 
-            # Other process warehouses (can be edited in UI).
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_mecanizado', '4049')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_mecanizado_externo', '4050')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_inspeccion_externa', '4046')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_por_vulcanizar', '4047')")
-            con.execute("INSERT OR IGNORE INTO app_config(key, value) VALUES('sap_almacen_en_vulcanizado', '4048')")
+            # Seed default processes if table is empty
+            process_count = int(con.execute("SELECT COUNT(*) FROM process").fetchone()[0])
+            if process_count == 0:
+                con.executemany(
+                    """INSERT OR IGNORE INTO process(process_id, label, sap_almacen, is_active, is_special_moldeo)
+                       VALUES(?, ?, ?, 1, ?)""",
+                    [
+                        ("moldeo", "Moldeo", None, 1),
+                        ("terminaciones", "Terminaciones", "4035", 0),
+                        ("mecanizado", "Mecanizado", "4049", 0),
+                        ("mecanizado_externo", "Mecanizado Externo", "4050", 0),
+                        ("inspeccion_externa", "Inspección Externa", "4046", 0),
+                        ("vulcanizado", "Vulcanizado", "4047", 0),
+                        ("toma_dureza", "Toma de Dureza", "4035", 0),
+                    ],
+                )
 
             # ----- Per-process tables (best-effort migrations) -----
             # line_config: v2 adds `process` and composite primary key.
@@ -473,3 +745,11 @@ class Db:
                         )
                 except Exception:
                     pass
+
+    def _table_exists(self, con: sqlite3.Connection, table_name: str) -> bool:
+        """Check if a table exists in the database."""
+        row = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
