@@ -1781,12 +1781,13 @@ class Repository:
                         """
                         UPDATE job
                         SET qty_total = ?,
+                            qty_remaining = ?,
                             is_test = ?,
                             priority = ?,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE job_id = ?
                         """,
-                        (qty, is_test, priority, job_id)
+                        (qty, qty, is_test, priority, job_id)
                     )
                     
                     # Replace job units
@@ -2806,8 +2807,8 @@ class Repository:
                     jid = existing_map[key]
                     seen_existing_ids.add(jid)
                     con.execute(
-                        "UPDATE job SET qty_total=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
-                        (int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), jid)
+                        "UPDATE job SET qty_total=?, qty_remaining=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                        (int(row[3]), int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), jid)
                     )
                 else:
                     new_jid = str(uuid4())
