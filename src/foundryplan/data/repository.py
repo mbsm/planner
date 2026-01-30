@@ -340,7 +340,7 @@ class Repository:
         if not key:
             raise ValueError("config key vacío")
         with self.db.connect() as con:
-            row = con.execute("SELECT value FROM app_config WHERE key = ?", (key,)).fetchone()
+            row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
         if row is None:
             return default
         return str(row[0])
@@ -351,7 +351,7 @@ class Repository:
             raise ValueError("config key vacío")
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO app_config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO app_config(config_key, config_value) VALUES(?, ?) ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value",
                 (key, str(value).strip()),
             )
             # Warehouse/filters affect derived orders and programs.
