@@ -118,8 +118,6 @@ def test_job_structure(temp_db):
         "posicion": "TEXT",
         "material": "TEXT",  # v0.2: changed from numero_parte
         "qty_total": "INTEGER",
-        "qty_completed": "INTEGER",
-        "qty_remaining": "INTEGER",
         "priority": "INTEGER",
         "is_test": "INTEGER",
         "state": "TEXT",

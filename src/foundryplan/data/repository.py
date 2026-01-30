@@ -1638,7 +1638,7 @@ class Repository:
                 # Check if job already exists
                 existing = con.execute(
                     """
-                    SELECT job_id, qty_total, qty_completed
+                    SELECT job_id
                     FROM job
                     WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ?
                     """,
@@ -1649,39 +1649,34 @@ class Repository:
                 priority = priority_prueba if is_test else priority_normal
                 
                 if existing:
-                    # Update existing job
+                    # Update existing job (qty_total reflects current lotes in MB52)
                     job_id = str(existing["job_id"])
-                    qty_completed = int(existing["qty_completed"] or 0)
-                    qty_remaining = max(0, qty_total - qty_completed)
                     
                     con.execute(
                         """
                         UPDATE job
                         SET qty_total = ?,
-                            qty_remaining = ?,
                             is_test = ?,
                             priority = ?,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE job_id = ?
                         """,
-                        (qty_total, qty_remaining, is_test, priority, job_id),
+                        (qty_total, is_test, priority, job_id),
                     )
                 else:
-                    # Create new job
+                    # Create new job (qty_total = lotes currently in MB52)
                     job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
-                    qty_remaining = qty_total  # qty_completed starts at 0
                     
                     con.execute(
                         """
                         INSERT INTO job(
                             job_id, process_id, pedido, posicion, material,
-                            qty_total, qty_completed, qty_remaining,
-                            priority, is_test, state,
+                            qty_total, priority, is_test, state,
                             created_at, updated_at
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """,
-                        (job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test),
+                        (job_id, process_id, pedido, posicion, material, qty_total, priority, is_test),
                     )
                 
                 # Delete old job_units and recreate from current MB52
@@ -2341,62 +2336,35 @@ class Repository:
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
             
-            # FASE 3.1: Update existing jobs with fecha_entrega and qty_completed from Visión
+            # FASE 3.1: Update existing jobs with fecha_entrega from Visión
             self._update_jobs_from_vision(con=con)
 
     def _update_jobs_from_vision(self, *, con) -> None:
-        """Update existing jobs with fecha_entrega and qty_completed from Vision snapshot.
+        """Update existing jobs with fecha_entrega from Vision snapshot.
         
-        Called automatically after Visión import. Updates jobs created from MB52 with:
-        - fecha_entrega from Visión
-        - qty_completed from process-specific progress fields (terminacion, mecanizado_interno, etc.)
+        Called automatically after Visión import. Updates fecha_entrega only.
+        (qty_total comes from MB52 lote count; lotes disappear from MB52 when completed)
         """
-        # Get all active processes with their progress field mapping
-        process_progress_fields = {
-            "terminaciones": "terminacion",
-            "mecanizado": "mecanizado_interno",
-            "mecanizado_externo": "mecanizado_externo",
-            "inspeccion_externa": "insp_externa",
-            "vulcanizado": "vulcanizado",
-        }
-        
-        for process_id, progress_field in process_progress_fields.items():
-            # Update jobs for this process
-            con.execute(
-                f"""
-                UPDATE job
-                SET fecha_entrega = (
-                        SELECT v.fecha_entrega
-                        FROM sap_vision_snapshot v
-                        WHERE v.pedido = job.pedido
-                          AND v.posicion = job.posicion
-                        LIMIT 1
-                    ),
-                    qty_completed = COALESCE((
-                        SELECT v.{progress_field}
-                        FROM sap_vision_snapshot v
-                        WHERE v.pedido = job.pedido
-                          AND v.posicion = job.posicion
-                        LIMIT 1
-                    ), 0),
-                    qty_remaining = qty_total - COALESCE((
-                        SELECT v.{progress_field}
-                        FROM sap_vision_snapshot v
-                        WHERE v.pedido = job.pedido
-                          AND v.posicion = job.posicion
-                        LIMIT 1
-                    ), 0),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE process_id = ?
-                  AND EXISTS (
-                      SELECT 1
-                      FROM sap_vision_snapshot v2
-                      WHERE v2.pedido = job.pedido
-                        AND v2.posicion = job.posicion
-                  )
-                """,
-                (process_id,),
+        # Update fecha_entrega for all jobs from Vision
+        con.execute(
+            """
+            UPDATE job
+            SET fecha_entrega = (
+                    SELECT v.fecha_entrega
+                    FROM sap_vision_snapshot v
+                    WHERE v.pedido = job.pedido
+                      AND v.posicion = job.posicion
+                    LIMIT 1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE EXISTS (
+                SELECT 1
+                FROM sap_vision_snapshot v2
+                WHERE v2.pedido = job.pedido
+                  AND v2.posicion = job.posicion
             )
+            """
+        )
 
     def rebuild_orders_from_sap(self) -> int:
         """Backwards-compatible Terminaciones rebuild."""

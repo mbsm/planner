@@ -106,7 +106,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     # Verify job was created
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT job_id, process_id, pedido, posicion, material, qty_total, qty_completed, qty_remaining, priority, is_test, state FROM job"
+            "SELECT job_id, process_id, pedido, posicion, material, qty_total, priority, is_test, state FROM job"
         ).fetchall()
     
     assert len(jobs) >= 1, "Should create at least one job (terminaciones)"
@@ -123,8 +123,6 @@ def test_create_jobs_from_mb52_basic(temp_db):
     assert term_job["posicion"] == "10"
     assert term_job["material"] == "43633021531"
     assert term_job["qty_total"] == 2  # 2 lotes
-    assert term_job["qty_completed"] == 0  # Not updated yet (no Vision)
-    assert term_job["qty_remaining"] == 2
     assert term_job["priority"] == 3  # normal priority (default)
     assert term_job["is_test"] == 0  # numeric lote
     assert term_job["state"] == "pending"
@@ -227,7 +225,7 @@ def test_create_jobs_multiple_processes(temp_db):
 
 
 def test_update_jobs_from_vision(temp_db):
-    """Test that jobs are updated with fecha_entrega and qty_completed from Vision."""
+    """Test that jobs are updated with fecha_entrega from Vision."""
     db, _ = temp_db
     repo = Repository(db)
     
@@ -287,11 +285,11 @@ def test_update_jobs_from_vision(temp_db):
     # Import Vision
     repo.import_sap_vision_bytes(content=vision_bytes)
     
-    # Verify job was updated
+    # Verify job was updated with fecha_entrega only
     with db.connect() as con:
         job = con.execute(
             """
-            SELECT fecha_entrega, qty_completed, qty_remaining
+            SELECT fecha_entrega, qty_total
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '1010044531'
@@ -301,6 +299,4 @@ def test_update_jobs_from_vision(temp_db):
     
     assert job is not None
     assert job["fecha_entrega"] == "2026-03-01", "Should update fecha_entrega from Vision"
-    assert job["qty_completed"] == 50, "Should update qty_completed from terminacion field"
-    assert job["qty_remaining"] == 2 - 50  # Note: MB52 has 2 pieces, Vision says 50 completed
-    # This is a known mismatch that would need business logic handling
+    assert job["qty_total"] == 2, "qty_total should remain as lote count from MB52"

@@ -167,8 +167,6 @@ class Db:
                     posicion TEXT NOT NULL,
                     material TEXT NOT NULL,
                     qty_total INTEGER NOT NULL,
-                    qty_completed INTEGER NOT NULL DEFAULT 0,
-                    qty_remaining INTEGER NOT NULL,
                     priority INTEGER,
                     is_test INTEGER NOT NULL DEFAULT 0,
                     state TEXT DEFAULT 'pending',
