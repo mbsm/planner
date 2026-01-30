@@ -18,6 +18,15 @@ class Db:
         with self.connect() as con:
             con.execute("PRAGMA journal_mode=WAL;")
 
+            # Migration pre-check: job_unit missing PK?
+            # Existing `job_unit` table from older schema might lack job_unit_id.
+            # Use raw query since _table_exists might be defined later or strict.
+            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_unit'").fetchone():
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job_unit)").fetchall()]
+                if "job_unit_id" not in cols:
+                    # Drop it so it gets recreated correctly below
+                    con.execute("DROP TABLE job_unit")
+
             # Required for ON DELETE/UPDATE behaviors if we add FKs later.
             con.execute("PRAGMA foreign_keys=ON;")
 
@@ -167,11 +176,14 @@ class Db:
                     posicion TEXT NOT NULL,
                     material TEXT NOT NULL,
                     qty_total INTEGER NOT NULL,
+                    qty_remaining INTEGER NOT NULL DEFAULT 0,
                     priority INTEGER,
                     is_test INTEGER NOT NULL DEFAULT 0,
                     state TEXT DEFAULT 'pending',
                     fecha_entrega TEXT,
                     notes TEXT,
+                    corr_min INTEGER,
+                    corr_max INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(process_id) REFERENCES process(process_id),
@@ -300,6 +312,38 @@ class Db:
                 """
             )
 
+            # job table v2: rename numero_parte -> material
+            if self._table_exists(con, "job"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "numero_parte" in cols and "material" not in cols:
+                    try:
+                        con.execute("ALTER TABLE job RENAME COLUMN numero_parte TO material")
+                    except Exception:
+                        pass
+                
+                # Re-fetch columns
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "fecha_entrega" not in cols:
+                    try:
+                        con.execute("ALTER TABLE job ADD COLUMN fecha_entrega TEXT")
+                    except Exception:
+                        pass
+                if "notes" not in cols:
+                    try:
+                        con.execute("ALTER TABLE job ADD COLUMN notes TEXT")
+                    except Exception:
+                        pass
+
+            # Migrations for V0.2 (Jobs)
+            try:
+                con.execute("ALTER TABLE job ADD COLUMN corr_min INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                con.execute("ALTER TABLE job ADD COLUMN corr_max INTEGER")
+            except sqlite3.OperationalError:
+                pass
+
             # ===== NOTA: No backward compatibility - solo tablas v0.2 =====
             # No migrations from legacy tables
 
@@ -408,6 +452,24 @@ class Db:
                         con.execute(
                             "ALTER TABLE parts ADD COLUMN sobre_medida INTEGER NOT NULL DEFAULT 0"
                         )
+                    except Exception:
+                        pass
+
+            # Migrate app_config v1->v2 (key->config_key, value->config_value)
+            if self._table_exists(con, "app_config"):
+                app_cols = [r[1] for r in con.execute("PRAGMA table_info(app_config)").fetchall()]
+                if "config_key" not in app_cols and "key" in app_cols:
+                    try:
+                        con.execute("ALTER TABLE app_config RENAME COLUMN key TO config_key")
+                        con.execute("ALTER TABLE app_config RENAME COLUMN value TO config_value")
+                    except Exception:
+                        pass
+                
+                # Re-fetch columns after potential rename
+                app_cols = [r[1] for r in con.execute("PRAGMA table_info(app_config)").fetchall()]
+                if "updated_at" not in app_cols:
+                    try:
+                        con.execute("ALTER TABLE app_config ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
                     except Exception:
                         pass
 
@@ -670,6 +732,24 @@ class Db:
                             )
                     except Exception:
                         # Best-effort migrations should not prevent startup.
+                        pass
+
+            # parts table v5: rename numero_parte -> material if somehow missed
+            if self._table_exists(con, "parts"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(parts)").fetchall()]
+                if "numero_parte" in cols and "material" not in cols:
+                    try:
+                        con.execute("ALTER TABLE parts RENAME COLUMN numero_parte TO material")
+                    except Exception:
+                        pass
+
+            # orders table v5: rename numero_parte -> material if somehow missed
+            if self._table_exists(con, "orders"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(orders)").fetchall()]
+                if "numero_parte" in cols and "material" not in cols:
+                    try:
+                        con.execute("ALTER TABLE orders RENAME COLUMN numero_parte TO material")
+                    except Exception:
                         pass
 
             # ----- Best-effort normalization of SAP key columns -----

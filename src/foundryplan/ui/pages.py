@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from nicegui import ui
 
-from foundryplan.core.scheduler import generate_program
+from foundryplan.core.scheduler import generate_dispatch_program
 from foundryplan.data.repository import Repository
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
 
@@ -24,14 +24,12 @@ def register_pages(repo: Repository) -> None:
             if len(repo.get_lines(process=process)) == 0:
                 return False
             lines = repo.get_lines_model(process=process)
-            orders = repo.get_orders_model(process=process)
+            jobs = repo.get_jobs_model(process=process)
             parts = repo.get_parts_model()
-            manual_set = repo.get_manual_priority_orderpos_set()
-            program, errors = generate_program(
+            program, errors = generate_dispatch_program(
                 lines=lines,
-                orders=orders,
+                jobs=jobs,
                 parts=parts,
-                priority_orderpos=manual_set,
             )
             repo.save_last_program(process=process, program=program, errors=errors)
             updated = True
@@ -1197,18 +1195,12 @@ def register_pages(repo: Repository) -> None:
             ui.label("Actualizar datos SAP").classes("text-2xl font-semibold")
             ui.label("Sube MB52 y Visión Planta. Centro/Almacén se configuran en Parámetros.").classes("pt-subtitle")
 
-            with ui.row().classes("items-center gap-3 pt-2"):
-                mb52_merge = ui.checkbox(
-                    "MB52: acumular por almacén (no borra otros almacenes)",
-                    value=False,
-                ).props("dense")
-
             def uploader(kind: str, label: str):
                 async def handle_upload(e):
                     try:
                         content = await e.file.read()
                         if kind in {"mb52", "sap_mb52"}:
-                            repo.import_sap_mb52_bytes(content=content, mode=("merge" if mb52_merge.value else "replace"))
+                            repo.import_sap_mb52_bytes(content=content, mode="replace")
                         else:
                             repo.import_excel_bytes(kind=kind, content=content)
                         filename = getattr(e.file, "name", None) or getattr(e.file, "filename", None)
@@ -2027,7 +2019,7 @@ def register_pages(repo: Repository) -> None:
             tbl.on("rowDblClick", on_row_event)
             tbl.on("rowDblclick", on_row_event)
 
-    @ui.page("/config/pedidos")
+    # @ui.page("/config/pedidos")
     def config_pedidos() -> None:
         render_nav(active="config_pedidos", repo=repo)
         with page_container():

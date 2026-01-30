@@ -21,6 +21,7 @@
 - Procesos are keyed in `Repository.processes` and use per-process warehouse config (e.g. `sap_almacen_mecanizado`, `sap_almacen_inspeccion_externa`).
 
 ## Project-specific rules & invariants
+- **Dates**: `fecha_entrega` field in SAP is considered internal/invalid. Always use `fecha_de_pedido` as the source of truth for order dates / deadlines. When code refers to "Fecha Entrega" or due dates, it must map to `fecha_de_pedido` from the database.
 - MB52 material filtering is configurable via `sap_material_prefixes` (comma-separated; `*` means keep all), and SAP numeric keys are normalized via `Repository._normalize_sap_key`.
 - “Usable” MB52 pieces are typically `libre_utilizacion=1` and `en_control_calidad=0`; special case: `process='toma_de_dureza'` intentionally uses NOT-available stock (`_mb52_availability_predicate_sql`).
 - Alphanumeric lotes exist; correlativos are derived by extracting the first digit group (`Repository._lote_to_int`), and those rows can become “tests” (`Order.is_test`).

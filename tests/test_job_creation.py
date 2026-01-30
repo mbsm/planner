@@ -19,6 +19,12 @@ def temp_db():
     db_path = Path(tmpdir) / "test.db"
     db = Db(db_path)
     db.ensure_schema()
+    
+    # Configure to accept all materials (not just 436*)
+    from foundryplan.data.repository import Repository
+    repo = Repository(db)
+    repo.set_config(key="sap_material_prefixes", value="*")
+    
     yield db, db_path
     
     # Cleanup
@@ -300,3 +306,309 @@ def test_update_jobs_from_vision(temp_db):
     assert job is not None
     assert job["fecha_entrega"] == "2026-03-01", "Should update fecha_entrega from Vision"
     assert job["qty_total"] == 2, "qty_total should remain as lote count from MB52"
+
+
+def test_split_job_basic(temp_db):
+    """Test basic job split functionality."""
+    db, _ = temp_db
+    repo = Repository(db)
+    
+    # Create a job with 10 lotes
+    mb52_rows = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"001-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 11)  # 10 lotes
+    ]
+    
+    mb52_bytes = create_mock_mb52_excel(mb52_rows)
+    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    
+    # Get the created job
+    with db.connect() as con:
+        original_job = con.execute(
+            """
+            SELECT job_id, qty_total
+            FROM job
+            WHERE process_id = 'terminaciones'
+              AND pedido = '30517821'
+              AND posicion = '10'
+            """
+        ).fetchone()
+    
+    assert original_job is not None
+    assert original_job["qty_total"] == 10
+    original_job_id = original_job["job_id"]
+    
+    # Split: 4 lotes in first job, 6 in second
+    job1_id, job2_id = repo.split_job(job_id=original_job_id, qty_split=4)
+    
+    assert job1_id == original_job_id, "Original job ID should be preserved"
+    assert job2_id != job1_id, "New job should have different ID"
+    
+    # Validate both jobs
+    with db.connect() as con:
+        jobs = con.execute(
+            """
+            SELECT job_id, process_id, pedido, posicion, material, qty_total, priority, is_test
+            FROM job
+            WHERE process_id = 'terminaciones'
+              AND pedido = '30517821'
+              AND posicion = '10'
+            ORDER BY job_id
+            """
+        ).fetchall()
+    
+    assert len(jobs) == 2, "Should have 2 jobs after split"
+    
+    # Find job1 and job2
+    job1 = next(j for j in jobs if j["job_id"] == job1_id)
+    job2 = next(j for j in jobs if j["job_id"] == job2_id)
+    
+    # Validate quantities
+    assert job1["qty_total"] == 4, "First job should have 4 lotes"
+    assert job2["qty_total"] == 6, "Second job should have 6 lotes"
+    
+    # Validate inherited fields
+    assert job1["process_id"] == job2["process_id"] == "terminaciones"
+    assert job1["pedido"] == job2["pedido"] == "30517821"
+    assert job1["posicion"] == job2["posicion"] == "10"
+    assert job1["material"] == job2["material"] == "K106321"
+    assert job1["priority"] == job2["priority"], "Both should have same priority"
+    assert job1["is_test"] == job2["is_test"], "Both should have same is_test"
+    
+    # Validate job_units distribution
+    with db.connect() as con:
+        units1 = con.execute(
+            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            (job1_id,),
+        ).fetchall()
+        units2 = con.execute(
+            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            (job2_id,),
+        ).fetchall()
+    
+    assert len(units1) == 4, "First job should have 4 job_units"
+    assert len(units2) == 6, "Second job should have 6 job_units"
+    
+    # Validate lotes are correctly distributed (first 4 stay, next 6 move)
+    expected_lotes1 = [f"001-{i:03d}" for i in range(1, 5)]
+    expected_lotes2 = [f"001-{i:03d}" for i in range(5, 11)]
+    
+    actual_lotes1 = [u["lote"] for u in units1]
+    actual_lotes2 = [u["lote"] for u in units2]
+    
+    assert actual_lotes1 == expected_lotes1, "First 4 lotes should stay in job1"
+    assert actual_lotes2 == expected_lotes2, "Next 6 lotes should move to job2"
+
+
+def test_split_job_validation_errors(temp_db):
+    """Test split_job validation errors."""
+    db, _ = temp_db
+    repo = Repository(db)
+    
+    # Create a job with 5 lotes
+    mb52_rows = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"001-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 6)  # 5 lotes
+    ]
+    
+    mb52_bytes = create_mock_mb52_excel(mb52_rows)
+    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    
+    with db.connect() as con:
+        job = con.execute(
+            "SELECT job_id FROM job WHERE pedido = '30517821'"
+        ).fetchone()
+    
+    job_id = job["job_id"]
+    
+    # Test: qty_split must be positive
+    with pytest.raises(ValueError, match="qty_split must be positive"):
+        repo.split_job(job_id=job_id, qty_split=0)
+    
+    with pytest.raises(ValueError, match="qty_split must be positive"):
+        repo.split_job(job_id=job_id, qty_split=-1)
+    
+    # Test: qty_split must be less than qty_total
+    with pytest.raises(ValueError, match="must be less than job qty_total"):
+        repo.split_job(job_id=job_id, qty_split=5)
+    
+    with pytest.raises(ValueError, match="must be less than job qty_total"):
+        repo.split_job(job_id=job_id, qty_split=10)
+    
+    # Test: job not found
+    with pytest.raises(ValueError, match="Job .* not found"):
+        repo.split_job(job_id="nonexistent_job_id", qty_split=2)
+
+
+def test_split_distribution_new_stock(temp_db):
+    """Test that new stock is distributed to split with lowest qty_total."""
+    db, _ = temp_db
+    repo = Repository(db)
+    
+    # Step 1: Create initial job with 10 lotes
+    mb52_rows_initial = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"batch1-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 11)
+    ]
+    
+    mb52_bytes = create_mock_mb52_excel(mb52_rows_initial)
+    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    
+    # Step 2: Get job and split it (4 + 6)
+    with db.connect() as con:
+        original = con.execute(
+            "SELECT job_id FROM job WHERE pedido = '30517821'"
+        ).fetchone()
+    
+    job1_id, job2_id = repo.split_job(job_id=original["job_id"], qty_split=4)
+    
+    # Step 3: Simulate MB52 update with new stock (5 new lotes)
+    # This should go to job1 since it has qty_total=4 (less than job2's qty_total=6)
+    mb52_rows_new = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"batch2-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 6)  # 5 new lotes
+    ]
+    
+    mb52_bytes_new = create_mock_mb52_excel(mb52_rows_new)
+    repo.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
+    
+    # Step 4: Verify new stock went to job1 (had lowest qty_total)
+    # Job 2 received no stock (0), so it should be deleted by cleanup logic.
+    with db.connect() as con:
+        job1 = con.execute(
+            "SELECT qty_total FROM job WHERE job_id = ?",
+            (job1_id,),
+        ).fetchone()
+        job2 = con.execute(
+            "SELECT qty_total FROM job WHERE job_id = ?",
+            (job2_id,),
+        ).fetchone()
+    
+    assert job1 is not None
+    assert job1["qty_total"] == 5, "job1 should receive the 5 new lotes (was lowest)"
+    assert job2 is None, "job2 should be deleted because qty dropped to 0"
+
+
+def test_split_distribution_all_zero_creates_new_job(temp_db):
+    """Test that when all splits are at qty=0, they are deleted, and new stock creates a new single job."""
+    db, _ = temp_db
+    repo = Repository(db)
+    
+    # Step 1: Create initial job with 8 lotes
+    mb52_rows_initial = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"batch1-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 9)
+    ]
+    
+    mb52_bytes = create_mock_mb52_excel(mb52_rows_initial)
+    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    
+    # Step 2: Split job (3 + 5)
+    with db.connect() as con:
+        original = con.execute(
+            "SELECT job_id FROM job WHERE pedido = '30517821'"
+        ).fetchone()
+    
+    job1_id, job2_id = repo.split_job(job_id=original["job_id"], qty_split=3)
+    
+    # Step 3: Simulate MB52 update with NO stock (all lotes disappear)
+    mb52_bytes_empty = create_mock_mb52_excel([])
+    repo.import_sap_mb52_bytes(content=mb52_bytes_empty, mode="replace")
+    
+    # Verify both splits were deleted because qty dropped to 0
+    with db.connect() as con:
+        jobs = con.execute(
+            """
+            SELECT job_id, qty_total
+            FROM job
+            WHERE process_id = 'terminaciones'
+              AND pedido = '30517821'
+              AND posicion = '10'
+            ORDER BY job_id
+            """
+        ).fetchall()
+    
+    assert len(jobs) == 0, "Both splits should be deleted (cleanup logic)"
+    
+    # Step 4: Simulate MB52 update with new stock (should create NEW job)
+    mb52_rows_new = [
+        {
+            "material": "K106321",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": f"batch2-{i:03d}",
+            "libre_utilizacion": 1,
+            "documento_comercial": "0030517821",
+            "posicion_sd": "000010",
+            "en_control_calidad": 0,
+        }
+        for i in range(1, 4)  # 3 new lotes
+    ]
+    
+    mb52_bytes_new = create_mock_mb52_excel(mb52_rows_new)
+    repo.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
+    
+    # Step 5: Verify a NEW job was created (1 total job now)
+    with db.connect() as con:
+        jobs = con.execute(
+            """
+            SELECT job_id, qty_total
+            FROM job
+            WHERE process_id = 'terminaciones'
+              AND pedido = '30517821'
+              AND posicion = '10'
+            ORDER BY created_at
+            """
+        ).fetchall()
+    
+    assert len(jobs) == 1, "Should have 1 job: old ones deleted, 1 new created"
+    
+    # Only 1 job
+    assert jobs[0]["qty_total"] == 3, "New job should have the 3 new lotes"
+    assert jobs[0]["job_id"] not in [job1_id, job2_id], "Should be a different job_id"
+

@@ -157,16 +157,16 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             if active_key == "config_materiales"
                             else "Maestro materiales"
                         )
-                        label_pedidos = (
-                            "✓ Pedidos"
-                            if active_key == "config_pedidos"
-                            else "Pedidos"
-                        )
+                        # label_pedidos = (
+                        #     "✓ Pedidos"
+                        #     if active_key == "config_pedidos"
+                        #     else "Pedidos"
+                        # )
 
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
-                        ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))
+                        # ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))
 
 
 def render_line_tables(

@@ -371,15 +371,16 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
   - Consulta: `SELECT lote FROM job_unit WHERE job_id = ?`
   - Ver sección 2.4.2 para detalles de `job_unit`
   
-- **Sincronización job ↔ job_unit**:
-  - Al importar MB52, para cada job:
-    1. Se calcula `qty_total = COUNT(*)` de lotes en MB52
-    2. Se eliminan todos los `job_unit` anteriores: `DELETE FROM job_unit WHERE job_id = ?`
-    3. Se recrean los `job_unit` desde los lotes actuales en MB52
-  - Esto garantiza que `job_unit` siempre refleja los lotes que **actualmente existen** en MB52
-  - Los lotes **desaparecen del MB52** cuando se completan físicamente
-  - Por lo tanto, `qty_total` representa la cantidad **actual** de lotes disponibles
-
+- **Sincronización job ↔ job_unit (Smart Sync)**:
+  - Al importar MB52, el sistema **preserva la asignación de lotes** a jobs existentes (para respetar splits manuales).
+  - Lógica:
+    1. **Identificar**: Para cada lote en el nuevo MB52, verificar si ya pertenecía a un job existente.
+    2. **Asignar**:
+       - Si el lote ya existía: se mantiene en su job original.
+       - Si es un lote nuevo: se asigna al job existente con menor carga (`qty_total`). Si no hay jobs, se crea uno nuevo.
+    3. **Actualizar**: Se actualiza `job_unit` y `qty_total` en base al MB52 actual.
+    4. **Limpieza**: Si un job se queda sin lotes (stock desapareció de MB52), el job **se elimina**.
+    
 - **Actualización desde Visión**:
   - Visión **solo aporta `fecha_entrega`** (no progreso)
   - No modifica `qty_total` ni `job_unit` (esos vienen solo del MB52)
@@ -417,10 +418,10 @@ Tabla de lotes concretos (unidades físicas) dentro de cada job. Vincula cada lo
 | `updated_at` | datetime | Auditoría |
 
 **Notas sobre sincronización**:
-- Se crea un `job_unit` por cada lote único en MB52 que forme parte del job
-- Al importar MB52, los `job_unit` se recrean completamente:
+- Se crea un `job_unit` por cada lote único en MB52 asignado al job (según la lógica "Smart Sync" definida en 2.4.1).
+- Al importar MB52, para los jobs actualizados, los `job_unit` se refrescan:
   1. `DELETE FROM job_unit WHERE job_id = ?`
-  2. `INSERT INTO job_unit` por cada lote en MB52 para ese (pedido, posición, material, proceso)
+  2. `INSERT INTO job_unit` con los lotes vigentes asignados a este job.
 - El `status` es informativo (auditoria); el estado real viene del `job.state`
 - `correlativo_int` se deriva del primer grupo numérico en el `lote` para ordenamiento
 - **Los lotes desaparecen automáticamente** cuando se eliminan del MB52 (import con reemplazo total)

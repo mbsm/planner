@@ -91,6 +91,9 @@ Un **Job** es la unidad del dispatch:
 - Identidad: `(planta, proceso, pedido, posicion, material, job_id)`.
 - Por defecto: **1 job == 1 pedido/posición** por proceso.
 - El usuario puede **splittear** un pedido/posición en múltiples jobs asociados al mismo `pedido/posicion` (para gestionar partes independientes).
+    - **Persistencia de Splits**: Al actualizar MB52, el sistema respeta la asignación de lotes existentes a sus jobs (splits).
+    - **Nuevos lotes**: Si aparecen nuevos lotes en SAP, se asignan automáticamente al job (split) con menor carga actual.
+    - **Limpieza**: Si un job se queda sin lotes (stock 0 en SAP), el sistema lo elimina automáticamente.
 - Excepción automática: si hay **lotes alfanuméricos** en un almacén, se crea/actualiza un job de **pruebas** que agrupa esos correlativos.
 - Contiene un **conjunto de correlativos** (NO se asume contiguo).
   - El sistema debe poder representar: listas explícitas, múltiples rangos, y/o “splits” parciales.

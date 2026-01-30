@@ -5,7 +5,7 @@ import re
 from datetime import date, datetime
 from uuid import uuid4
 
-from foundryplan.core.models import Line, Order, Part
+from foundryplan.core.models import Job, Line, Order, Part
 from foundryplan.data.db import Db
 from foundryplan.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
 
@@ -360,7 +360,44 @@ class Repository:
         key = str(key).strip()
         if not key:
             raise ValueError("config key vacío")
+        
         with self.db.connect() as con:
+            # FASE 3.3: Handle priority map changes (recalculate job priorities)
+            if key == "job_priority_map":
+                try:
+                    row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
+                    old_str = row["config_value"] if row else '{"prueba": 1, "urgente": 2, "normal": 3}'
+                    
+                    try:
+                        old_map = json.loads(old_str)
+                    except Exception:
+                        old_map = {"prueba": 1, "urgente": 2, "normal": 3}
+                        
+                    try:
+                        new_map = json.loads(str(value))
+                    except Exception:
+                        new_map = {}
+
+                    case_parts = []
+                    case_params = []
+                    affected_olds = []
+                    
+                    for k in ["prueba", "urgente", "normal"]:
+                        old_p = int(old_map.get(k, 0))
+                        new_p = int(new_map.get(k, 0))
+                        if old_p != new_p and old_p > 0 and new_p > 0:
+                            case_parts.append("WHEN ? THEN ?")
+                            case_params.extend([old_p, new_p])
+                            affected_olds.append(old_p)
+                            
+                    if affected_olds:
+                        # Construct single query to handle swaps correctly
+                        placeholders = ','.join(['?']*len(affected_olds))
+                        sql = f"UPDATE job SET priority = CASE priority {' '.join(case_parts)} ELSE priority END WHERE priority IN ({placeholders})"
+                        con.execute(sql, (*case_params, *affected_olds))     
+                except Exception:
+                    pass
+
             con.execute(
                 "INSERT INTO app_config(config_key, config_value) VALUES(?, ?) ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value",
                 (key, str(value).strip()),
@@ -372,7 +409,7 @@ class Repository:
     # ---------- Families catalog ----------
     def list_families(self) -> list[str]:
         with self.db.connect() as con:
-            rows = con.execute("SELECT family_id FROM family_catalog ORDER BY name").fetchall()
+            rows = con.execute("SELECT family_id FROM family_catalog ORDER BY family_id").fetchall()
         return [str(r[0]) for r in rows]
 
     def get_families_rows(self) -> list[dict]:
@@ -380,11 +417,11 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT f.name AS family_id, COUNT(p.material) AS parts_count
+                SELECT f.family_id AS family_id, COUNT(p.material) AS parts_count
                 FROM family_catalog f
-                LEFT JOIN parts p ON p.family_id = f.name
-                GROUP BY f.name
-                ORDER BY f.name
+                LEFT JOIN material_master p ON p.family_id = f.family_id
+                GROUP BY f.family_id
+                ORDER BY f.family_id
                 """
             ).fetchall()
         return [{"family_id": str(r["family_id"]), "parts_count": int(r["parts_count"])} for r in rows]
@@ -394,7 +431,7 @@ class Repository:
         if not name:
             raise ValueError("nombre de family_id vacío")
         with self.db.connect() as con:
-            con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES(?)", (name,))
+            con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", (name, name))
 
     def rename_family(self, *, old: str, new: str) -> None:
         old = str(old).strip()
@@ -403,7 +440,7 @@ class Repository:
             raise ValueError("family_id inválida")
         with self.db.connect() as con:
             # Ensure new exists
-            con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES(?)", (new,))
+            con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", (new, new))
             # UPDATE material_master mappings
             con.execute("UPDATE material_master SET family_id = ? WHERE family_id = ?", (new, old))
 
@@ -419,7 +456,7 @@ class Repository:
                 )
 
             # Remove old from catalog
-            con.execute("DELETE FROM family_catalog WHERE name = ?", (old,))
+            con.execute("DELETE FROM family_catalog WHERE family_id = ?", (old,))
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
@@ -432,7 +469,7 @@ class Repository:
             in_use = int(con.execute("SELECT COUNT(*) FROM material_master WHERE family_id = ?", (name,)).fetchone()[0])
             if in_use and force:
                 # Keep mappings: move affected parts to 'Otros'
-                con.execute("INSERT OR IGNORE INTO family_catalog(family_id) VALUES('Otros')")
+                con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES('Otros', 'Otros')")
                 con.execute("UPDATE material_master SET family_id='Otros' WHERE family_id = ?", (name,))
             elif in_use and not force:
                 # Default behavior: remove mappings so affected parts become "missing" and must be reassigned.
@@ -452,7 +489,7 @@ class Repository:
                     (json.dumps(updated), str(r["process"]), int(r["line_id"])),
                 )
 
-            con.execute("DELETE FROM family_catalog WHERE name = ?", (name,))
+            con.execute("DELETE FROM family_catalog WHERE family_id = ?", (name,))
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
@@ -512,7 +549,11 @@ class Repository:
         return out
 
     def get_lines_model(self, *, process: str = "terminaciones") -> list[Line]:
-        return [Line(line_id=r["line_id"], allowed_families=set(r["families"])) for r in self.get_lines(process=process)]
+        # Map legacy 'families' list to 'family_id' constraint
+        return [
+            Line(line_id=str(r["line_id"]), constraints={"family_id": set(r["families"])}) 
+            for r in self.get_lines(process=process)
+        ]
 
     def upsert_part(self, *, material: str, family_id: str) -> None:
         material = str(material).strip()
@@ -674,6 +715,7 @@ class Repository:
                         posicion,
                         MAX(COALESCE(cod_material, '')) AS cod_material,
                         MAX(COALESCE(fecha_de_pedido, '')) AS fecha_de_pedido,
+                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
@@ -685,19 +727,19 @@ class Repository:
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
-                        v.fecha_de_pedido AS fecha_de_pedido,
+                        v.fecha_entrega AS fecha_entrega,
                         CASE
                             WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
                             ELSE (v.solicitado - v.bodega - v.despachado)
                         END AS pendientes,
                         COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0) AS peso_unitario_ton
                     FROM v
-                    LEFT JOIN parts p
+                    LEFT JOIN material_master p
                       ON p.material = v.cod_material
                 )
                 SELECT
                     COALESCE(SUM(pendientes * peso_unitario_ton), 0.0) AS tons_por_entregar,
-                    COALESCE(SUM(CASE WHEN fecha_de_pedido < ? THEN (pendientes * peso_unitario_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
+                    COALESCE(SUM(CASE WHEN fecha_entrega < ? THEN (pendientes * peso_unitario_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
                 FROM joined
                 """,
                 (d0_iso,),
@@ -740,7 +782,9 @@ class Repository:
         return [dict(r) for r in rows]
 
     def get_orders_overdue_rows(self, *, today: date | None = None, limit: int = 200) -> list[dict]:
-        """Orders with fecha_entrega < today across all processes."""
+        """Orders with fecha_entrega < today across all processes.
+        NOTE: Uses fecha_de_pedido as the valid date, aliased to fecha_entrega.
+        """
         d0 = today or date.today()
         lim = max(1, min(int(limit or 200), 2000))
         with self.db.connect() as con:
@@ -772,7 +816,7 @@ class Repository:
                         posicion,
                         MAX(cliente) AS cliente,
                         MAX(cod_material) AS cod_material,
-                        MAX(COALESCE(fecha_de_pedido, '')) AS fecha_de_pedido,
+                        MAX(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_de_pedido,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
@@ -780,12 +824,12 @@ class Repository:
                     FROM sap_vision_snapshot
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                       AND fecha_de_pedido > '2023-12-31'
-                      AND fecha_de_pedido < ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                       AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
+                    HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
                 ) v
-                LEFT JOIN parts p
+                LEFT JOIN material_master p
                   ON p.material = v.cod_material
                 ORDER BY v.fecha_de_pedido ASC, v.pedido, v.posicion
                 LIMIT ?
@@ -832,14 +876,15 @@ class Repository:
             rows = con.execute(
                 """
                 WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(fecha_de_pedido) AS fecha_entrega
+                    SELECT pedido, posicion, MIN(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_entrega
                     FROM sap_vision_snapshot
                     WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
                       AND fecha_de_pedido > '2023-12-31'
-                      AND fecha_de_pedido >= ? AND fecha_de_pedido <= ?
                       AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
                       AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
+                    HAVING MIN(COALESCE(fecha_de_pedido, '9999-12-31')) >= ?
+                       AND MIN(COALESCE(fecha_de_pedido, '9999-12-31')) <= ?
                 )
                 SELECT
                     op.pedido AS pedido,
@@ -875,7 +920,7 @@ class Repository:
                 ) v
                   ON v.pedido = op.pedido
                  AND v.posicion = op.posicion
-                LEFT JOIN parts p
+                LEFT JOIN material_master p
                   ON p.material = v.cod_material
                 ORDER BY op.fecha_entrega ASC, op.pedido, op.posicion
                 LIMIT ?
@@ -1601,6 +1646,10 @@ class Repository:
             process_id = str(proc_row["process_id"])
             almacen = str(proc_row["sap_almacen"])
             
+            # Track which jobs get updated during this import
+            # Jobs NOT in this set will be reset to qty_total=0 at the end
+            updated_job_ids: set[str] = set()
+            
             # Filter MB52 by almacen and availability predicate
             avail_sql = self._mb52_availability_predicate_sql(process=process_id)
             
@@ -1635,54 +1684,62 @@ class Repository:
                 if not pedido or not posicion or not material:
                     continue
                 
-                # Check if job already exists
-                existing = con.execute(
+                # Check if jobs exist (may have multiple splits)
+                existing_jobs = con.execute(
                     """
-                    SELECT job_id
+                    SELECT job_id, qty_total
                     FROM job
                     WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ?
+                    ORDER BY qty_total ASC
                     """,
                     (process_id, pedido, posicion, material),
-                ).fetchone()
+                ).fetchall()
                 
                 # Determine priority: tests use "prueba", otherwise "normal"
                 priority = priority_prueba if is_test else priority_normal
                 
-                if existing:
-                    # Update existing job (qty_total reflects current lotes in MB52)
-                    job_id = str(existing["job_id"])
+                # FASE 3.2 FIX: Split Retention Logic
+                # We must map existing lotes to their current jobs to preserve splits.
+                current_lote_map: dict[str, str] = {}
+                target_job_id: str | None = None
+                
+                if existing_jobs:
+                    # Check if all existing are "dead" (qty=0)
+                    all_zero = all(int(j["qty_total"]) == 0 for j in existing_jobs)
                     
-                    con.execute(
-                        """
-                        UPDATE job
-                        SET qty_total = ?,
-                            is_test = ?,
-                            priority = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE job_id = ?
-                        """,
-                        (qty_total, is_test, priority, job_id),
-                    )
-                else:
-                    # Create new job (qty_total = lotes currently in MB52)
-                    job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
-                    
+                    if not all_zero:
+                        # We have active jobs. 
+                        # 1. Build map of current lotes to preserve them
+                        job_ids = [str(j["job_id"]) for j in existing_jobs]
+                        placeholders = ','.join('?' * len(job_ids))
+                        unit_rows = con.execute(
+                            f"SELECT lote, job_id FROM job_unit WHERE job_id IN ({placeholders})",
+                            job_ids
+                        ).fetchall()
+                        for u in unit_rows:
+                            if u["lote"]:
+                                current_lote_map[str(u["lote"]).strip()] = str(u["job_id"])
+                        
+                        # 2. Pick target for NEW lotes (emptiest job)
+                        target_job_id = str(existing_jobs[0]["job_id"])
+                
+                # If no active job found/selected, create a new one
+                if not target_job_id:
+                    new_job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
                     con.execute(
                         """
                         INSERT INTO job(
                             job_id, process_id, pedido, posicion, material,
-                            qty_total, priority, is_test, state,
+                            qty_total, qty_remaining, priority, is_test, state,
                             created_at, updated_at
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        VALUES(?, ?, ?, ?, ?, 0, 0, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """,
-                        (job_id, process_id, pedido, posicion, material, qty_total, priority, is_test),
+                        (new_job_id, process_id, pedido, posicion, material, priority, is_test),
                     )
-                
-                # Delete old job_units and recreate from current MB52
-                con.execute("DELETE FROM job_unit WHERE job_id = ?", (job_id,))
-                
-                # Get lotes for this job from MB52
+                    target_job_id = new_job_id
+
+                # Get all current MB52 lotes for this key
                 lotes_rows = con.execute(
                     f"""
                     SELECT lote, correlativo_int
@@ -1698,25 +1755,99 @@ class Repository:
                     (str(centro_normalized), almacen, pedido, posicion, material),
                 ).fetchall()
                 
+                # Allocation Plan: job_id -> list of (lote, corr)
+                allocations: dict[str, list[tuple[str, int | None]]] = {}
+                
                 for lote_row in lotes_rows:
                     lote = str(lote_row["lote"]).strip()
-                    correlativo_int = lote_row["correlativo_int"]  # can be None
+                    corr = lote_row["correlativo_int"]
                     
                     if not lote:
                         continue
-                    
-                    job_unit_id = f"ju_{job_id}_{uuid4().hex[:8]}"
-                    
+                        
+                    # Rule: Keep in existing job if mapped, else go to target
+                    assigned_job_id = current_lote_map.get(lote, target_job_id)
+                    # Safety check: if mapped job is not in our known list (shouldn't happen), fall back
+                    if not assigned_job_id: 
+                         assigned_job_id = target_job_id
+                         
+                    allocations.setdefault(str(assigned_job_id), []).append((lote, corr))
+                
+                # Apply allocations to DB
+                for job_id, items in allocations.items():
+                    qty = len(items)
+                    # Update job header
                     con.execute(
                         """
-                        INSERT INTO job_unit(
-                            job_unit_id, job_id, lote, correlativo_int, qty, status,
-                            created_at, updated_at
-                        )
-                        VALUES(?, ?, ?, ?, 1, 'available', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        UPDATE job
+                        SET qty_total = ?,
+                            is_test = ?,
+                            priority = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE job_id = ?
                         """,
-                        (job_unit_id, job_id, lote, correlativo_int),
+                        (qty, is_test, priority, job_id)
                     )
+                    
+                    # Replace job units
+                    con.execute("DELETE FROM job_unit WHERE job_id = ?", (job_id,))
+                    
+                    for lote, corr in items:
+                        job_unit_id = f"ju_{job_id}_{uuid4().hex[:8]}"
+                        con.execute(
+                            """
+                            INSERT INTO job_unit(
+                                job_unit_id, job_id, lote, correlativo_int, qty, status,
+                                created_at, updated_at
+                            )
+                            VALUES(?, ?, ?, ?, 1, 'available', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """,
+                            (job_unit_id, job_id, lote, corr),
+                        )
+                        
+                    updated_job_ids.add(job_id)
+            
+            # Reset jobs that were NOT updated in this import (splits without new stock, etc.)
+            # This ensures qty_total reflects current MB52 state
+            if updated_job_ids:
+                placeholders = ','.join('?' * len(updated_job_ids))
+                con.execute(
+                    f"""
+                    DELETE FROM job_unit
+                    WHERE job_id IN (
+                        SELECT job_id FROM job
+                        WHERE process_id = ?
+                          AND job_id NOT IN ({placeholders})
+                    )
+                    """,
+                    (process_id, *updated_job_ids)
+                )
+                con.execute(
+                    f"""
+                    UPDATE job
+                    SET qty_total = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE process_id = ?
+                      AND job_id NOT IN ({placeholders})
+                    """,
+                    (process_id, *updated_job_ids)
+                )
+            else:
+                # No jobs were updated, reset all for this process
+                con.execute(
+                    "DELETE FROM job_unit WHERE job_id IN (SELECT job_id FROM job WHERE process_id = ?)",
+                    (process_id,)
+                )
+                con.execute(
+                    "UPDATE job SET qty_total = 0, updated_at = CURRENT_TIMESTAMP WHERE process_id = ?",
+                    (process_id,)
+                )
+            
+            # Cleanup: Delete jobs with qty=0 to keep the table clean.
+            # This respects the "SAP is source of truth" principle: if stock is 0, job is gone.
+            con.execute(
+                "DELETE FROM job WHERE process_id = ? AND qty_total = 0",
+                (process_id,)
+            )
 
     def _save_mb52_progress_last(self, *, con, process: str, report: dict) -> None:
         payload = json.dumps(report)
@@ -2366,6 +2497,165 @@ class Repository:
             """
         )
 
+    def split_job(self, *, job_id: str, qty_split: int) -> tuple[str, str]:
+        """Split a job into two jobs.
+        
+        Args:
+            job_id: ID of the job to split
+            qty_split: Number of lotes to assign to the first job (original keeps this qty)
+            
+        Returns:
+            Tuple of (original_job_id, new_job_id)
+            
+        Raises:
+            ValueError: If job not found, qty_split invalid, or job has insufficient qty
+        """
+        from uuid import uuid4
+        
+        with self.db.connect() as con:
+            # Get original job
+            original = con.execute(
+                """
+                SELECT job_id, process_id, pedido, posicion, material, qty_total,
+                       priority, is_test, state, fecha_entrega, notes
+                FROM job
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            
+            if not original:
+                raise ValueError(f"Job {job_id} not found")
+            
+            original_qty = int(original["qty_total"])
+            
+            if qty_split <= 0:
+                raise ValueError(f"qty_split must be positive, got {qty_split}")
+            if qty_split >= original_qty:
+                raise ValueError(f"qty_split ({qty_split}) must be less than job qty_total ({original_qty})")
+            
+            # Calculate new job quantity
+            new_qty = original_qty - qty_split
+            
+            # Create new job with same attributes
+            process_id = str(original["process_id"])
+            new_job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
+            
+            con.execute(
+                """
+                INSERT INTO job(
+                    job_id, process_id, pedido, posicion, material,
+                    qty_total, qty_remaining, priority, is_test, state, fecha_entrega, notes,
+                    created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    new_job_id,
+                    process_id,
+                    original["pedido"],
+                    original["posicion"],
+                    original["material"],
+                    new_qty,
+                    new_qty,
+                    original["priority"],
+                    original["is_test"],
+                    original["state"],
+                    original["fecha_entrega"],
+                    original["notes"],
+                ),
+            )
+            
+            # Update original job quantity
+            con.execute(
+                """
+                UPDATE job
+                SET qty_total = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                """,
+                (qty_split, job_id),
+            )
+            
+            # Get all job_units from original job
+            job_units = con.execute(
+                """
+                SELECT lote, correlativo_int, qty, status
+                FROM job_unit
+                WHERE job_id = ?
+                ORDER BY correlativo_int, lote
+                """,
+                (job_id,),
+            ).fetchall()
+            
+            # Split job_units: first qty_split stay with original, rest go to new job
+            units_to_move = job_units[qty_split:]
+            
+            for unit in units_to_move:
+                # Delete from original job
+                con.execute(
+                    "DELETE FROM job_unit WHERE job_id = ? AND lote = ?",
+                    (job_id, unit["lote"]),
+                )
+                
+                # Create in new job
+                new_unit_id = f"ju_{new_job_id}_{uuid4().hex[:8]}"
+                con.execute(
+                    """
+                    INSERT INTO job_unit(
+                        job_unit_id, job_id, lote, correlativo_int, qty, status,
+                        created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        new_unit_id,
+                        new_job_id,
+                        unit["lote"],
+                        unit["correlativo_int"],
+                        unit["qty"],
+                        unit["status"],
+                    ),
+                )
+            
+            return (job_id, new_job_id)
+
+    def _get_priority_map_values(self) -> dict[str, int]:
+        priority_map_str = self.get_config(key="job_priority_map", default='{"prueba": 1, "urgente": 2, "normal": 3}')
+        try:
+            priority_map = json.loads(priority_map_str) if isinstance(priority_map_str, str) else priority_map_str
+        except Exception:
+            priority_map = {"prueba": 1, "urgente": 2, "normal": 3}
+        return {k: int(v) for k, v in priority_map.items()}
+
+    def mark_job_urgent(self, job_id: str) -> None:
+        """Mark a job as urgent."""
+        with self.db.connect() as con:
+            row = con.execute("SELECT is_test FROM job WHERE job_id = ?", (job_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Job not found: {job_id}")
+            if row["is_test"]:
+                raise ValueError("Cannot change priority of a test job")
+                
+            priorities = self._get_priority_map_values()
+            urgent_prio = priorities.get("urgente", 2)
+            
+            con.execute("UPDATE job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (urgent_prio, job_id))
+
+    def unmark_job_urgent(self, job_id: str) -> None:
+        """Unmark a job as urgent (return to normal)."""
+        with self.db.connect() as con:
+            row = con.execute("SELECT is_test FROM job WHERE job_id = ?", (job_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Job not found: {job_id}")
+            if row["is_test"]:
+                raise ValueError("Cannot change priority of a test job")
+                
+            priorities = self._get_priority_map_values()
+            normal_prio = priorities.get("normal", 3)
+            
+            con.execute("UPDATE job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (normal_prio, job_id))
+
     def rebuild_orders_from_sap(self) -> int:
         """Backwards-compatible Terminaciones rebuild."""
         return self.rebuild_orders_from_sap_for(process="terminaciones")
@@ -2497,6 +2787,46 @@ class Repository:
                     """,
                     sorted(list(auto_priority_orderpos)),
                 )
+
+            # --- V0.2 Job Sync ---
+            # Sync orders -> job table (preserving job_id and prio for existing, deleting obsolete)
+            existing_jobs = con.execute("SELECT job_id, pedido, posicion, is_test FROM job WHERE process_id = ?", (process,)).fetchall()
+            existing_map = {(r["pedido"], r["posicion"], int(r["is_test"])): r["job_id"] for r in existing_jobs}
+            seen_existing_ids = set()
+
+            prio_vals = self._get_priority_map_values()
+            def_prio = prio_vals.get("normal", 3)
+
+            for row in order_rows:
+                # row: (pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, tpm, is_test)
+                # Note: row[8] is is_test
+                key = (row[0], row[1], int(row[8]))
+                
+                if key in existing_map:
+                    jid = existing_map[key]
+                    seen_existing_ids.add(jid)
+                    con.execute(
+                        "UPDATE job SET qty_total=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                        (int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), jid)
+                    )
+                else:
+                    new_jid = str(uuid4())
+                    con.execute(
+                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test, state, fecha_entrega, corr_min, corr_max) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                        (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[3]), def_prio, int(row[8]), str(row[4]), int(row[5]), int(row[6]))
+                    )
+
+            # Delete jobs not in current MB52 snapshot
+            to_del = [jid for jid in existing_map.values() if jid not in seen_existing_ids]
+            if to_del:
+                # SQLite limit is usually 999 vars
+                chunk_s = 900
+                for i in range(0, len(to_del), chunk_s):
+                    chunk = to_del[i:i+chunk_s]
+                    qs = ",".join("?" * len(chunk))
+                    con.execute(f"DELETE FROM job WHERE job_id IN ({qs})", chunk)
+
             con.execute("DELETE FROM last_program WHERE process = ?", (process,))
 
         return len(order_rows)
@@ -2543,6 +2873,33 @@ class Repository:
                     ultimo_correlativo=int(ultimo),
                     tiempo_proceso_min=float(tpm) if tpm is not None else None,
                     is_test=bool(int(is_test or 0)),
+                )
+            )
+        return out
+
+    def get_jobs_model(self, *, process: str = "terminaciones") -> list[Job]:
+        process = self._normalize_process(process)
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT job_id, pedido, posicion, material, qty_total, priority, fecha_entrega, is_test, notes, corr_min, corr_max FROM job WHERE process_id = ?",
+                (process,),
+            ).fetchall()
+        
+        out: list[Job] = []
+        for r in rows:
+            out.append(
+                Job(
+                    job_id=r["job_id"],
+                    pedido=r["pedido"],
+                    posicion=r["posicion"],
+                    material=r["material"],
+                    qty_total=r["qty_total"],
+                    priority=r["priority"],
+                    fecha_entrega=date.fromisoformat(r["fecha_entrega"]) if r["fecha_entrega"] else None,
+                    is_test=bool(r["is_test"]),
+                    notes=r["notes"],
+                    corr_min=r["corr_min"],
+                    corr_max=r["corr_max"]
                 )
             )
         return out
@@ -2715,6 +3072,11 @@ class Repository:
         is_test_i = int(is_test or 0)
         if not pedido_s or not posicion_s:
             raise ValueError("Pedido/posición inválidos")
+
+        allow = str(self.get_config(key="ui_allow_move_in_progress_line", default="0")).strip()
+        if allow != "1":
+            raise ValueError("Movimiento manual deshabilitado por configuración (ui_allow_move_in_progress_line)")
+
         with self.db.connect() as con:
             try:
                 if split_id is None:
