@@ -585,6 +585,10 @@ class Repository:
         peso_unitario_ton: float | None = None,
         mec_perf_inclinada: bool = False,
         sobre_medida_mecanizado: bool = False,
+        aleacion: str | None = None,
+        piezas_por_molde: float | None = None,
+        peso_bruto_ton: float | None = None,
+        tiempo_enfriamiento_molde_dias: int | None = None,
     ) -> None:
         """Upsert a part master row including family and optional process times."""
         material = str(material).strip()
@@ -605,6 +609,7 @@ class Repository:
         v = _coerce_days(vulcanizado_dias, field="vulcanizado_dias")
         m = _coerce_days(mecanizado_dias, field="mecanizado_dias")
         i = _coerce_days(inspeccion_externa_dias, field="inspeccion_externa_dias")
+        t_enfr = _coerce_days(tiempo_enfriamiento_molde_dias, field="tiempo_enfriamiento_molde_dias")
 
         pt: float | None = None
         if peso_unitario_ton is not None:
@@ -612,16 +617,32 @@ class Repository:
             if pt < 0:
                 raise ValueError("peso_unitario_ton no puede ser negativo")
 
+        pb: float | None = None
+        if peso_bruto_ton is not None:
+            pb = float(peso_bruto_ton)
+            if pb < 0:
+                raise ValueError("peso_bruto_ton no puede ser negativo")
+        
+        ppm: float | None = None
+        if piezas_por_molde is not None:
+            ppm = float(piezas_por_molde)
+            if ppm < 0:
+                raise ValueError("piezas_por_molde no puede ser negativo")
+
         mec_perf = 1 if bool(mec_perf_inclinada) else 0
         sm = 1 if bool(sobre_medida_mecanizado) else 0
+        aleacion_val = str(aleacion).strip() if aleacion else None
 
         # Ensure family exists in catalog
         self.add_family(name=family_id)
 
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO material_master(material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO material_master("
+                "material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
+                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, piezas_por_molde, peso_bruto_ton, tiempo_enfriamiento_molde_dias"
+                ") "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(material) DO UPDATE SET "
                 "family_id=excluded.family_id, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
@@ -629,8 +650,12 @@ class Repository:
                 "inspeccion_externa_dias=excluded.inspeccion_externa_dias, "
                 "peso_unitario_ton=excluded.peso_unitario_ton, "
                 "mec_perf_inclinada=excluded.mec_perf_inclinada, "
-                "sobre_medida_mecanizado=excluded.sobre_medida_mecanizado",
-                (material, family_id, v, m, i, pt, mec_perf, sm),
+                "sobre_medida_mecanizado=excluded.sobre_medida_mecanizado, "
+                "aleacion=excluded.aleacion, "
+                "piezas_por_molde=excluded.piezas_por_molde, "
+                "peso_bruto_ton=excluded.peso_bruto_ton, "
+                "tiempo_enfriamiento_molde_dias=excluded.tiempo_enfriamiento_molde_dias",
+                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, ppm, pb, t_enfr),
             )
 
             # Invalidate any previously generated program
@@ -663,7 +688,7 @@ class Repository:
                 )
             con.execute(
                 """
-                UPDATE parts
+                UPDATE material_master
                 SET vulcanizado_dias = ?, mecanizado_dias = ?, inspeccion_externa_dias = ?
                 WHERE material = ?
                 """,
@@ -822,10 +847,6 @@ class Repository:
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision_snapshot
-                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_de_pedido > '2023-12-31'
-                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
-                      AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
                     HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
                 ) v
@@ -878,10 +899,6 @@ class Repository:
                 WITH orderpos AS (
                     SELECT pedido, posicion, MIN(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_entrega
                     FROM sap_vision_snapshot
-                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_de_pedido > '2023-12-31'
-                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
-                      AND (status_comercial IS NULL OR status_comercial = 'Activo')
                     GROUP BY pedido, posicion
                     HAVING MIN(COALESCE(fecha_de_pedido, '9999-12-31')) >= ?
                        AND MIN(COALESCE(fecha_de_pedido, '9999-12-31')) <= ?
@@ -996,7 +1013,7 @@ class Repository:
                 """
                 SELECT DISTINCT o.material
                 FROM orders o
-                LEFT JOIN parts p ON p.material = o.material
+                LEFT JOIN material_master p ON p.material = o.material
                 WHERE o.process = ?
                   AND p.material IS NULL
                 ORDER BY o.material
@@ -1013,7 +1030,7 @@ class Repository:
                 """
                 SELECT DISTINCT o.material
                 FROM orders o
-                JOIN parts p ON p.material = o.material
+                JOIN material_master p ON p.material = o.material
                 WHERE o.process = ?
                   AND (
                        p.vulcanizado_dias IS NULL
@@ -1035,7 +1052,7 @@ class Repository:
                 FROM (
                     SELECT DISTINCT o.material
                     FROM orders o
-                    JOIN parts p ON p.material = o.material
+                    JOIN material_master p ON p.material = o.material
                     WHERE o.process = ?
                       AND (
                            p.vulcanizado_dias IS NULL
@@ -1057,7 +1074,7 @@ class Repository:
                 FROM (
                     SELECT DISTINCT o.material
                     FROM orders o
-                    LEFT JOIN parts p ON p.material = o.material
+                    LEFT JOIN material_master p ON p.material = o.material
                     WHERE o.process = ?
                       AND p.material IS NULL
                 )
@@ -1377,9 +1394,21 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                                 f"""
-                SELECT m.material, COALESCE(MAX(m.texto_breve), '') AS texto_breve
+                SELECT
+                    m.material,
+                    COALESCE(MAX(m.texto_breve), '') AS texto_breve,
+                    MAX(p.family_id) as family_id,
+                    MAX(p.vulcanizado_dias) as vulcanizado_dias,
+                    MAX(p.mecanizado_dias) as mecanizado_dias,
+                    MAX(p.inspeccion_externa_dias) as inspeccion_externa_dias,
+                    MAX(p.mec_perf_inclinada) as mec_perf_inclinada,
+                    MAX(p.sobre_medida_mecanizado) as sobre_medida_mecanizado,
+                    MAX(p.aleacion) as aleacion,
+                    MAX(p.piezas_por_molde) as piezas_por_molde,
+                    MAX(p.peso_bruto_ton) as peso_bruto_ton,
+                    MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
                 FROM sap_mb52_snapshot m
-                LEFT JOIN parts p ON p.material = m.material
+                LEFT JOIN material_master p ON p.material = m.material
                 WHERE m.material IS NOT NULL AND TRIM(m.material) <> ''
                   AND m.centro = ?
                   AND m.almacen = ?
@@ -1387,14 +1416,94 @@ class Repository:
                   AND m.documento_comercial IS NOT NULL AND TRIM(m.documento_comercial) <> ''
                   AND m.posicion_sd IS NOT NULL AND TRIM(m.posicion_sd) <> ''
                   AND m.lote IS NOT NULL AND TRIM(m.lote) <> ''
-                  AND p.material IS NULL
+                  AND (
+                      p.material IS NULL
+                      OR p.family_id IS NULL OR TRIM(p.family_id) = ''
+                      OR p.vulcanizado_dias IS NULL
+                      OR p.mecanizado_dias IS NULL
+                      OR p.inspeccion_externa_dias IS NULL
+                  )
                 GROUP BY m.material
                 ORDER BY m.material
                 LIMIT ?
                                 """.strip(),
                 (centro, almacen, lim),
             ).fetchall()
-        return [{"material": str(r[0]), "texto_breve": str(r[1] or "")} for r in rows]
+        return [
+            {
+                "material": str(r["material"]),
+                "texto_breve": str(r["texto_breve"] or ""),
+                "family_id": r["family_id"],
+                "vulcanizado_dias": r["vulcanizado_dias"],
+                "mecanizado_dias": r["mecanizado_dias"],
+                "inspeccion_externa_dias": r["inspeccion_externa_dias"],
+                "mec_perf_inclinada": r["mec_perf_inclinada"],
+                "sobre_medida_mecanizado": r["sobre_medida_mecanizado"],
+                "aleacion": r["aleacion"],
+                "piezas_por_molde": r["piezas_por_molde"],
+                "peso_bruto_ton": r["peso_bruto_ton"],
+                "tiempo_enfriamiento_molde_dias": r["tiempo_enfriamiento_molde_dias"],
+            }
+            for r in rows
+        ]
+
+    def get_missing_parts_from_vision_for(self, *, limit: int = 500) -> list[dict]:
+        """Distinct materials in Visión Planta not present in the local parts master.
+        
+        Note: Visión Planta is global, not per-process (it's customer orders).
+        So we return ANY material in Vision that is missing from master.
+        """
+        lim = int(limit or 500)
+        lim = max(1, min(lim, 5000))
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT
+                    m.cod_material,
+                    COALESCE(MAX(m.descripcion_material), '') AS descripcion_material,
+                    MAX(p.family_id) as family_id,
+                    MAX(p.vulcanizado_dias) as vulcanizado_dias,
+                    MAX(p.mecanizado_dias) as mecanizado_dias,
+                    MAX(p.inspeccion_externa_dias) as inspeccion_externa_dias,
+                    MAX(p.mec_perf_inclinada) as mec_perf_inclinada,
+                    MAX(p.sobre_medida_mecanizado) as sobre_medida_mecanizado,
+                    MAX(p.aleacion) as aleacion,
+                    MAX(p.piezas_por_molde) as piezas_por_molde,
+                    MAX(p.peso_bruto_ton) as peso_bruto_ton,
+                    MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
+                FROM sap_vision_snapshot m
+                LEFT JOIN material_master p ON p.material = m.cod_material
+                WHERE m.cod_material IS NOT NULL AND TRIM(m.cod_material) <> ''
+                  AND (
+                      p.material IS NULL
+                      OR p.family_id IS NULL OR TRIM(p.family_id) = ''
+                      OR p.vulcanizado_dias IS NULL
+                      OR p.mecanizado_dias IS NULL
+                      OR p.inspeccion_externa_dias IS NULL
+                  )
+                GROUP BY m.cod_material
+                ORDER BY m.cod_material
+                LIMIT ?
+                """.strip(),
+                (lim,),
+            ).fetchall()
+        return [
+            {
+                "material": str(r["cod_material"]),
+                "texto_breve": str(r["descripcion_material"] or ""),
+                "family_id": r["family_id"],
+                "vulcanizado_dias": r["vulcanizado_dias"],
+                "mecanizado_dias": r["mecanizado_dias"],
+                "inspeccion_externa_dias": r["inspeccion_externa_dias"],
+                "mec_perf_inclinada": r["mec_perf_inclinada"],
+                "sobre_medida_mecanizado": r["sobre_medida_mecanizado"],
+                "aleacion": r["aleacion"],
+                "piezas_por_molde": r["piezas_por_molde"],
+                "peso_bruto_ton": r["peso_bruto_ton"],
+                "tiempo_enfriamiento_molde_dias": r["tiempo_enfriamiento_molde_dias"],
+            }
+            for r in rows
+        ]
 
     def get_mb52_texto_breve(self, *, material: str) -> str:
         """Returns the latest known short description for a material from MB52."""
@@ -1502,53 +1611,7 @@ class Repository:
                 libre, doc, pos, qc, correlativo_int, is_test
             ))
 
-
-        # Progress report (Terminaciones): compute salidas brutas vs previous MB52 when replacing.
-        # We compute it BEFORE invalidating cached programs.
-        last_program_term = None
-        try:
-            last_program_term = self.load_last_program(process="terminaciones")
-        except Exception:
-            last_program_term = None
-
         with self.db.connect() as con:
-            prev_keys_term: set[tuple[str, str, str]] | None = None
-            prev_items_term: list[tuple[str, str, str, int]] | None = None
-            if mode == "replace":
-                try:
-                    centro_term = (self.get_config(key="sap_centro", default="4000") or "").strip()
-                    almacen_term = (self.get_config(key="sap_almacen_terminaciones", default="4035") or "").strip()
-                    centro_term = self._normalize_sap_key(centro_term) or centro_term
-                    almacen_term = self._normalize_sap_key(almacen_term) or almacen_term
-                    avail_sql = self._mb52_availability_predicate_sql(process="terminaciones")
-                    rows_prev = con.execute(
-                        f"""
-                        SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
-                        FROM sap_mb52_snapshot
-                        WHERE centro = ?
-                          AND almacen = ?
-                          AND {avail__snapshotsql}
-                          AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
-                          AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
-                          AND lote IS NOT NULL AND TRIM(lote) <> ''
-                        """.strip(),
-                        (str(centro_term), str(almacen_term)),
-                    ).fetchall()
-
-                    prev_items_term = []
-                    for r in rows_prev:
-                        pedido = str(r["pedido"] or "").strip()
-                        posicion = str(r["posicion"] or "").strip()
-                        lote = str(r["lote"] or "").strip()
-                        if not pedido or not posicion or not lote:
-                            continue
-                        corr = self._lote_to_int(lote)
-                        prev_items_term.append((pedido, posicion, lote, int(corr)))
-                    prev_keys_term = {(p, pos, lote) for (p, pos, lote, _) in prev_items_term}
-                except Exception:
-                    prev_keys_term = None
-                    prev_items_term = None
-
             if mode == "replace":
                 con.execute("DELETE FROM sap_mb52_snapshot")
             else:
@@ -1568,46 +1631,6 @@ class Repository:
                 """,
                 rows_snapshot,
             )
-
-            if mode == "replace" and last_program_term and prev_keys_term is not None and prev_items_term is not None:
-                try:
-                    centro_term = (self.get_config(key="sap_centro", default="4000") or "").strip()
-                    almacen_term = (self.get_config(key="sap_almacen_terminaciones", default="4035") or "").strip()
-                    centro_term = self._normalize_sap_key(centro_term) or centro_term
-                    almacen_term = self._normalize_sap_key(almacen_term) or almacen_term
-                    avail_sql = self._mb52_availability_predicate_sql(process="terminaciones")
-                    rows_curr = con.execute(
-                        f"""
-                        SELECT documento_comercial AS pedido, posicion_sd AS posicion, lote
-                        FROM sap_mb52_snapshot
-                        WHERE centro = ?
-                          AND almacen = ?
-                          AND {avail_sql}
-                          AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
-                          AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
-                          AND lote IS NOT NULL AND TRIM(lote) <> ''
-                        """.strip(),
-                        (str(centro_term), str(almacen_term)),
-                    ).fetchall()
-                    curr_keys_term: set[tuple[str, str, str]] = set()
-                    for r in rows_cur_snapshotr:
-                        pedido = str(r["pedido"] or "").strip()
-                        posicion = str(r["posicion"] or "").strip()
-                        lote = str(r["lote"] or "").strip()
-                        if not pedido or not posicion or not lote:
-                            continue
-                        curr_keys_term.add((pedido, posicion, lote))
-
-                    report = self._build_mb52_progress_report_terminaciones(
-                        last_program=last_program_term,
-                        prev_items=prev_items_term,
-                        prev_keys=prev_keys_term,
-                        curr_keys=curr_keys_term,
-                    )
-                    self._save_mb52_progress_last(con=con, process="terminaciones", report=report)
-                except Exception:
-                    # Best-effort: never block MB52 import.
-                    pass
 
             # Imported SAP data invalidates all derived orders/programs.
             con.execute("DELETE FROM orders")
@@ -1850,233 +1873,9 @@ class Repository:
                 (process_id,)
             )
 
-    def _save_mb52_progress_last(self, *, con, process: str, report: dict) -> None:
-        payload = json.dumps(report)
-        generated_on = str(report.get("generated_on") or datetime.now().isoformat(timespec="seconds"))
-        con.execute(
-            "INSERT INTO mb52_progress_last(process, generated_on, report_json) VALUES(?, ?, ?) "
-            "ON CONFLICT(process) DO UPDATE SET generated_on=excluded.generated_on, report_json=excluded.report_json",
-            (process, generated_on, payload),
-        )
 
-    def load_mb52_progress_last(self, *, process: str = "terminaciones") -> dict | None:
-        process = self._normalize_process(process)
-        with self.db.connect() as con:
-            row = con.execute(
-                "SELECT generated_on, report_json FROM mb52_progress_last WHERE process=?",
-                (process,),
-            ).fetchone()
-        if row is None:
-            return None
-        payload = json.loads(row["report_json"])
-        if isinstance(payload, dict):
-            payload.setdefault("generated_on", row["generated_on"])
-        return payload
 
-    def _save_vision_progress_last(self, *, con, report: dict) -> None:
-        payload = json.dumps(report)
-        generated_on = str(report.get("generated_on") or datetime.now().isoformat(timespec="seconds"))
-        con.execute(
-            "INSERT INTO vision_progress_last(id, generated_on, report_json) VALUES(1, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET generated_on=excluded.generated_on, report_json=excluded.report_json",
-            (generated_on, payload),
-        )
 
-    def load_vision_progress_last(self) -> dict | None:
-        with self.db.connect() as con:
-            row = con.execute(
-                "SELECT generated_on, report_json FROM vision_progress_last WHERE id=1"
-            ).fetchone()
-        if row is None:
-            return None
-        payload = json.loads(row["report_json"])
-        if isinstance(payload, dict):
-            payload.setdefault("generated_on", row["generated_on"])
-        return payload
-
-    def _load_prev_vision_snapshot(self, con) -> list[tuple]:
-        """Load previous Visión Planta snapshot from vision_progress_last."""
-        row = con.execute("SELECT report_json FROM vision_progress_last WHERE id=1").fetchone()
-        if row is None:
-            return []
-        try:
-            report = json.loads(row["report_json"])
-            return report.get("snapshot", [])
-        except Exception:
-            return []
-
-    def _build_vision_progress_report(self, *, prev_snapshot: list[tuple], curr_rows: list[tuple]) -> dict:
-        """Build a progress report for Visión Planta salidas.
-
-        Salidas: pedido/posición present in previous snapshot but not in current import.
-        These are orders that were dispatched or removed from Visión Planta.
-        """
-        # Convert to sets of (pedido, posicion) for comparison
-        prev_set = {(str(row[0]), str(row[1])) for row in prev_snapshot}
-        curr_set = {(str(row[0]), str(row[1])) for row in curr_rows}
-
-        # Find orders that exited (were in prev but not in curr)
-        exited_keys = prev_set - curr_set
-
-        # Build details for exited orders from previous snapshot
-        exited_orders = []
-        for row in prev_snapshot:
-            pedido = str(row[0])
-            posicion = str(row[1])
-            if (pedido, posicion) in exited_keys:
-                # Extract relevant fields from snapshot row
-                # Row structure: pedido, posicion, cod_material, desc, fecha_de_pedido, fecha_entrega,
-                # solicitado, x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
-                # mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
-                # en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
-                # cliente, oc_cliente, peso_neto, peso_unitario_ton, bodega, despachado, rechazo
-                exited_orders.append({
-                    "pedido": pedido,
-                    "posicion": posicion,
-                    "cod_material": str(row[2] or ""),
-                    "descripcion_material": str(row[3] or ""),
-                    "cliente": str(row[21] or ""),
-                    "fecha_entrega": str(row[5] or ""),
-                    "solicitado": int(row[6]) if row[6] is not None else None,
-                    "despachado": int(row[26]) if row[26] is not None else None,
-                    "bodega": int(row[25]) if row[25] is not None else None,
-                })
-
-        return {
-            "generated_on": datetime.now().isoformat(timespec="seconds"),
-            "exited_count": len(exited_orders),
-            "exited_orders": exited_orders,
-            "snapshot": curr_rows,  # Save current snapshot for next comparison
-        }
-
-    def _build_mb52_progress_report_terminaciones(
-        self,
-        *,
-        last_program: dict,
-        prev_items: list[tuple[str, str, str, int]],
-        prev_keys: set[tuple[str, str, str]],
-        curr_keys: set[tuple[str, str, str]],
-    ) -> dict:
-        """Build a progress report for Terminaciones.
-
-        Salidas brutas: items present in prev MB52 but not present in current MB52.
-        Items are identified by (pedido,posicion,lote). We map each salida to a program row
-        if its correlativo (digits extracted from lote) falls within corr_inicio..corr_fin.
-        Unmatched salidas are reported in a separate table.
-        """
-
-        program_generated_on = str(last_program.get("generated_on") or "")
-        program = last_program.get("program") or {}
-
-        # Index program rows by (pedido,posicion)
-        by_orderpos: dict[tuple[str, str], list[dict]] = {}
-        row_by_row_id: dict[str, dict] = {}
-        line_by_row_id: dict[str, int] = {}
-
-        for raw_line_id, items in (program or {}).items():
-            try:
-                line_id = int(raw_line_id)
-            except Exception:
-                continue
-            for r in list(items or []):
-                try:
-                    if int(r.get("is_test") or 0) == 1:
-                        continue
-                except Exception:
-                    pass
-
-                pedido = str(r.get("pedido") or "").strip()
-                posicion = str(r.get("posicion") or "").strip()
-                if not pedido or not posicion:
-                    continue
-                try:
-                    a = int(r.get("corr_inicio"))
-                    b = int(r.get("corr_fin"))
-                except Exception:
-                    continue
-                row_id = str(r.get("_row_id") or f"{pedido}|{posicion}|{a}-{b}|line{line_id}")
-                rec = {
-                    "_row_id": row_id,
-                    "pedido": pedido,
-                    "posicion": posicion,
-                    "material": str(r.get("material") or "").strip(),
-                    "family_id": str(r.get("family_id") or "").strip(),
-                    "cantidad": int(r.get("cantidad") or 0),
-                    "fecha_entrega": str(r.get("fecha_entrega") or "").strip(),
-                    "corr_inicio": a,
-                    "corr_fin": b,
-                    "prio_kind": str(r.get("prio_kind") or "").strip(),
-                    "is_test": 0,
-                }
-                by_orderpos.setdefault((pedido, posicion), []).append(rec)
-                row_by_row_id[row_id] = rec
-                line_by_row_id[row_id] = int(line_id)
-
-        # Sort ranges to speed up matching
-        for k in list(by_orderpos.keys()):
-            by_orderpos[k].sort(key=lambda rr: (int(rr.get("corr_inicio") or 0), int(rr.get("corr_fin") or 0)))
-
-        exited = []
-        for pedido, posicion, lote, corr in prev_items:
-            if (pedido, posicion, lote) not in curr_keys:
-                exited.append((pedido, posicion, lote, int(corr)))
-
-        # Count salidas per program row
-        salio_by_row_id: dict[str, int] = {}
-        unplanned_by_orderpos: dict[tuple[str, str], int] = {}
-
-        for pedido, posicion, _lote, corr in exited:
-            if corr <= 0:
-                # Cannot map to a correlativo range reliably
-                unplanned_by_orderpos[(pedido, posicion)] = unplanned_by_orderpos.get((pedido, posicion), 0) + 1
-                continue
-
-            candidates = by_orderpos.get((pedido, posicion)) or []
-            matched_row_id: str | None = None
-            for rr in candidates:
-                if int(rr["corr_inicio"]) <= corr <= int(rr["corr_fin"]):
-                    matched_row_id = str(rr["_row_id"])
-                    break
-
-            if matched_row_id is None:
-                unplanned_by_orderpos[(pedido, posicion)] = unplanned_by_orderpos.get((pedido, posicion), 0) + 1
-            else:
-                salio_by_row_id[matched_row_id] = salio_by_row_id.get(matched_row_id, 0) + 1
-
-        # Build per-line report rows
-        lines_out: dict[int, list[dict]] = {}
-        for row_id, salio in salio_by_row_id.items():
-            if salio <= 0:
-                continue
-            base = dict(row_by_row_id.get(row_id) or {"_row_id": row_id})
-            base["salio"] = int(salio)
-            line_id = int(line_by_row_id.get(row_id) or 0)
-            lines_out.setdefault(line_id, []).append(base)
-
-        for line_id in list(lines_out.keys()):
-            lines_out[line_id].sort(key=lambda r: (str(r.get("pedido") or ""), str(r.get("posicion") or ""), int(r.get("corr_inicio") or 0)))
-
-        # Unplanned rows (aggregate by orderpos)
-        unplanned_rows: list[dict] = []
-        for (pedido, posicion), n in sorted(unplanned_by_orderpos.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-            unplanned_rows.append(
-                {
-                    "_row_id": f"{pedido}|{posicion}",
-                    "pedido": pedido,
-                    "posicion": posicion,
-                    "salio": int(n),
-                }
-            )
-
-        return {
-            "process": "terminaciones",
-            "generated_on": datetime.now().isoformat(timespec="seconds"),
-            "program_generated_on": program_generated_on,
-            "mb52_prev_count": int(len(prev_keys)),
-            "mb52_curr_count": int(len(curr_keys)),
-            "lines": lines_out,
-            "unplanned": unplanned_rows,
-        }
 
     def get_sap_mb52_almacen_counts(self, *, centro: str | None = None, limit: int = 50) -> list[dict]:
         """Return counts per almacen in sap_mb52 (optionally filtered by centro)."""
@@ -2293,8 +2092,26 @@ class Repository:
             if not pedido or not posicion:
                 continue
             cod_material = self._normalize_sap_key(r.get("cod_material"))
-            desc = str(r.get("descripcion_material", "")).strip() or None
+            # Filter: Material family 402/403/404
+            if not cod_material or not (cod_material.startswith("402") or cod_material.startswith("403") or cod_material.startswith("404")):
+                continue
+
             fecha_de_pedido = coerce_date(r.get("fecha_de_pedido"))
+            # Filter: Date > 2023-12-31
+            if not fecha_de_pedido or fecha_de_pedido <= "2023-12-31":
+                continue
+
+            # Filter: Tipo posicion != ZTLH
+            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
+            if tipo_posicion == "ZTLH":
+                continue
+
+            # Filter: Status comercial (Active only)
+            status_comercial = str(r.get("status_comercial", "") or "").strip() or None
+            if status_comercial and status_comercial != "Activo":
+                continue
+
+            desc = str(r.get("descripcion_material", "")).strip() or None
             fecha_entrega = None
             if "fecha_entrega" in df.columns:
                 raw = r.get("fecha_entrega")
@@ -2457,13 +2274,7 @@ class Repository:
             )
 
             # Build progress report for Visión Planta salidas (dispatched/removed orders)
-            try:
-                prev_vision = self._load_prev_vision_snapshot(con)
-                report = self._build_vision_progress_report(prev_snapshot=prev_vision, curr_rows=rows)
-                self._save_vision_progress_last(con=con, report=report)
-            except Exception:
-                # Best-effort: never block Visión import.
-                pass
+            # (Legacy feature 'Avance' has been removed)
 
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
