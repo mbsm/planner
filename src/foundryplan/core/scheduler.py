@@ -20,12 +20,7 @@ def check_constraints(line: Line, part: Part) -> bool:
             
         # Generic attribute check on Part
         if not hasattr(part, attr):
-            # If line has a constraint on an attribute the part doesn't have (or isn't in Part model),
-            # we assume the part can't satisfy it (safe fail) or we ignore?
-            # For this project, Part model fields are strict.
-            # If the attribute is missing on the Part object, maybe it's dynamic?
-            # Let's assume strict attribute existence for defined fields.
-            continue
+            return False
             
         part_value = getattr(part, attr)
         
@@ -34,11 +29,18 @@ def check_constraints(line: Line, part: Part) -> bool:
         # Usually constraints are: "Line requires X" or "Line accepts only Y".
         # Let's assume the DB `resource_constraint` holds "Allowed Values".
         
-        if isinstance(rule_value, (set, list, tuple)):
-             if part_value not in rule_value:
-                 return False
+        if isinstance(rule_value, dict) and ("min" in rule_value or "max" in rule_value):
+            min_v = rule_value.get("min")
+            max_v = rule_value.get("max")
+            if min_v is not None and part_value < min_v:
+                return False
+            if max_v is not None and part_value > max_v:
+                return False
+        elif isinstance(rule_value, (set, list, tuple)):
+            if part_value not in rule_value:
+                return False
         elif rule_value != part_value:
-             return False
+            return False
 
     return True
 
@@ -81,16 +83,16 @@ def generate_dispatch_program(
         if job.start_by:
             return job.start_by
             
-        if not job.fecha_entrega:
+        if not job.fecha_de_pedido:
              return date.max # Push to end if no date
              
         p = get_part(job.material)
         if not p:
-            return job.fecha_entrega
+            return job.fecha_de_pedido
             
         # Sum of lead times (vulcanizado + mecanizado + inspeccion)
         days = (p.vulcanizado_dias or 0) + (p.mecanizado_dias or 0) + (p.inspeccion_externa_dias or 0)
-        return job.fecha_entrega - timedelta(days=days)
+        return job.fecha_de_pedido - timedelta(days=days)
 
     # 1. Handle Pinned Jobs
     # Note: pinned_jobs handling is usually done by merging 'frozen' items from previous program.
@@ -111,7 +113,7 @@ def generate_dispatch_program(
         augmented_jobs.append((job, start_date))
         
     # Sort
-    augmented_jobs.sort(key=lambda x: (x[0].priority, x[1], x[0].fecha_entrega or date.max))
+    augmented_jobs.sort(key=lambda x: (x[0].priority, x[1], x[0].fecha_de_pedido or date.max))
     
     for job, start_date in augmented_jobs:
         part = get_part(job.material)
@@ -122,8 +124,8 @@ def generate_dispatch_program(
                 "material": job.material,
                 "pedido": job.pedido,
                 "posicion": job.posicion,
-                "cantidad": job.qty_total,
-                "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
+                "cantidad": job.qty,
+                "fecha_de_pedido": job.fecha_de_pedido.isoformat() if job.fecha_de_pedido else None,
                 "prio_kind": "test" if job.is_test else ("priority" if job.priority <= 2 else "normal"),
             })
             continue
@@ -142,8 +144,8 @@ def generate_dispatch_program(
                 "family_id": part.family_id,
                 "pedido": job.pedido,
                 "posicion": job.posicion,
-                "cantidad": job.qty_total,
-                "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
+                "cantidad": job.qty,
+                "fecha_de_pedido": job.fecha_de_pedido.isoformat() if job.fecha_de_pedido else None,
                 "prio_kind": "test" if job.is_test else ("priority" if job.priority <= 2 else "normal"),
             })
             continue
@@ -160,14 +162,14 @@ def generate_dispatch_program(
             "posicion": job.posicion,
             "material": job.material,
             "numero_parte": job.material[-5:] if len(job.material) >= 5 else job.material, # Truncated for UI
-            "cantidad": job.qty_total,
+            "cantidad": job.qty,
             "corr_inicio": job.corr_min, # Legacy alias for UI
             "corr_fin": job.corr_max, # Legacy alias for UI
             "priority": job.priority,
             # Legacy prio_kind mapping for UI badge
             "prio_kind": "test" if job.is_test else ("priority" if job.priority <= 2 else "normal"),
             "is_test": job.is_test,
-            "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
+            "fecha_de_pedido": job.fecha_de_pedido.isoformat() if job.fecha_de_pedido else None,
             "start_by": start_date.isoformat(),
             "notes": job.notes,
             "cliente": job.cliente,
@@ -177,7 +179,7 @@ def generate_dispatch_program(
         }
         
         queues[chosen_line.line_id].append(row)
-        line_loads[chosen_line.line_id] += job.qty_total
+        line_loads[chosen_line.line_id] += job.qty
         
     # Return formatted queues
     return queues, errors

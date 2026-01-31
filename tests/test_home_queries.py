@@ -38,10 +38,10 @@ def test_get_orders_overdue_execution(temp_db):
     with db.connect() as con:
         con.execute("""
             INSERT INTO sap_vision_snapshot(
-                pedido, posicion, cod_material, fecha_de_pedido, fecha_entrega,
+                pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (
-                'OD1', '10', '40200001', ?, '2099-12-31',
+                'OD1', '10', '40200001', ?,
                 10, 0, 0, 1.0, 'Activo'
             )
         """, (last_year,))
@@ -71,10 +71,10 @@ def test_get_orders_due_soon_execution(temp_db):
     with db.connect() as con:
         con.execute("""
             INSERT INTO sap_vision_snapshot(
-                pedido, posicion, cod_material, fecha_de_pedido, fecha_entrega,
+                pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (
-                'DS1', '10', '40200002', ?, '2099-12-31',
+                'DS1', '10', '40200002', ?,
                 10, 0, 0, 1.0, 'Activo'
             )
         """, (tomorrow,))

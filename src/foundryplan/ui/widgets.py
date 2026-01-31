@@ -265,7 +265,7 @@ def render_line_tables(
 
                 for r in rows:
                     r["lotes_rango"] = _format_lotes_range(r)
-                    r["fecha_entrega_fmt"] = _format_date(r.get("fecha_entrega"))
+                    r["fecha_de_pedido_fmt"] = _format_date(r.get("fecha_de_pedido"))
                     r.setdefault("in_progress", 0)
                     r.setdefault("_pt_line_id", int(line_id_for_table))
                     # Keep a stable field for UI logic; scheduler encodes tests via prio_kind.
@@ -282,7 +282,7 @@ def render_line_tables(
                         {"name": "numero_parte", "label": "Parte", "field": "numero_parte", "align": "left"},
                         {"name": "cantidad", "label": "Cant.", "field": "cantidad", "align": "right"},
                         {"name": "familia", "label": "Familia", "field": "familia", "align": "left"},
-                        {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega_fmt", "align": "left"},
+                        {"name": "fecha_de_pedido", "label": "Fecha pedido", "field": "fecha_de_pedido_fmt", "align": "left"},
                     ],
                     rows=rows,
                     row_key="_row_id",

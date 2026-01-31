@@ -117,11 +117,11 @@ def test_job_structure(temp_db):
         "pedido": "TEXT",
         "posicion": "TEXT",
         "material": "TEXT",  # v0.2: changed from numero_parte
-        "qty_total": "INTEGER",
+        "qty": "INTEGER",
         "priority": "INTEGER",
         "is_test": "INTEGER",
         "state": "TEXT",
-        "fecha_entrega": "TEXT",  # v0.2: added
+        "fecha_de_pedido": "TEXT",
         "notes": "TEXT",  # v0.2: added
         "created_at": "TEXT",
         "updated_at": "TEXT",
@@ -264,4 +264,3 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
         total_count = cursor.fetchone()[0]
         
     assert total_count == 0, "All priorities should be removed when keep_tests=False"
-

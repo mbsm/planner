@@ -17,9 +17,9 @@ class Job:
     pedido: str
     posicion: str
     material: str
-    qty_total: int
+    qty: int
     priority: int
-    fecha_entrega: date | None
+    fecha_de_pedido: date | None
     is_test: bool = False
     notes: str | None = None
     cliente: str | None = None
@@ -40,7 +40,7 @@ class Order:
     cantidad: int
     primer_correlativo: int
     ultimo_correlativo: int
-    fecha_entrega: date
+    fecha_de_pedido: date
     tiempo_proceso_min: float | None = None
     is_test: bool = False
     cliente: str | None = None

@@ -34,9 +34,9 @@ def test_scheduler_balancing_and_start_by():
     # J2: Priority 3 (Normal). Delivery in 8 days. Start by = 8 - 5 = 3.
     # J3: Priority 3 (Normal). Delivery in 20 days. Start by = 20 - 5 = 15.
     
-    j1 = Job(job_id="J1", pedido="P1", posicion="1", material="M1", qty_total=100, priority=1, fecha_entrega=date(2023, 1, 10))
-    j2 = Job(job_id="J2", pedido="P2", posicion="1", material="M1", qty_total=50, priority=3, fecha_entrega=date(2023, 1, 8))
-    j3 = Job(job_id="J3", pedido="P3", posicion="1", material="M1", qty_total=50, priority=3, fecha_entrega=date(2023, 1, 20))
+    j1 = Job(job_id="J1", pedido="P1", posicion="1", material="M1", qty=100, priority=1, fecha_de_pedido=date(2023, 1, 10))
+    j2 = Job(job_id="J2", pedido="P2", posicion="1", material="M1", qty=50, priority=3, fecha_de_pedido=date(2023, 1, 8))
+    j3 = Job(job_id="J3", pedido="P3", posicion="1", material="M1", qty=50, priority=3, fecha_de_pedido=date(2023, 1, 20))
     
     jobs = [j1, j2, j3]
     

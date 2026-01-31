@@ -21,9 +21,9 @@ def register_pages(repo: Repository) -> None:
                 return False
             if repo.count_missing_process_times_from_orders(process=process) > 0:
                 return False
-            if len(repo.get_lines(process=process)) == 0:
+            lines = repo.get_dispatch_lines_model(process=process)
+            if not lines:
                 return False
-            lines = repo.get_lines_model(process=process)
             jobs = repo.get_jobs_model(process=process)
             parts = repo.get_parts_model()
             program, errors = generate_dispatch_program(
@@ -226,7 +226,7 @@ def register_pages(repo: Repository) -> None:
                                             for p in [
                                                 (str(data.get("cliente") or "").strip() or None),
                                                 (str(data.get("cod_material") or "").strip() or None),
-                                                (str(data.get("fecha_entrega") or "").strip() or None),
+                                                (str(data.get("fecha_de_pedido") or "").strip() or None),
                                             ]
                                             if p
                                         ]
@@ -327,7 +327,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "bodega", "label": "En Bodega", "field": "bodega"},
                             {"name": "tons", "label": "Tons por Despachar", "field": "tons_dispatch_fmt"},
-                            {"name": "fecha_entrega", "label": "Fecha de Pedido", "field": "fecha_entrega"},
+                            {"name": "fecha_de_pedido", "label": "Fecha de Pedido", "field": "fecha_de_pedido"},
                             {"name": "dias", "label": "Días atraso", "field": "dias"},
                         ]
                         
@@ -340,7 +340,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
                             {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
-                            {"name": "fecha_entrega", "label": "Fecha de Pedido", "field": "fecha_entrega"},
+                            {"name": "fecha_de_pedido", "label": "Fecha de Pedido", "field": "fecha_de_pedido"},
                             {"name": "dias", "label": "Días atraso", "field": "dias"},
                         ]
                         
@@ -453,7 +453,7 @@ def register_pages(repo: Repository) -> None:
 
                         # Procesar pedidos atrasados (pueden pertenecer a la semana actual)
                         for r in overdue:
-                            week_offset = get_week_offset(r.get("fecha_entrega", ""))
+                            week_offset = get_week_offset(r.get("fecha_de_pedido", ""))
                             if week_offset is not None and week_offset == 0:
                                 # Pedido atrasado pero en la semana actual
                                 r["is_overdue"] = True
@@ -472,7 +472,7 @@ def register_pages(repo: Repository) -> None:
                         
                         # Procesar pedidos próximos
                         for r in due_soon:
-                            week_offset = get_week_offset(r.get("fecha_entrega", ""))
+                            week_offset = get_week_offset(r.get("fecha_de_pedido", ""))
                             r["is_overdue"] = False
                             r["completo"] = int(r.get("pendientes", 1)) == 0
                             key = (str(r.get("pedido", "")).strip(), str(r.get("posicion", "")).strip())
@@ -514,7 +514,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "solicitado", "label": "Cant de Pedido", "field": "solicitado"},
                             {"name": "pendientes", "label": "Pendientes", "field": "pendientes"},
                             {"name": "tons", "label": "Tons por Entregar", "field": "tons_fmt"},
-                            {"name": "fecha_entrega", "label": "Fecha de Pedido", "field": "fecha_entrega"},
+                            {"name": "fecha_de_pedido", "label": "Fecha de Pedido", "field": "fecha_de_pedido"},
                             {"name": "dias", "label": "Días restantes", "field": "dias"},
                             {"name": "completo", "label": "", "field": "completo"},
                         ]
@@ -1317,7 +1317,7 @@ def register_pages(repo: Repository) -> None:
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
                             {"name": "numero_parte", "label": "Plano", "field": "material"},
                             {"name": "cantidad", "label": "Stock (MB52)", "field": "cantidad"},
-                            {"name": "fecha_entrega", "label": "Fecha pedido", "field": "fecha_entrega"},
+                            {"name": "fecha_de_pedido", "label": "Fecha pedido", "field": "fecha_de_pedido"},
                         ],
                         rows=rows,
                         row_key="primer_correlativo",
@@ -2315,7 +2315,7 @@ def register_pages(repo: Repository) -> None:
                                     {"name": "numero_parte", "label": "Plano", "field": "material"},
                                     {"name": "familia", "label": "Familia", "field": "family_id"},
                                     {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
-                                    {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                                    {"name": "fecha_de_pedido", "label": "Fecha pedido", "field": "fecha_de_pedido"},
                                     {"name": "error", "label": "Error", "field": "error"},
                                 ],
                                 rows=errors,
@@ -2369,8 +2369,6 @@ def register_pages(repo: Repository) -> None:
             active_key="programa_en_vulcanizado",
             title="Programa - En Vulcanizado",
         )
-
-
 
 
 

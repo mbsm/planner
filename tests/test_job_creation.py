@@ -112,7 +112,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     # Verify job was created
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT job_id, process_id, pedido, posicion, material, qty_total, priority, is_test, state FROM job"
+            "SELECT job_id, process_id, pedido, posicion, material, qty, priority, is_test, state FROM job"
         ).fetchall()
     
     assert len(jobs) >= 1, "Should create at least one job (terminaciones)"
@@ -128,7 +128,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     assert term_job["pedido"] == "1010044531"
     assert term_job["posicion"] == "10"
     assert term_job["material"] == "43633021531"
-    assert term_job["qty_total"] == 2  # 2 lotes
+    assert term_job["qty"] == 2  # 2 lotes
     assert term_job["priority"] == 3  # normal priority (default)
     assert term_job["is_test"] == 0  # numeric lote
     assert term_job["state"] == "pending"
@@ -218,7 +218,7 @@ def test_create_jobs_multiple_processes(temp_db):
     
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT process_id, qty_total FROM job ORDER BY process_id"
+            "SELECT process_id, qty FROM job ORDER BY process_id"
         ).fetchall()
     
     processes = {j["process_id"] for j in jobs}
@@ -227,11 +227,11 @@ def test_create_jobs_multiple_processes(temp_db):
     
     # Each process should have 1 piece
     for j in jobs:
-        assert j["qty_total"] == 1
+        assert j["qty"] == 1
 
 
 def test_update_jobs_from_vision(temp_db):
-    """Test that jobs are updated with fecha_entrega from Vision."""
+    """Test that jobs are updated with fecha_de_pedido from Vision."""
     db, _ = temp_db
     repo = Repository(db)
     
@@ -291,11 +291,11 @@ def test_update_jobs_from_vision(temp_db):
     # Import Vision
     repo.import_sap_vision_bytes(content=vision_bytes)
     
-    # Verify job was updated with fecha_entrega only
+    # Verify job was updated with fecha_de_pedido only
     with db.connect() as con:
         job = con.execute(
             """
-            SELECT fecha_entrega, qty_total
+            SELECT fecha_de_pedido, qty
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '1010044531'
@@ -304,8 +304,8 @@ def test_update_jobs_from_vision(temp_db):
         ).fetchone()
     
     assert job is not None
-    assert job["fecha_entrega"] == "2026-03-01", "Should update fecha_entrega from Vision"
-    assert job["qty_total"] == 2, "qty_total should remain as lote count from MB52"
+    assert job["fecha_de_pedido"] == "2026-02-15", "Should update fecha_de_pedido from Vision"
+    assert job["qty"] == 2, "qty should remain as lote count from MB52"
 
 
 def test_split_job_basic(temp_db):
@@ -335,7 +335,7 @@ def test_split_job_basic(temp_db):
     with db.connect() as con:
         original_job = con.execute(
             """
-            SELECT job_id, qty_total
+            SELECT job_id, qty
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
@@ -344,7 +344,7 @@ def test_split_job_basic(temp_db):
         ).fetchone()
     
     assert original_job is not None
-    assert original_job["qty_total"] == 10
+    assert original_job["qty"] == 10
     original_job_id = original_job["job_id"]
     
     # Split: 4 lotes in first job, 6 in second
@@ -357,7 +357,7 @@ def test_split_job_basic(temp_db):
     with db.connect() as con:
         jobs = con.execute(
             """
-            SELECT job_id, process_id, pedido, posicion, material, qty_total, priority, is_test
+            SELECT job_id, process_id, pedido, posicion, material, qty, priority, is_test
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
@@ -373,8 +373,8 @@ def test_split_job_basic(temp_db):
     job2 = next(j for j in jobs if j["job_id"] == job2_id)
     
     # Validate quantities
-    assert job1["qty_total"] == 4, "First job should have 4 lotes"
-    assert job2["qty_total"] == 6, "Second job should have 6 lotes"
+    assert job1["qty"] == 4, "First job should have 4 lotes"
+    assert job2["qty"] == 6, "Second job should have 6 lotes"
     
     # Validate inherited fields
     assert job1["process_id"] == job2["process_id"] == "terminaciones"
@@ -446,11 +446,11 @@ def test_split_job_validation_errors(temp_db):
     with pytest.raises(ValueError, match="qty_split must be positive"):
         repo.split_job(job_id=job_id, qty_split=-1)
     
-    # Test: qty_split must be less than qty_total
-    with pytest.raises(ValueError, match="must be less than job qty_total"):
+    # Test: qty_split must be less than qty
+    with pytest.raises(ValueError, match="must be less than job qty"):
         repo.split_job(job_id=job_id, qty_split=5)
     
-    with pytest.raises(ValueError, match="must be less than job qty_total"):
+    with pytest.raises(ValueError, match="must be less than job qty"):
         repo.split_job(job_id=job_id, qty_split=10)
     
     # Test: job not found
@@ -459,7 +459,7 @@ def test_split_job_validation_errors(temp_db):
 
 
 def test_split_distribution_new_stock(temp_db):
-    """Test that new stock is distributed to split with lowest qty_total."""
+    """Test that new stock is distributed to split with lowest qty."""
     db, _ = temp_db
     repo = Repository(db)
     
@@ -490,7 +490,7 @@ def test_split_distribution_new_stock(temp_db):
     job1_id, job2_id = repo.split_job(job_id=original["job_id"], qty_split=4)
     
     # Step 3: Simulate MB52 update with new stock (5 new lotes)
-    # This should go to job1 since it has qty_total=4 (less than job2's qty_total=6)
+    # This should go to job1 since it has qty=4 (less than job2's qty=6)
     mb52_rows_new = [
         {
             "material": "K106321",
@@ -508,20 +508,20 @@ def test_split_distribution_new_stock(temp_db):
     mb52_bytes_new = create_mock_mb52_excel(mb52_rows_new)
     repo.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
     
-    # Step 4: Verify new stock went to job1 (had lowest qty_total)
+    # Step 4: Verify new stock went to job1 (had lowest qty)
     # Job 2 received no stock (0), so it should be deleted by cleanup logic.
     with db.connect() as con:
         job1 = con.execute(
-            "SELECT qty_total FROM job WHERE job_id = ?",
+            "SELECT qty FROM job WHERE job_id = ?",
             (job1_id,),
         ).fetchone()
         job2 = con.execute(
-            "SELECT qty_total FROM job WHERE job_id = ?",
+            "SELECT qty FROM job WHERE job_id = ?",
             (job2_id,),
         ).fetchone()
     
     assert job1 is not None
-    assert job1["qty_total"] == 5, "job1 should receive the 5 new lotes (was lowest)"
+    assert job1["qty"] == 5, "job1 should receive the 5 new lotes (was lowest)"
     assert job2 is None, "job2 should be deleted because qty dropped to 0"
 
 
@@ -564,7 +564,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     with db.connect() as con:
         jobs = con.execute(
             """
-            SELECT job_id, qty_total
+            SELECT job_id, qty
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
@@ -597,7 +597,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     with db.connect() as con:
         jobs = con.execute(
             """
-            SELECT job_id, qty_total
+            SELECT job_id, qty
             FROM job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
@@ -609,6 +609,5 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     assert len(jobs) == 1, "Should have 1 job: old ones deleted, 1 new created"
     
     # Only 1 job
-    assert jobs[0]["qty_total"] == 3, "New job should have the 3 new lotes"
+    assert jobs[0]["qty"] == 3, "New job should have the 3 new lotes"
     assert jobs[0]["job_id"] not in [job1_id, job2_id], "Should be a different job_id"
-

@@ -97,7 +97,7 @@ def parse_int_strict(value, *, field: str) -> int:
 def coerce_date(value) -> str:
     """Coerce common Excel/Pandas date representations to ISO YYYY-MM-DD."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
-        raise ValueError("fecha_entrega vacía")
+        raise ValueError("fecha vacía")
 
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -120,7 +120,7 @@ def coerce_date(value) -> str:
         except Exception:
             continue
 
-    raise ValueError(f"fecha_entrega inválida: {value!r}")
+    raise ValueError(f"fecha inválida: {value!r}")
 
 
 def coerce_float(value) -> float | None:

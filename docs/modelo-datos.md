@@ -59,7 +59,7 @@ Este documento detalla el schema de base de datos (tablas SQLite), mapeo desde f
 | `Descripción Material` / `descripcion_material` | texto | Descripción de material | Información |
 | `Atributo` / `atributo` | texto | Atributo adicional | Información |
 | `Fecha de pedido` / `fecha_de_pedido` | date | **Fecha comprometida** con cliente (cuándo espera recibir) | **Planificación** |
-| `Fecha Entrega` / `fecha_entrega` | date | Estimación interna SAP de entrega (opcional, NO usar en general) | Información |
+| `Fecha Entrega` / `fecha_de_pedido` | date | Estimación interna SAP de entrega (opcional, NO usar en general) | Información |
 | `Solicitado` / `solicitado` | entero | Cantidad total pedida (piezas) | **Información** |
 | `X Programar` / `x_programar` | entero | Por programar (piezas) | Progreso |
 | `Programado` / `programado` | entero | Programado (piezas) | Progreso |
@@ -90,7 +90,7 @@ Este documento detalla el schema de base de datos (tablas SQLite), mapeo desde f
 
 **Notas sobre fechas**:
 - `fecha_de_pedido`: **Fecha comprometida** con el cliente; es la correcta para calcular `start_by` y planificación.
-- `fecha_entrega`: Opcional; es una estimación interna SAP de nuestra entrega. **No usar en planificación general**.
+- `fecha_de_pedido`: Opcional; es una estimación interna SAP de nuestra entrega. **No usar en planificación general**.
 
 **Notas sobre cantidad y peso**:
 - `solicitado`: Cantidad total del pedido (piezas); es información base, NO progreso.
@@ -288,7 +288,7 @@ Campos en tabla (en orden de importancia/uso):
 | `pedido` | texto | Pedido (cruce con MB52.documento_comercial) |
 | `posicion` | texto | Posición (cruce con MB52.posicion_sd) |
 | `fecha_de_pedido` | date | Base de planificación |
-| `fecha_entrega` | date | Fecha de compromiso |
+| `fecha_de_pedido` | date | Fecha de compromiso |
 | `solicitado` | entero | Cantidad total (piezas) |
 | `x_fundir` | entero | Por fundir (piezas) |
 | `x_programar` | entero | Por programar (piezas) |
@@ -334,7 +334,7 @@ Notas de uso:
 Descripción resumida de campos clave:
 - `pedido`, `posicion`: Cruce con MB52.
 - `fecha_de_pedido`: Base de planificación (start_by calculations).
-- `fecha_entrega`: Fecha de compromiso.
+- `fecha_de_pedido`: Fecha de compromiso.
 - `solicitado`: Cantidad total pedida (piezas).
 - `x_fundir`: Por fundir (piezas); se compara con MB52 de moldes (requiere conversión).
 - Campos de progreso (`x_programar`, `programado`, `desmoldeo`, `tt`, `terminacion`, `bodega`, `despachado`): Piezas en cada etapa.
@@ -358,7 +358,7 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
 | `priority` | entero | Prioridad numérica (menor = mayor prioridad) |
 | `is_test` | 0/1 | 1 si derivado de lotes alfanuméricos (prueba) |
 | `state` | texto | `pending` \| `in_process` |
-| `fecha_entrega` | date | Desde Visión (información de negocio) |
+| `fecha_de_pedido` | date | Desde Visión (información de negocio) |
 | `notes` | texto | Observaciones operacionales |
 | `created_at` | datetime | Auditoría |
 | `updated_at` | datetime | Auditoría |
@@ -387,9 +387,9 @@ Tabla de órdenes de trabajo por proceso. Cada job agrupa un pedido/posición/ma
     4. **Limpieza**: Si un job se queda sin lotes (stock desapareció de MB52), el job **se elimina**.
     
 - **Actualización desde Visión**:
-  - Visión **solo aporta `fecha_entrega`** (no progreso)
+  - Visión **solo aporta `fecha_de_pedido`** (no progreso)
   - No modifica `qty_total` ni `job_unit` (esos vienen solo del MB52)
-  - Consulta: `UPDATE job SET fecha_entrega = (SELECT fecha_entrega FROM sap_vision_snapshot WHERE ...)`
+  - Consulta: `UPDATE job SET fecha_de_pedido = (SELECT fecha_de_pedido FROM sap_vision_snapshot WHERE ...)`
 
 - El usuario puede **splittear** un job desde la GUI en múltiples jobs (mismo pedido/posición/proceso, distintos `job_id`):
   - Los splits se crean y mantienen **antes del scheduler**
@@ -589,7 +589,7 @@ Tabla de ítems en el plan semanal (por pedido/posición). Contiene la decisión
 | `stock_moldes_disponibles` | real | Stock de moldes no fundidos (desde MB52) |
 | `moldes_reservados` | real | Moldes "reservados" para este pedido en esta semana (≤ `stock_moldes_disponibles`) |
 | `target_start_week` | date | Semana objetivo de inicio (basada en `start_by` del job) |
-| `fecha_entrega` | date | Fecha de entrega (desde Visión; información) |
+| `fecha_de_pedido` | date | Fecha de entrega (desde Visión; información) |
 | `manual_override` | 0/1 | 1 si el usuario cambió manualmente `qty_planned_piezas` |
 | `confidence_pct` | real | % de confianza en poder cumplir (auditoría; 0-100) |
 | `notes` | texto | Observaciones específicas de este ítem |
@@ -598,7 +598,7 @@ Tabla de ítems en el plan semanal (por pedido/posición). Contiene la decisión
 **Notas sobre sincronización**:
 - Un `weekly_plan_item` se crea por cada pedido/posición con stock moldeo disponible O demanda pendiente.
 - La lógica de planificación considera:
-  - **Urgencia**: pedidos con `fecha_entrega` próxima se planifican primero.
+  - **Urgencia**: pedidos con `fecha_de_pedido` próxima se planifican primero.
   - **Disponibilidad**: si hay moldes en stock moldeo, se reservan.
   - **Capacidad**: si hay restricción de capacidad moldeo (configurable), reducir `qty_planned_moldes`.
   - **Lead times**: considerar `tiempo_enfriamiento_molde_dias` para no comprometer futuras semanas.
@@ -647,8 +647,8 @@ Vista derivada que calcula el estado actual de moldeo para cada pedido/posición
 | `piezas_por_molde` | real | `material_master.piezas_por_molde` |
 | `piezas_moldeadas` | real | **Fórmula central**: `solicitado - x_fundir + (stock_moldes_no_fundidos × piezas_por_molde)` |
 | `avance_pct` | real | `(piezas_moldeadas / cantidad_pedido_piezas) × 100` |
-| `fecha_entrega` | date | Visión: fecha de compromiso |
-| `dias_para_entrega` | entero | Hoy - fecha_entrega (negativo si futuro) |
+| `fecha_de_pedido` | date | Visión: fecha de compromiso |
+| `dias_para_entrega` | entero | Hoy - fecha_de_pedido (negativo si futuro) |
 
 **Notas de cálculo**:
 - Visión reporta **TODO en piezas**: `solicitado`, `x_fundir`, todos los campos de progreso.
@@ -688,7 +688,7 @@ Vista derivada que ayuda al UI a mostrar orden de ejecución sugerido.
 | `state` | texto | Desde `job` (`pending` \| `in_process`) |
 | `is_test` | 0/1 | Desde `job` |
 | `priority` | entero | Desde `job` (menor = mayor prioridad; prueba=1, urgente=2, normal=3) |
-| `start_by` | date | Calculado: `fecha_entrega - (vulcanizado_dias + mecanizado_dias + inspeccion_externa_dias)` |
+| `start_by` | date | Calculado: `fecha_de_pedido - (vulcanizado_dias + mecanizado_dias + inspeccion_externa_dias)` |
 | `dias_para_start_by` | entero | Hoy - `start_by` (negativo = futuro; positivo = retrasado) |
 | `sort_key` | real | Fórmula de ordenamiento: `priority` ascendente, luego `start_by` ascendente |
 
@@ -739,7 +739,7 @@ sap_mb52_snapshot / sap_vision_snapshot (auditoría/trazabilidad)
 - App normaliza encabezados y guarda TODO en `sap_vision_snapshot`.
 - **Actualizar jobs existentes** (creados en Paso 1):
   - Por cada fila en Visión: buscar jobs por (pedido, posicion).
-  - Actualizar `qty_completed` y `fecha_entrega` desde Visión.
+  - Actualizar `qty_completed` y `fecha_de_pedido` desde Visión.
   - Recalcular `qty_remaining`.
   - Si material NO existe en `material_master` → popup solicita campos (antes de crear job).
 
@@ -837,7 +837,7 @@ Columnas opcionales (mejoran KPI y UI):
 
 | Columna | Tipo | Ejemplo | Uso |
 |---|---:|---|---|
-| `fecha_entrega` | fecha | `2026-02-10` | Para cards Home (atrasados / próximas 2 semanas) |
+| `fecha_de_pedido` | fecha | `2026-02-10` | Para cards Home (atrasados / próximas 2 semanas) |
 | `solicitado` | entero | `120` | Para calcular pendientes vs bodega/despachado |
 | `bodega` | entero | `10` | Progreso (pendientes = solicitado - bodega - despachado) |
 | `despachado` | entero | `20` | Progreso |
@@ -848,4 +848,4 @@ Columnas opcionales (mejoran KPI y UI):
 
 Notas:
 - La app calcula y guarda `peso_unitario_ton` como `peso_neto_ton / solicitado` cuando ambas existen.
-- Si `fecha_entrega` no está, los cards de Home (atrasados / próximas 2 semanas) no se podrán poblar.
+- Si `fecha_de_pedido` no está, los cards de Home (atrasados / próximas 2 semanas) no se podrán poblar.

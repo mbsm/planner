@@ -48,19 +48,19 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
     with db.connect() as con:
         con.execute("""
             INSERT INTO sap_vision_snapshot(
-                pedido, posicion, cod_material, fecha_de_pedido, fecha_entrega,
+                pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (
-                'PED1', '10', '40200001', '2025-01-01', '2025-01-10',
+                'PED1', '10', '40200001', '2025-01-01',
                 10, 0, 0, 1.5
             )
         """)
         con.execute("""
             INSERT INTO sap_vision_snapshot(
-                pedido, posicion, cod_material, fecha_de_pedido, fecha_entrega,
+                pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (
-                'PED2', '10', '40200002', '2025-02-01', '2025-02-20',
+                'PED2', '10', '40200002', '2025-02-01',
                 5, 0, 0, 2.0
             )
         """)
@@ -75,7 +75,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
     # Total Pending: (10 units * 1.5) + (5 units * 2.0) = 15 + 10 = 25 tons.
     # Overdue: (10 units * 1.5) = 15 tons.
     
-    # Note: Validate if the actual query uses fecha_entrega or fecha_de_pedido as spotted before.
+    # Note: Query uses fecha_de_pedido as the date base.
     
     try:
         result = repo.upsert_vision_kpi_daily(snapshot_date=date(2025, 1, 30))

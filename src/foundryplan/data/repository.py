@@ -401,36 +401,36 @@ class Repository:
             # FASE 3.3: Handle priority map changes (recalculate job priorities)
             if key == "job_priority_map":
                 try:
-                    row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
-                    old_str = row["config_value"] if row else '{"prueba": 1, "urgente": 2, "normal": 3}'
-                    
-                    try:
-                        old_map = json.loads(old_str)
-                    except Exception:
-                        old_map = {"prueba": 1, "urgente": 2, "normal": 3}
-                        
                     try:
                         new_map = json.loads(str(value))
                     except Exception:
                         new_map = {}
+                    prio_prueba = int(new_map.get("prueba", 1))
+                    prio_urgente = int(new_map.get("urgente", 2))
+                    prio_normal = int(new_map.get("normal", 3))
 
-                    case_parts = []
-                    case_params = []
-                    affected_olds = []
-                    
-                    for k in ["prueba", "urgente", "normal"]:
-                        old_p = int(old_map.get(k, 0))
-                        new_p = int(new_map.get(k, 0))
-                        if old_p != new_p and old_p > 0 and new_p > 0:
-                            case_parts.append("WHEN ? THEN ?")
-                            case_params.extend([old_p, new_p])
-                            affected_olds.append(old_p)
-                            
-                    if affected_olds:
-                        # Construct single query to handle swaps correctly
-                        placeholders = ','.join(['?']*len(affected_olds))
-                        sql = f"UPDATE job SET priority = CASE priority {' '.join(case_parts)} ELSE priority END WHERE priority IN ({placeholders})"
-                        con.execute(sql, (*case_params, *affected_olds))     
+                    con.execute(
+                        f"""
+                        UPDATE job
+                        SET priority = CASE
+                            WHEN COALESCE(is_test, 0) = 1 THEN ?
+                            WHEN EXISTS (
+                                SELECT 1 FROM orderpos_priority opp
+                                WHERE opp.pedido = job.pedido
+                                  AND opp.posicion = job.posicion
+                                  AND COALESCE(opp.is_priority, 0) = 1
+                                  AND COALESCE(opp.kind, '') <> 'test'
+                            ) THEN ?
+                            WHEN EXISTS (
+                                SELECT 1 FROM order_priority op
+                                WHERE op.pedido = job.pedido
+                                  AND COALESCE(op.is_priority, 0) = 1
+                            ) THEN ?
+                            ELSE ?
+                        END
+                        """,
+                        (prio_prueba, prio_urgente, prio_urgente, prio_normal),
+                    )
                 except Exception:
                     pass
 
@@ -600,6 +600,76 @@ class Repository:
             Line(line_id=str(r["line_id"]), constraints={"family_id": set(r["families"])}) 
             for r in self.get_lines(process=process)
         ]
+
+    @staticmethod
+    def _parse_constraint_value(rule_type: str | None, rule_value_json: str | None):
+        if rule_value_json is None:
+            return None
+        try:
+            value = json.loads(rule_value_json)
+        except Exception:
+            value = rule_value_json
+
+        rule = (rule_type or "").strip().lower()
+        if rule in {"set", "in", "enum", "list"}:
+            if isinstance(value, (list, tuple, set)):
+                return set(value)
+            return {value}
+        if rule in {"bool", "boolean"}:
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "si", "sí", "yes"}
+            return bool(value)
+        if rule in {"number_range", "range"}:
+            if isinstance(value, dict):
+                return {"min": value.get("min"), "max": value.get("max")}
+        if isinstance(value, list):
+            return set(value)
+        return value
+
+    def get_resources_model(self, *, process: str = "terminaciones") -> list[Line]:
+        process = self._normalize_process(process)
+        with self.db.connect() as con:
+            resources = con.execute(
+                """
+                SELECT resource_id, sort_order
+                FROM resource
+                WHERE process_id = ? AND COALESCE(is_active, 1) = 1
+                ORDER BY COALESCE(sort_order, 9999), resource_id
+                """,
+                (process,),
+            ).fetchall()
+            if not resources:
+                return []
+            rows = con.execute(
+                """
+                SELECT resource_id, attr_key, rule_type, rule_value_json
+                FROM resource_constraint
+                WHERE resource_id IN (
+                    SELECT resource_id FROM resource WHERE process_id = ? AND COALESCE(is_active, 1) = 1
+                )
+                """,
+                (process,),
+            ).fetchall()
+
+        constraints_by_resource: dict[str, dict[str, object]] = {}
+        for r in rows:
+            res_id = str(r["resource_id"])
+            attr_key = str(r["attr_key"])
+            val = self._parse_constraint_value(r["rule_type"], r["rule_value_json"])
+            if val is None:
+                continue
+            constraints_by_resource.setdefault(res_id, {})[attr_key] = val
+
+        return [
+            Line(line_id=str(r["resource_id"]), constraints=constraints_by_resource.get(str(r["resource_id"]), {}))
+            for r in resources
+        ]
+
+    def get_dispatch_lines_model(self, *, process: str = "terminaciones") -> list[Line]:
+        resources = self.get_resources_model(process=process)
+        if resources:
+            return resources
+        return self.get_lines_model(process=process)
 
     def upsert_part(self, *, material: str, family_id: str) -> None:
         material = str(material).strip()
@@ -782,7 +852,7 @@ class Repository:
 
         Metrics:
         - tons_por_entregar: pending tons across all (pedido,posicion) present in `orders`
-        - tons_atrasadas: subset of pending tons where `fecha_entrega` < snapshot_date
+        - tons_atrasadas: subset of pending tons where `fecha_de_pedido` < snapshot_date
 
         One row per day (upsert by `snapshot_date`).
         """
@@ -800,7 +870,6 @@ class Repository:
                         posicion,
                         MAX(COALESCE(cod_material, '')) AS cod_material,
                         MAX(COALESCE(fecha_de_pedido, '')) AS fecha_de_pedido,
-                        MAX(COALESCE(fecha_entrega, '')) AS fecha_entrega,
                         MAX(COALESCE(solicitado, 0)) AS solicitado,
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
@@ -810,19 +879,25 @@ class Repository:
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
-                        v.fecha_entrega AS fecha_entrega,
+                        v.fecha_de_pedido AS fecha_de_pedido,
                         CASE
                             WHEN (v.solicitado - v.bodega - v.despachado) < 0 THEN 0
                             ELSE (v.solicitado - v.bodega - v.despachado)
                         END AS pendientes,
+                        v.bodega AS bodega,
                         COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0) AS peso_unitario_ton
                     FROM v
                     LEFT JOIN material_master p
                       ON p.material = v.cod_material
                 )
                 SELECT
-                    COALESCE(SUM(pendientes * peso_unitario_ton), 0.0) AS tons_por_entregar,
-                    COALESCE(SUM(CASE WHEN fecha_entrega < ? THEN (pendientes * peso_unitario_ton) ELSE 0.0 END), 0.0) AS tons_atrasadas
+                    COALESCE(SUM((CASE WHEN pendientes > 0 THEN pendientes ELSE 0 END) * peso_unitario_ton), 0.0) AS tons_por_entregar,
+                    COALESCE(SUM(
+                        CASE WHEN fecha_de_pedido < ? THEN
+                            ((CASE WHEN pendientes > 0 THEN pendientes ELSE 0 END) * peso_unitario_ton)
+                            + ((CASE WHEN pendientes <= 0 THEN bodega ELSE 0 END) * peso_unitario_ton)
+                        ELSE 0.0 END
+                    ), 0.0) AS tons_atrasadas
                 FROM joined
                 """,
                 (d0_iso,),
@@ -865,9 +940,7 @@ class Repository:
         return [dict(r) for r in rows]
 
     def get_orders_overdue_rows(self, *, today: date | None = None, limit: int = 200) -> list[dict]:
-        """Orders with fecha_entrega < today across all processes.
-        NOTE: Uses fecha_de_pedido as the valid date, aliased to fecha_entrega.
-        """
+        """Orders with fecha_de_pedido < today across all processes."""
         d0 = today or date.today()
         lim = max(1, min(int(limit or 200), 2000))
         with self.db.connect() as con:
@@ -879,7 +952,7 @@ class Repository:
                     COALESCE(v.cod_material, '') AS material,
                     COALESCE(v.solicitado, 0) AS solicitado,
                     COALESCE(v.bodega, 0) AS bodega,
-                    v.fecha_de_pedido AS fecha_entrega,
+                    v.fecha_de_pedido AS fecha_de_pedido,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
                         WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
@@ -906,7 +979,7 @@ class Repository:
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision_snapshot
                     GROUP BY pedido, posicion
-                    HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
+                HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
                 ) v
                 LEFT JOIN material_master p
                   ON p.material = v.cod_material
@@ -918,7 +991,7 @@ class Repository:
 
         out: list[dict] = []
         for r in rows:
-            fe = date.fromisoformat(str(r["fecha_entrega"]))
+            fe = date.fromisoformat(str(r["fecha_de_pedido"]))
             atraso = (d0 - fe).days
             row_id = f"{r['pedido']}|{r['posicion']}"
             out.append(
@@ -930,7 +1003,7 @@ class Repository:
                     "solicitado": int(r["solicitado"] or 0),
                     "bodega": int(r["bodega"] or 0),
                     "pendientes": int(r["pendientes"] or 0),
-                    "fecha_entrega": fe.isoformat(),
+                    "fecha_de_pedido": fe.isoformat(),
                     "dias": int(atraso),
                     "cliente": str(r["cliente"] or "").strip(),
                     "tons": float(r["tons"] or 0.0),
@@ -946,7 +1019,7 @@ class Repository:
         days: int = 14,
         limit: int = 200,
     ) -> list[dict]:
-        """Orders with fecha_entrega between today and today+days (inclusive)."""
+        """Orders with fecha_de_pedido between today and today+days (inclusive)."""
         d0 = today or date.today()
         horizon = d0.toordinal() + int(days)
         d1 = date.fromordinal(horizon)
@@ -955,7 +1028,7 @@ class Repository:
             rows = con.execute(
                 """
                 WITH orderpos AS (
-                    SELECT pedido, posicion, MIN(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_entrega
+                    SELECT pedido, posicion, MIN(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_de_pedido
                     FROM sap_vision_snapshot
                     GROUP BY pedido, posicion
                     HAVING MIN(COALESCE(fecha_de_pedido, '9999-12-31')) >= ?
@@ -966,7 +1039,7 @@ class Repository:
                     op.posicion AS posicion,
                     COALESCE(v.cod_material, '') AS material,
                     COALESCE(v.solicitado, 0) AS solicitado,
-                    op.fecha_entrega AS fecha_entrega,
+                    op.fecha_de_pedido AS fecha_de_pedido,
                     COALESCE(v.cliente, '') AS cliente,
                     CASE
                         WHEN (COALESCE(v.solicitado, 0) - COALESCE(v.bodega, 0) - COALESCE(v.despachado, 0)) < 0 THEN 0
@@ -997,7 +1070,7 @@ class Repository:
                  AND v.posicion = op.posicion
                 LEFT JOIN material_master p
                   ON p.material = v.cod_material
-                ORDER BY op.fecha_entrega ASC, op.pedido, op.posicion
+                ORDER BY op.fecha_de_pedido ASC, op.pedido, op.posicion
                 LIMIT ?
                 """,
                 (d0.isoformat(), d1.isoformat(), lim),
@@ -1005,7 +1078,7 @@ class Repository:
 
         out: list[dict] = []
         for r in rows:
-            fe = date.fromisoformat(str(r["fecha_entrega"]))
+            fe = date.fromisoformat(str(r["fecha_de_pedido"]))
             restantes = (fe - d0).days
             row_id = f"{r['pedido']}|{r['posicion']}"
             out.append(
@@ -1016,7 +1089,7 @@ class Repository:
                     "material": str(r["material"]),
                     "solicitado": int(r["solicitado"] or 0),
                     "pendientes": int(r["pendientes"] or 0),
-                    "fecha_entrega": fe.isoformat(),
+                    "fecha_de_pedido": fe.isoformat(),
                     "dias": int(restantes),
                     "cliente": str(r["cliente"] or "").strip(),
                     "tons": float(r["tons"] or 0.0),
@@ -1195,7 +1268,7 @@ class Repository:
                     COALESCE(MAX(v.cliente), '') AS cliente,
                     COALESCE(MAX(v.cod_material), '') AS cod_material,
                     COALESCE(MAX(v.descripcion_material), '') AS descripcion_material,
-                  MIN(COALESCE(v.fecha_de_pedido, o.fecha_entrega)) AS fecha_de_pedido,
+                  MIN(COALESCE(v.fecha_de_pedido, o.fecha_de_pedido)) AS fecha_de_pedido,
                   COALESCE(MAX(v.solicitado), 0) AS solicitado,
                   COALESCE(MAX(v.peso_neto), 0.0) AS peso_neto,
                   COALESCE(MAX(v.bodega), 0) AS bodega,
@@ -1269,6 +1342,23 @@ class Repository:
                 )
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+            # Update job priorities for this order position
+            prios = self._get_priority_map_values()
+            prio_urgente = prios.get("urgente", 2)
+            prio_normal = prios.get("normal", 3)
+            prio_prueba = prios.get("prueba", 1)
+            con.execute(
+                """
+                UPDATE job
+                SET priority = CASE
+                    WHEN COALESCE(is_test, 0) = 1 THEN ?
+                    WHEN ? = 1 THEN ?
+                    ELSE ?
+                END
+                WHERE pedido = ? AND posicion = ?
+                """,
+                (prio_prueba, 1 if is_priority else 0, prio_urgente, prio_normal, ped, pos),
+            )
         
         self.log_audit(
             "PRIORITY",
@@ -1414,9 +1504,9 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo
+                SELECT pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo
                 FROM orders
-                ORDER BY fecha_entrega, pedido, posicion, primer_correlativo
+                ORDER BY fecha_de_pedido, pedido, posicion, primer_correlativo
                 LIMIT ?
                 """,
                 (int(limit),),
@@ -1427,7 +1517,7 @@ class Repository:
                 "posicion": str(r[1]),
                 "material": str(r[2]),
                 "cantidad": int(r[3]),
-                "fecha_entrega": str(r[4]),
+                "fecha_de_pedido": str(r[4]),
                 "primer_correlativo": int(r[5]),
                 "ultimo_correlativo": int(r[6]),
             }
@@ -1723,6 +1813,32 @@ class Repository:
         
         priority_normal = int(priority_map.get("normal", 3))
         priority_prueba = int(priority_map.get("prueba", 1))
+        priority_urgente = int(priority_map.get("urgente", 2))
+
+        # Manual/legacy priority sets
+        manual_priority: set[tuple[str, str]] = set()
+        legacy_priority: set[str] = set()
+        try:
+            rows = con.execute(
+                """
+                SELECT pedido, posicion, COALESCE(kind, '') AS kind
+                FROM orderpos_priority
+                WHERE COALESCE(is_priority, 0) = 1
+                """
+            ).fetchall()
+            for r in rows:
+                if str(r["kind"] or "").strip().lower() == "test":
+                    continue
+                manual_priority.add((str(r["pedido"]).strip(), str(r["posicion"]).strip()))
+        except Exception:
+            pass
+        try:
+            rows = con.execute(
+                "SELECT pedido FROM order_priority WHERE COALESCE(is_priority, 0) = 1"
+            ).fetchall()
+            legacy_priority = {str(r[0]).strip() for r in rows}
+        except Exception:
+            pass
         
         # Get all active processes
         processes = con.execute(
@@ -1737,7 +1853,7 @@ class Repository:
             almacen = str(proc_row["sap_almacen"])
             
             # Track which jobs get updated during this import
-            # Jobs NOT in this set will be reset to qty_total=0 at the end
+            # Jobs NOT in this set will be reset to qty=0 at the end
             updated_job_ids: set[str] = set()
             
             # Filter MB52 by almacen and availability predicate
@@ -1750,7 +1866,7 @@ class Repository:
                     documento_comercial AS pedido,
                     posicion_sd AS posicion,
                     material,
-                    COUNT(*) AS qty_total,
+                    COUNT(*) AS qty,
                     MAX(CASE WHEN is_test = 1 THEN 1 ELSE 0 END) AS has_test_lotes
                 FROM sap_mb52_snapshot
                 WHERE centro = ?
@@ -1768,7 +1884,7 @@ class Repository:
                 pedido = str(r["pedido"]).strip()
                 posicion = str(r["posicion"]).strip()
                 material = str(r["material"]).strip()
-                qty_total = int(r["qty_total"])
+                qty = int(r["qty"])
                 is_test = int(r["has_test_lotes"])
                 
                 if not pedido or not posicion or not material:
@@ -1777,16 +1893,17 @@ class Repository:
                 # Check if jobs exist (may have multiple splits)
                 existing_jobs = con.execute(
                     """
-                    SELECT job_id, qty_total
+                    SELECT job_id, qty
                     FROM job
                     WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ?
-                    ORDER BY qty_total ASC
+                    ORDER BY qty ASC
                     """,
                     (process_id, pedido, posicion, material),
                 ).fetchall()
                 
-                # Determine priority: tests use "prueba", otherwise "normal"
-                priority = priority_prueba if is_test else priority_normal
+                # Determine priority: test > urgent > normal
+                is_manual_priority = (pedido, posicion) in manual_priority or pedido in legacy_priority
+                priority = priority_prueba if is_test else (priority_urgente if is_manual_priority else priority_normal)
                 
                 # FASE 3.2 FIX: Split Retention Logic
                 # We must map existing lotes to their current jobs to preserve splits.
@@ -1795,7 +1912,7 @@ class Repository:
                 
                 if existing_jobs:
                     # Check if all existing are "dead" (qty=0)
-                    all_zero = all(int(j["qty_total"]) == 0 for j in existing_jobs)
+                    all_zero = all(int(j["qty"]) == 0 for j in existing_jobs)
                     
                     if not all_zero:
                         # We have active jobs. 
@@ -1820,10 +1937,10 @@ class Repository:
                         """
                         INSERT INTO job(
                             job_id, process_id, pedido, posicion, material,
-                            qty_total, qty_remaining, priority, is_test, state,
+                            qty, priority, is_test, state,
                             created_at, updated_at
                         )
-                        VALUES(?, ?, ?, ?, ?, 0, 0, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        VALUES(?, ?, ?, ?, ?, 0, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """,
                         (new_job_id, process_id, pedido, posicion, material, priority, is_test),
                     )
@@ -1869,16 +1986,15 @@ class Repository:
                     # Update job header
                     con.execute(
                         """
-                        UPDATE job
-                        SET qty_total = ?,
-                            qty_remaining = ?,
-                            is_test = ?,
-                            priority = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE job_id = ?
-                        """,
-                        (qty, qty, is_test, priority, job_id)
-                    )
+                    UPDATE job
+                    SET qty = ?,
+                        is_test = ?,
+                        priority = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = ?
+                    """,
+                    (qty, is_test, priority, job_id)
+                )
                     
                     # Replace job units
                     con.execute("DELETE FROM job_unit WHERE job_id = ?", (job_id,))
@@ -1899,7 +2015,7 @@ class Repository:
                     updated_job_ids.add(job_id)
             
             # Reset jobs that were NOT updated in this import (splits without new stock, etc.)
-            # This ensures qty_total reflects current MB52 state
+            # This ensures qty reflects current MB52 state
             if updated_job_ids:
                 placeholders = ','.join('?' * len(updated_job_ids))
                 con.execute(
@@ -1915,11 +2031,11 @@ class Repository:
                 )
                 con.execute(
                     f"""
-                    UPDATE job
-                    SET qty_total = 0, updated_at = CURRENT_TIMESTAMP
-                    WHERE process_id = ?
-                      AND job_id NOT IN ({placeholders})
-                    """,
+                UPDATE job
+                SET qty = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE process_id = ?
+                  AND job_id NOT IN ({placeholders})
+                """,
                     (process_id, *updated_job_ids)
                 )
             else:
@@ -1929,14 +2045,14 @@ class Repository:
                     (process_id,)
                 )
                 con.execute(
-                    "UPDATE job SET qty_total = 0, updated_at = CURRENT_TIMESTAMP WHERE process_id = ?",
+                    "UPDATE job SET qty = 0, updated_at = CURRENT_TIMESTAMP WHERE process_id = ?",
                     (process_id,)
                 )
             
             # Cleanup: Delete jobs with qty=0 to keep the table clean.
             # This respects the "SAP is source of truth" principle: if stock is 0, job is gone.
             con.execute(
-                "DELETE FROM job WHERE process_id = ? AND qty_total = 0",
+                "DELETE FROM job WHERE process_id = ? AND qty = 0",
                 (process_id,)
             )
 
@@ -1984,7 +2100,7 @@ class Repository:
                     COALESCE(cliente, '') AS cliente,
                     COALESCE(cod_material, '') AS cod_material,
                     COALESCE(descripcion_material, '') AS descripcion_material,
-                    COALESCE(fecha_entrega, '') AS fecha_entrega,
+                    COALESCE(fecha_de_pedido, '') AS fecha_de_pedido,
                     solicitado,
                     x_programar, programado, x_fundir, desmoldeo, tt, terminacion,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
@@ -2071,7 +2187,7 @@ class Repository:
             "cliente": str(row["cliente"] or ""),
             "cod_material": str(row["cod_material"] or ""),
             "descripcion_material": str(row["descripcion_material"] or ""),
-            "fecha_entrega": str(row["fecha_entrega"] or ""),
+            "fecha_de_pedido": str(row["fecha_de_pedido"] or ""),
             "solicitado": _opt_int(row["solicitado"]),
             "found": 1,
             "stages": out_rows,
@@ -2181,14 +2297,6 @@ class Repository:
                 continue
 
             desc = str(r.get("descripcion_material", "")).strip() or None
-            fecha_entrega = None
-            if "fecha_entrega" in df.columns:
-                raw = r.get("fecha_entrega")
-                if raw is not None and str(raw).strip() and str(raw).strip().lower() != "nan":
-                    try:
-                        fecha_entrega = coerce_date(raw)
-                    except Exception:
-                        fecha_entrega = None
             solicitado = None
             if "solicitado" in df.columns:
                 raw = r.get("solicitado")
@@ -2267,7 +2375,6 @@ class Repository:
                     cod_material,
                     desc,
                     fecha_de_pedido,
-                    fecha_entrega,
                     solicitado,
                     x_programar,
                     programado,
@@ -2301,14 +2408,14 @@ class Repository:
             con.executemany(
                 """
                 INSERT INTO sap_vision_snapshot(
-                    pedido, posicion, cod_material, descripcion_material, fecha_de_pedido, fecha_entrega,
+                    pedido, posicion, cod_material, descripcion_material, fecha_de_pedido,
                     solicitado,
                     x_programar, programado, x_fundir, desmoldeo, tt, terminacion,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                     en_vulcaniz, pend_vulcanizado, rech_insp_externa, lib_vulcaniz_de,
                     cliente, n_oc_cliente, peso_neto_ton, peso_unitario_ton, bodega, despachado, rechazo, tipo_posicion, status_comercial
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -2348,21 +2455,21 @@ class Repository:
             con.execute("DELETE FROM orders")
             con.execute("DELETE FROM last_program")
             
-            # FASE 3.1: Update existing jobs with fecha_entrega from Visión
+            # FASE 3.1: Update existing jobs with fecha_de_pedido from Visión
             self._update_jobs_from_vision(con=con)
 
     def _update_jobs_from_vision(self, *, con) -> None:
-        """Update existing jobs with fecha_entrega from Vision snapshot.
+        """Update existing jobs with fecha_de_pedido from Vision snapshot.
         
-        Called automatically after Visión import. Updates fecha_entrega only.
-        (qty_total comes from MB52 lote count; lotes disappear from MB52 when completed)
+        Called automatically after Visión import. Updates fecha_de_pedido only.
+        (qty comes from MB52 lote count; lotes disappear from MB52 when completed)
         """
-        # Update fecha_entrega for all jobs from Vision
+        # Update fecha_de_pedido for all jobs from Vision
         con.execute(
             """
             UPDATE job
-            SET fecha_entrega = (
-                    SELECT v.fecha_entrega
+            SET fecha_de_pedido = (
+                    SELECT v.fecha_de_pedido
                     FROM sap_vision_snapshot v
                     WHERE v.pedido = job.pedido
                       AND v.posicion = job.posicion
@@ -2397,8 +2504,8 @@ class Repository:
             # Get original job
             original = con.execute(
                 """
-                SELECT job_id, process_id, pedido, posicion, material, qty_total,
-                       priority, is_test, state, fecha_entrega, notes
+                SELECT job_id, process_id, pedido, posicion, material, qty,
+                       priority, is_test, state, fecha_de_pedido, notes
                 FROM job
                 WHERE job_id = ?
                 """,
@@ -2408,12 +2515,12 @@ class Repository:
             if not original:
                 raise ValueError(f"Job {job_id} not found")
             
-            original_qty = int(original["qty_total"])
+            original_qty = int(original["qty"])
             
             if qty_split <= 0:
                 raise ValueError(f"qty_split must be positive, got {qty_split}")
             if qty_split >= original_qty:
-                raise ValueError(f"qty_split ({qty_split}) must be less than job qty_total ({original_qty})")
+                raise ValueError(f"qty_split ({qty_split}) must be less than job qty ({original_qty})")
             
             # Calculate new job quantity
             new_qty = original_qty - qty_split
@@ -2426,10 +2533,10 @@ class Repository:
                 """
                 INSERT INTO job(
                     job_id, process_id, pedido, posicion, material,
-                    qty_total, qty_remaining, priority, is_test, state, fecha_entrega, notes,
+                    qty, priority, is_test, state, fecha_de_pedido, notes,
                     created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     new_job_id,
@@ -2438,11 +2545,10 @@ class Repository:
                     original["posicion"],
                     original["material"],
                     new_qty,
-                    new_qty,
                     original["priority"],
                     original["is_test"],
                     original["state"],
-                    original["fecha_entrega"],
+                    original["fecha_de_pedido"],
                     original["notes"],
                 ),
             )
@@ -2451,7 +2557,7 @@ class Repository:
             con.execute(
                 """
                 UPDATE job
-                SET qty_total = ?,
+                SET qty = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE job_id = ?
                 """,
@@ -2657,7 +2763,7 @@ class Repository:
             con.execute("DELETE FROM orders WHERE process = ?", (process,))
             con.executemany(
                 """
-                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente)
+                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente)
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [(process, almacen, *row) for row in order_rows],
@@ -2680,26 +2786,74 @@ class Repository:
             seen_existing_ids = set()
 
             prio_vals = self._get_priority_map_values()
-            def_prio = prio_vals.get("normal", 3)
+            prio_normal = prio_vals.get("normal", 3)
+            prio_urgente = prio_vals.get("urgente", 2)
+            prio_prueba = prio_vals.get("prueba", 1)
+
+            manual_priority: set[tuple[str, str]] = set()
+            legacy_priority: set[str] = set()
+            try:
+                rows = con.execute(
+                    """
+                    SELECT pedido, posicion, COALESCE(kind, '') AS kind
+                    FROM orderpos_priority
+                    WHERE COALESCE(is_priority, 0) = 1
+                    """
+                ).fetchall()
+                for r in rows:
+                    if str(r["kind"] or "").strip().lower() == "test":
+                        continue
+                    manual_priority.add((str(r["pedido"]).strip(), str(r["posicion"]).strip()))
+            except Exception:
+                pass
+            try:
+                rows = con.execute(
+                    "SELECT pedido FROM order_priority WHERE COALESCE(is_priority, 0) = 1"
+                ).fetchall()
+                legacy_priority = {str(r[0]).strip() for r in rows}
+            except Exception:
+                pass
 
             for row in order_rows:
                 # row: (pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, tpm, is_test, cliente)
                 # Note: row[8] is is_test, row[9] is cliente
                 key = (row[0], row[1], int(row[8]))
                 
+                lotes_set = pieces.get((row[0], row[1], row[2], int(row[8])), set())
+                is_test_flag = int(row[8])
+                is_manual_priority = (row[0], row[1]) in manual_priority or row[0] in legacy_priority
+                prio = prio_prueba if is_test_flag else (prio_urgente if is_manual_priority else prio_normal)
+
                 if key in existing_map:
                     jid = existing_map[key]
                     seen_existing_ids.add(jid)
                     con.execute(
-                        "UPDATE job SET qty_total=?, qty_remaining=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, cliente=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
-                        (int(row[3]), int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None, jid)
+                        "UPDATE job SET qty=?, material=?, fecha_de_pedido=?, corr_min=?, corr_max=?, cliente=?, priority=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                        (int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None, prio, jid)
                     )
                 else:
                     new_jid = str(uuid4())
                     con.execute(
-                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test, state, fecha_entrega, corr_min, corr_max, cliente) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-                        (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[3]), def_prio, int(row[8]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None)
+                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty, priority, is_test, state, fecha_de_pedido, corr_min, corr_max, cliente) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                        (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), prio, is_test_flag, str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None)
+                    )
+                    jid = new_jid
+
+                # Sync job_unit to reflect current lotes for this job.
+                con.execute("DELETE FROM job_unit WHERE job_id = ?", (jid,))
+                for lote in sorted(lotes_set):
+                    try:
+                        corr = self._lote_to_int(lote)
+                    except Exception:
+                        corr = None
+                    ju_id = f"ju_{jid}_{uuid4().hex[:8]}"
+                    con.execute(
+                        """
+                        INSERT INTO job_unit(job_unit_id, job_id, lote, correlativo_int, qty, status, created_at, updated_at)
+                        VALUES(?, ?, ?, ?, 1, 'available', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (ju_id, jid, str(lote), corr),
                     )
 
             # Delete jobs not in current MB52 snapshot
@@ -2742,7 +2896,7 @@ class Repository:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente FROM orders WHERE process = ?",
+                "SELECT pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente FROM orders WHERE process = ?",
                 (process,),
             ).fetchall()
         out: list[Order] = []
@@ -2753,7 +2907,7 @@ class Repository:
                     posicion=str(posicion),
                     material=str(material),
                     cantidad=int(cantidad),
-                    fecha_entrega=date.fromisoformat(str(fecha_entrega)),
+                    fecha_de_pedido=date.fromisoformat(str(fecha_entrega)),
                     primer_correlativo=int(primer),
                     ultimo_correlativo=int(ultimo),
                     tiempo_proceso_min=float(tpm) if tpm is not None else None,
@@ -2767,7 +2921,7 @@ class Repository:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT job_id, pedido, posicion, material, qty_total, priority, fecha_entrega, is_test, notes, corr_min, corr_max, cliente FROM job WHERE process_id = ?",
+                "SELECT job_id, pedido, posicion, material, qty, priority, fecha_de_pedido, is_test, notes, corr_min, corr_max, cliente FROM job WHERE process_id = ?",
                 (process,),
             ).fetchall()
         
@@ -2779,9 +2933,9 @@ class Repository:
                     pedido=r["pedido"],
                     posicion=r["posicion"],
                     material=r["material"],
-                    qty_total=r["qty_total"],
+                    qty=r["qty"],
                     priority=r["priority"],
-                    fecha_entrega=date.fromisoformat(r["fecha_entrega"]) if r["fecha_entrega"] else None,
+                    fecha_de_pedido=date.fromisoformat(r["fecha_de_pedido"]) if r["fecha_de_pedido"] else None,
                     is_test=bool(r["is_test"]),
                     notes=r["notes"],
                     corr_min=r["corr_min"],
@@ -3074,12 +3228,12 @@ class Repository:
                 break
         if order is None:
             raise ValueError("No se encontró la orden en SAP (orders)")
-        qty_total = int(order.cantidad)
-        if qty_total < 2:
+        qty = int(order.cantidad)
+        if qty < 2:
             raise ValueError("No se puede dividir: cantidad < 2")
 
-        qty1 = qty_total // 2
-        qty2 = qty_total - qty1
+        qty1 = qty // 2
+        qty2 = qty - qty1
         if qty1 <= 0 or qty2 <= 0:
             raise ValueError("Split inválido")
 
@@ -3225,8 +3379,8 @@ class Repository:
                     "posicion": o.posicion,
                     "material": o.material,
                     "family_id": "Otros",
-                    "fecha_entrega": o.fecha_entrega.isoformat(),
-                    "start_by": o.fecha_entrega.isoformat(),
+                    "fecha_de_pedido": o.fecha_de_pedido.isoformat(),
+                    "start_by": o.fecha_de_pedido.isoformat(),
                     "prio_kind": _prio_kind_for(o),
                 }
 
@@ -3367,9 +3521,3 @@ class Repository:
         # Backward-compatible: older DBs stored only the program dict
         merged_program, merged_errors = self._apply_in_progress_locks(process=process, program=payload, errors=[])
         return {"generated_on": row["generated_on"], "program": merged_program, "errors": merged_errors}
-
-
-
-
-
-

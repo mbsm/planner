@@ -98,6 +98,7 @@ Un **Job** es la unidad del dispatch:
 - Contiene un **conjunto de correlativos** (NO se asume contiguo).
   - El sistema debe poder representar: listas explícitas, múltiples rangos, y/o “splits” parciales.
 - Cada correlativo/lote puede estar marcado como **prueba**; el modelo debe soportar esta marca a nivel de lote/ítem.
+- El **qty** del Job se calcula como el **conteo de lotes** asignados (derivado de `job_unit`); no existe `qty_total` ni `qty_remaining`.
 - Un Job puede estar en estado: `queued | in_progress | done | blocked | cancelled`.
 
 ### 3.2.1 Dispatch por proceso (diseño)
@@ -172,6 +173,7 @@ Decisión de arquitectura: **1 instancia/DB por planta** (simplifica diseño; mu
 - `sap_mb52_snapshot`: filas de MB52 (unidad física por lote/correlativo) + timestamp.
 - `sap_vision_snapshot`: filas de Visión (pedido/posición + atributos) + timestamp.
 - `job`: entidad core con `(process, pedido, posicion, material, job_id)` + `is_test`, `priority` (numérico, menor = mayor prioridad).
+- `job.qty`: cantidad de unidades/lotes asignados al Job (derivado desde `job_unit`).
 - `job_unit`: mapeo `job_id` ↔ lotes concretos (lista explícita) para soportar Jobs no-contiguos y splits.
 
 ### 5.3 Dispatcher y estado operativo

@@ -162,7 +162,6 @@ class Db:
                     descripcion_material TEXT,
                     atributo TEXT,
                     fecha_de_pedido TEXT NOT NULL,
-                    fecha_entrega TEXT,
                     solicitado INTEGER,
                     x_programar INTEGER,
                     programado INTEGER,
@@ -200,12 +199,11 @@ class Db:
                     pedido TEXT NOT NULL,
                     posicion TEXT NOT NULL,
                     material TEXT NOT NULL,
-                    qty_total INTEGER NOT NULL,
-                    qty_remaining INTEGER NOT NULL DEFAULT 0,
+                    qty INTEGER NOT NULL DEFAULT 0,
                     priority INTEGER,
                     is_test INTEGER NOT NULL DEFAULT 0,
                     state TEXT DEFAULT 'pending',
-                    fecha_entrega TEXT,
+                    fecha_de_pedido TEXT,
                     notes TEXT,
                     corr_min INTEGER,
                     corr_max INTEGER,
@@ -349,9 +347,9 @@ class Db:
                 
                 # Re-fetch columns
                 cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
-                if "fecha_entrega" not in cols:
+                if "fecha_de_pedido" not in cols:
                     try:
-                        con.execute("ALTER TABLE job ADD COLUMN fecha_entrega TEXT")
+                        con.execute("ALTER TABLE job ADD COLUMN fecha_de_pedido TEXT")
                     except Exception:
                         pass
                 if "notes" not in cols:
@@ -368,6 +366,194 @@ class Db:
             try:
                 con.execute("ALTER TABLE job ADD COLUMN corr_max INTEGER")
             except sqlite3.OperationalError:
+                pass
+            # Job qty v0.3: add qty and backfill from job_unit count or legacy qty_total
+            if self._table_exists(con, "job"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "qty" not in cols:
+                    try:
+                        con.execute("ALTER TABLE job ADD COLUMN qty INTEGER NOT NULL DEFAULT 0")
+                    except Exception:
+                        pass
+                # Backfill qty for existing rows (prefer job_unit count)
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "qty" in cols:
+                    try:
+                        con.execute(
+                            """
+                            UPDATE job
+                            SET qty = COALESCE(
+                                (SELECT COUNT(*) FROM job_unit ju WHERE ju.job_id = job.job_id),
+                                qty,
+                                0
+                            )
+                            """
+                        )
+                    except Exception:
+                        pass
+
+            # Remove fecha_entrega columns (v0.3) by rebuilding tables where needed.
+            try:
+                # sap_vision_snapshot: drop fecha_entrega if present
+                cols = [r[1] for r in con.execute("PRAGMA table_info(sap_vision_snapshot)").fetchall()]
+                if "fecha_entrega" in cols:
+                    con.execute("DROP VIEW IF EXISTS sap_vision")
+                    con.execute("ALTER TABLE sap_vision_snapshot RENAME TO sap_vision_snapshot_old")
+                    con.execute(
+                        """
+                        CREATE TABLE sap_vision_snapshot (
+                            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            pedido TEXT NOT NULL,
+                            posicion TEXT NOT NULL,
+                            tipo_posicion TEXT,
+                            tipo_de_reparto TEXT,
+                            cliente TEXT,
+                            n_oc_cliente TEXT,
+                            pos_oc TEXT,
+                            material_client_code TEXT,
+                            cod_material TEXT,
+                            descripcion_material TEXT,
+                            atributo TEXT,
+                            fecha_de_pedido TEXT NOT NULL,
+                            solicitado INTEGER,
+                            x_programar INTEGER,
+                            programado INTEGER,
+                            x_fundir INTEGER,
+                            desmoldeo INTEGER,
+                            tt INTEGER,
+                            terminacion INTEGER,
+                            mecanizado_interno INTEGER,
+                            mecanizado_externo INTEGER,
+                            vulcanizado INTEGER,
+                            en_vulcaniz INTEGER,
+                            pend_vulcanizado INTEGER,
+                            insp_externa INTEGER,
+                            rech_insp_externa INTEGER,
+                            lib_vulcaniz_de INTEGER,
+                            bodega INTEGER,
+                            despachado INTEGER,
+                            rechazo INTEGER,
+                            ret_qm INTEGER,
+                            grupo_art TEXT,
+                            proveedor TEXT,
+                            status TEXT,
+                            status_comercial TEXT,
+                            jerarquia_productos TEXT,
+                            peso_neto_ton REAL,
+                            peso_unitario_ton REAL
+                        );
+                        """.strip()
+                    )
+                    con.execute(
+                        """
+                        INSERT INTO sap_vision_snapshot(
+                            snapshot_id, loaded_at, pedido, posicion, tipo_posicion, tipo_de_reparto, cliente,
+                            n_oc_cliente, pos_oc, material_client_code, cod_material, descripcion_material,
+                            atributo, fecha_de_pedido, solicitado, x_programar, programado, x_fundir, desmoldeo, tt,
+                            terminacion, mecanizado_interno, mecanizado_externo, vulcanizado, en_vulcaniz,
+                            pend_vulcanizado, insp_externa, rech_insp_externa, lib_vulcaniz_de, bodega, despachado,
+                            rechazo, ret_qm, grupo_art, proveedor, status, status_comercial, jerarquia_productos,
+                            peso_neto_ton, peso_unitario_ton
+                        )
+                        SELECT
+                            snapshot_id, loaded_at, pedido, posicion, tipo_posicion, tipo_de_reparto, cliente,
+                            n_oc_cliente, pos_oc, material_client_code, cod_material, descripcion_material,
+                            atributo, fecha_de_pedido, solicitado, x_programar, programado, x_fundir, desmoldeo, tt,
+                            terminacion, mecanizado_interno, mecanizado_externo, vulcanizado, en_vulcaniz,
+                            pend_vulcanizado, insp_externa, rech_insp_externa, lib_vulcaniz_de, bodega, despachado,
+                            rechazo, ret_qm, grupo_art, proveedor, status, status_comercial, jerarquia_productos,
+                            peso_neto_ton, peso_unitario_ton
+                        FROM sap_vision_snapshot_old
+                        """.strip()
+                    )
+                    con.execute("DROP TABLE sap_vision_snapshot_old")
+                    con.execute("CREATE VIEW IF NOT EXISTS sap_vision AS SELECT * FROM sap_vision_snapshot")
+
+                # job: rename fecha_entrega -> fecha_de_pedido if needed
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "fecha_entrega" in cols and "fecha_de_pedido" not in cols:
+                    con.execute("ALTER TABLE job RENAME TO job_old")
+                    con.execute(
+                        """
+                        CREATE TABLE job (
+                            job_id TEXT PRIMARY KEY,
+                            process_id TEXT NOT NULL,
+                            pedido TEXT NOT NULL,
+                            posicion TEXT NOT NULL,
+                            material TEXT NOT NULL,
+                            qty INTEGER NOT NULL DEFAULT 0,
+                            priority INTEGER,
+                            is_test INTEGER NOT NULL DEFAULT 0,
+                            state TEXT DEFAULT 'pending',
+                            fecha_de_pedido TEXT,
+                            notes TEXT,
+                            corr_min INTEGER,
+                            corr_max INTEGER,
+                            cliente TEXT,
+                            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY(process_id) REFERENCES process(process_id),
+                            FOREIGN KEY(material) REFERENCES material_master(material)
+                        );
+                        """.strip()
+                    )
+                    con.execute(
+                        """
+                        INSERT INTO job(
+                            job_id, process_id, pedido, posicion, material, qty, priority, is_test, state,
+                            fecha_de_pedido, notes, corr_min, corr_max, cliente, created_at, updated_at
+                        )
+                        SELECT
+                            job_id, process_id, pedido, posicion, material,
+                            COALESCE(qty, 0),
+                            priority, is_test, state,
+                            fecha_entrega,
+                            notes, corr_min, corr_max, cliente, created_at, updated_at
+                        FROM job_old
+                        """.strip()
+                    )
+                    con.execute("DROP TABLE job_old")
+
+                # orders: rename fecha_entrega -> fecha_de_pedido if needed
+                cols = [r[1] for r in con.execute("PRAGMA table_info(orders)").fetchall()]
+                if "fecha_entrega" in cols and "fecha_de_pedido" not in cols:
+                    con.execute("ALTER TABLE orders RENAME TO orders_old")
+                    con.execute(
+                        """
+                        CREATE TABLE orders (
+                            process TEXT NOT NULL,
+                            almacen TEXT NOT NULL,
+                            pedido TEXT NOT NULL,
+                            posicion TEXT NOT NULL,
+                            material TEXT NOT NULL,
+                            cantidad INTEGER NOT NULL,
+                            fecha_de_pedido TEXT NOT NULL,
+                            primer_correlativo INTEGER NOT NULL,
+                            ultimo_correlativo INTEGER NOT NULL,
+                            tiempo_proceso_min REAL,
+                            is_test INTEGER NOT NULL DEFAULT 0,
+                            cliente TEXT,
+                            PRIMARY KEY (process, pedido, posicion, primer_correlativo, ultimo_correlativo)
+                        );
+                        """.strip()
+                    )
+                    con.execute(
+                        """
+                        INSERT INTO orders(
+                            process, almacen, pedido, posicion, material, cantidad, fecha_de_pedido,
+                            primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente
+                        )
+                        SELECT
+                            process, almacen, pedido, posicion, material, cantidad,
+                            fecha_entrega,
+                            primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente
+                        FROM orders_old
+                        """.strip()
+                    )
+                    con.execute("DROP TABLE orders_old")
+            except Exception:
+                # Best-effort migrations should not prevent startup.
                 pass
 
             # ===== NOTA: No backward compatibility - solo tablas v0.2 =====
@@ -678,7 +864,7 @@ class Db:
                         posicion TEXT NOT NULL,
                         material TEXT NOT NULL,
                         cantidad INTEGER NOT NULL,
-                        fecha_entrega TEXT NOT NULL,
+                        fecha_de_pedido TEXT NOT NULL,
                         primer_correlativo INTEGER NOT NULL,
                         ultimo_correlativo INTEGER NOT NULL,
                         tiempo_proceso_min REAL,
@@ -723,7 +909,7 @@ class Db:
                                 posicion TEXT NOT NULL,
                                 material TEXT NOT NULL,
                                 cantidad INTEGER NOT NULL,
-                                fecha_entrega TEXT NOT NULL,
+                                fecha_de_pedido TEXT NOT NULL,
                                 primer_correlativo INTEGER NOT NULL,
                                 ultimo_correlativo INTEGER NOT NULL,
                                 tiempo_proceso_min REAL,
@@ -746,14 +932,14 @@ class Db:
                         if has_posicion:
                             is_test_expr = "COALESCE(is_test, 0)" if has_is_test else "0"
                             con.execute(
-                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
+                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
                                 f"SELECT 'terminaciones', ?, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, {is_test_expr} FROM orders_old",
                                 (almacen_term,),
                             )
                         else:
                             # Legacy (no posicion): keep placeholder.
                             con.execute(
-                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
+                                "INSERT OR IGNORE INTO orders(process, almacen, pedido, posicion, numero_parte, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test) "
                                 "SELECT 'terminaciones', ?, pedido, '0000', numero_parte, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, 0 FROM orders_old",
                                 (almacen_term,),
                             )
