@@ -746,9 +746,7 @@ class Repository:
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
                     FROM sap_vision_snapshot
-                    WHERE (cod_material LIKE '402%' OR cod_material LIKE '403%' OR cod_material LIKE '404%')
-                      AND fecha_de_pedido > '2023-12-31'
-                      AND (tipo_posicion IS NULL OR tipo_posicion != 'ZTLH')
+                    -- We trust sap_vision_snapshot contains only valid/filtered rows (Active, date > 2023, valid families/ZTLH)
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
@@ -2091,9 +2089,15 @@ class Repository:
             posicion = self._normalize_sap_key(r.get("posicion")) or ""
             if not pedido or not posicion:
                 continue
+
+            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
             cod_material = self._normalize_sap_key(r.get("cod_material"))
-            # Filter: Material family 402/403/404
-            if not cod_material or not (cod_material.startswith("402") or cod_material.startswith("403") or cod_material.startswith("404")):
+
+            # Filter: Material family 402/403/404, or explicit ZTLH exception
+            is_valid_mat = cod_material and (cod_material.startswith("402") or cod_material.startswith("403") or cod_material.startswith("404"))
+            is_ztlh = (tipo_posicion == "ZTLH")
+
+            if not is_valid_mat and not is_ztlh:
                 continue
 
             fecha_de_pedido = coerce_date(r.get("fecha_de_pedido"))
@@ -2102,12 +2106,10 @@ class Repository:
                 continue
 
             # Filter: Status comercial (Active only)
+            # We use case-insensitive check to be robust against Excel variations
             status_comercial = str(r.get("status_comercial", "") or "").strip() or None
-            if status_comercial and status_comercial != "Activo":
+            if status_comercial and status_comercial.lower() != "activo":
                 continue
-
-            # Store tipo_posicion for reference (no filter)
-            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
 
             desc = str(r.get("descripcion_material", "")).strip() or None
             fecha_entrega = None

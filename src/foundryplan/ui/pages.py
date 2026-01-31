@@ -145,17 +145,15 @@ def register_pages(repo: Repository) -> None:
 
             # Para alinear el título con el último valor del gráfico (KPI diario),
             # usamos la última muestra de `tons_atrasadas` si existe.
-            if 'atrasadas' in locals() and isinstance(atrasadas, list) and atrasadas:
-                overdue_tons = float(atrasadas[-1] or 0.0)
-            else:
-                # Fallback: suma de categorías calculadas desde las filas
-                ready_tons_total = sum(
-                    float(r.get("tons_dispatch") or 0.0) for r in overdue if int(r.get("pendientes") or 0) == 0
-                )
-                to_mfg_tons_total = sum(
-                    float(r.get("tons") or 0.0) for r in overdue if int(r.get("pendientes") or 0) > 0
-                )
-                overdue_tons = ready_tons_total + to_mfg_tons_total
+            # Fallback: suma de categorías calculadas desde las filas
+            ready_tons_total = sum(
+                float(r.get("tons_dispatch") or 0.0) for r in overdue if int(r.get("pendientes") or 0) == 0
+            )
+            to_mfg_tons_total = sum(
+                float(r.get("tons") or 0.0) for r in overdue if int(r.get("pendientes") or 0) > 0
+            )
+            # CAUTION: We force the total to match the sum of displayed subtotals, ignoring potentially stale KPI table
+            overdue_tons = ready_tons_total + to_mfg_tons_total
             due_soon_tons = sum(float(r.get("tons") or 0.0) for r in due_soon)
 
             # Pre-format tons for display (1 decimal) while keeping numeric `tons` for calculations.
@@ -399,9 +397,13 @@ def register_pages(repo: Repository) -> None:
                         ui.label("No hay pedidos atrasados.").classes("text-slate-600")
 
                 with ui.card().classes("p-4 w-full"):
-                    ui.label(f"Entrega Pedidos próximas 5 semanas — Total: {due_soon_tons:,.1f} tons").classes("text-lg font-semibold")
-                    ui.label("Pedidos agrupados por semana ISO (lunes a domingo).").classes("text-sm text-slate-600")
-                    
+                    week_0: list[dict] = []
+                    week_1: list[dict] = []
+                    week_2: list[dict] = []
+                    week_3: list[dict] = []
+                    week_4: list[dict] = []
+                    week_5: list[dict] = []
+
                     if due_soon or overdue:
                         # Obtener la semana ISO actual (año, número de semana)
                         today = date.today()
@@ -443,13 +445,7 @@ def register_pages(repo: Repository) -> None:
                             except Exception:  # noqa: E722
                                 return None
                         
-                        # Dividir pedidos por semana usando número de semana ISO
-                        week_0 = []
-                        week_1 = []
-                        week_2 = []
-                        week_3 = []
-                        week_4 = []
-                        week_5 = []
+                        # (Lists initialized above)
                         
                         # Marcar prioridades (manual y pruebas) para mostrar icono en tablas
                         prio_set = repo.get_priority_orderpos_set()
@@ -502,6 +498,12 @@ def register_pages(repo: Repository) -> None:
                                 week_4.append(r)
                             elif week_offset == 5:
                                 week_5.append(r)
+
+                        # Calculate total from the weeks
+                        total_upcoming_tons = sum(float(r.get("tons") or 0.0) for r in (*week_0, *week_1, *week_2, *week_3, *week_4, *week_5))
+
+                        ui.label(f"Entrega Pedidos próximas 5 semanas — Total: {total_upcoming_tons:,.1f} tons").classes("text-lg font-semibold")
+                        ui.label("Pedidos agrupados por semana ISO (lunes a domingo).").classes("text-sm text-slate-600")
                         
                         columns_due = [
                             {"name": "is_priority", "label": "", "field": "is_priority"},
