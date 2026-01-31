@@ -1,0 +1,28 @@
+Production planner module
+
+Reads orders data from vision
+
+Solves a weekly capacity planning problem using constraint optimization
+
+Key Features
+
+Planning Capabilities
+
+Flask Constraint Modeling: Respects physical tooling limitations using effective capacity calculations
+Pouring Capacity: Enforces global melt deck tonnage limits
+Pattern Limits: Caps weekly production per part
+Delayed Pouring: Models time lag between molding and pouring operations
+Lead Time Management: Accounts for post-shakeout operations (finishing, heat treat, etc.)
+Optimization Features
+
+Lateness Minimization: Primary objective minimizes weighted lateness across all orders
+Priority Weighting: Allows differential treatment of critical vs standard orders
+Feasibility Checking: Detects infeasible scenarios (insufficient capacity)
+Output Schedules
+
+The engine generates detailed weekly schedules for:
+
+Molding: Primary production schedule
+Pouring: Derived from molding plan + pouring delays
+Shakeout: Flask release schedule
+Completion: Finished goods ready for shipping

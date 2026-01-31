@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+
+from contextlib import contextmanager
 import sqlite3
 from pathlib import Path
 
@@ -9,15 +11,26 @@ class Db:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path)
+    @contextmanager
+    def connect(self):
+        con = sqlite3.connect(self.path, timeout=20.0)
         con.row_factory = sqlite3.Row
-        return con
+        try:
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     def ensure_schema(self) -> None:
-        with self.connect() as con:
+        # Initial connection to set mode and tables
+        con = sqlite3.connect(self.path, timeout=10.0)
+        try:
             con.execute("PRAGMA journal_mode=WAL;")
-
+            con.execute("PRAGMA foreign_keys=ON;")
+            
             # Migration pre-check: job_unit missing PK?
             # Existing `job_unit` table from older schema might lack job_unit_id.
             # Use raw query since _table_exists might be defined later or strict.
@@ -27,8 +40,18 @@ class Db:
                     # Drop it so it gets recreated correctly below
                     con.execute("DROP TABLE job_unit")
 
-            # Required for ON DELETE/UPDATE behaviors if we add FKs later.
-            con.execute("PRAGMA foreign_keys=ON;")
+            # AUDIT LOG
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL DEFAULT(datetime('now', 'localtime')),
+                    category TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    details TEXT
+                );
+                """
+            )
 
             # FASE 1.1: Tablas de Configuración Base
             con.executescript(
@@ -168,6 +191,8 @@ class Db:
                     peso_unitario_ton REAL
                 );
 
+                CREATE VIEW IF NOT EXISTS sap_vision AS SELECT * FROM sap_vision_snapshot;
+
                 -- FASE 1.3: Tablas de Jobs
                 CREATE TABLE IF NOT EXISTS job (
                     job_id TEXT PRIMARY KEY,
@@ -184,6 +209,7 @@ class Db:
                     notes TEXT,
                     corr_min INTEGER,
                     corr_max INTEGER,
+                    cliente TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(process_id) REFERENCES process(process_id),
@@ -657,6 +683,7 @@ class Db:
                         ultimo_correlativo INTEGER NOT NULL,
                         tiempo_proceso_min REAL,
                         is_test INTEGER NOT NULL DEFAULT 0,
+                        cliente TEXT,
                         PRIMARY KEY (process, pedido, posicion, primer_correlativo, ultimo_correlativo)
                     );
                     """
@@ -752,6 +779,24 @@ class Db:
                     except Exception:
                         pass
 
+            # orders table v6: add cliente column
+            if self._table_exists(con, "orders"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(orders)").fetchall()]
+                if "cliente" not in cols:
+                    try:
+                        con.execute("ALTER TABLE orders ADD COLUMN cliente TEXT")
+                    except Exception:
+                        pass
+
+            # job table: add cliente column
+            if self._table_exists(con, "job"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(job)").fetchall()]
+                if "cliente" not in cols:
+                    try:
+                        con.execute("ALTER TABLE job ADD COLUMN cliente TEXT")
+                    except Exception:
+                        pass
+
             # ----- Best-effort normalization of SAP key columns -----
             # Excel often turns keys like 4049 into 4049.0; normalize trailing ".0" and trim.
             # This helps per-process warehouse filtering and MB52<->Visión joins.
@@ -773,6 +818,10 @@ class Db:
                         )
                 except Exception:
                     pass
+            
+            con.commit()
+        finally:
+            con.close()
 
     def _table_exists(self, con: sqlite3.Connection, table_name: str) -> bool:
         """Check if a table exists in the database."""

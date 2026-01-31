@@ -22,6 +22,7 @@ class Job:
     fecha_entrega: date | None
     is_test: bool = False
     notes: str | None = None
+    cliente: str | None = None
     
     # Scheduling info
     start_by: date | None = None
@@ -42,6 +43,7 @@ class Order:
     fecha_entrega: date
     tiempo_proceso_min: float | None = None
     is_test: bool = False
+    cliente: str | None = None
 
     @property
     def numero_parte(self) -> str:
@@ -59,3 +61,11 @@ class Part:
     mec_perf_inclinada: bool = False
     sobre_medida_mecanizado: bool = False
 
+
+@dataclass
+class AuditEntry:
+    id: int
+    timestamp: str 
+    category: str
+    message: str
+    details: str | None = None

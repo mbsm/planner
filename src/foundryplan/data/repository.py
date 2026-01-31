@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import time
 import json
 import re
 from datetime import date, datetime
 from uuid import uuid4
 
-from foundryplan.core.models import Job, Line, Order, Part
+from foundryplan.core.models import AuditEntry, Job, Line, Order, Part
 from foundryplan.data.db import Db
 from foundryplan.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
 
@@ -26,6 +27,34 @@ class Repository:
             "por_vulcanizar": {"almacen_key": "sap_almacen_por_vulcanizar", "label": "Por vulcanizar"},
             "en_vulcanizado": {"almacen_key": "sap_almacen_en_vulcanizado", "label": "En vulcanizado"},
         }
+
+    def log_audit(self, category: str, message: str, details: str | None = None) -> None:
+        """Record a business event in the audit log."""
+        try:
+            with self.db.connect() as con:
+                con.execute(
+                    "INSERT INTO audit_log (category, message, details) VALUES (?, ?, ?)",
+                    (category, message, details),
+                )
+        except Exception as e:
+            # Fallback for audit failures (don't crash the app, but log to stderr)
+            print(f"FAILED TO WRITE AUDIT LOG: {e}")
+
+    def get_recent_audit_entries(self, limit: int = 100) -> list[AuditEntry]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [
+                AuditEntry(
+                    id=row["id"],
+                    timestamp=row["timestamp"],
+                    category=row["category"],
+                    message=row["message"],
+                    details=row["details"],
+                )
+                for row in rows
+            ]
 
     def _mb52_availability_predicate_sql(self, *, process: str) -> str:
         """Process-specific MB52 availability predicate.
@@ -360,6 +389,13 @@ class Repository:
         key = str(key).strip()
         if not key:
             raise ValueError("config key vacío")
+
+        with self.db.connect() as con:
+            # Audit config change
+            old_val_row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
+            old_val = old_val_row[0] if old_val_row else "(none)"
+        
+        self.log_audit("CONFIG", f"Updated '{key}'", f"From '{old_val}' to '{value}'")
         
         with self.db.connect() as con:
             # FASE 3.3: Handle priority map changes (recalculate job priorities)
@@ -432,6 +468,8 @@ class Repository:
             raise ValueError("nombre de family_id vacío")
         with self.db.connect() as con:
             con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", (name, name))
+        
+        self.log_audit("MASTER_DATA", "Add Family", f"Family: {name}")
 
     def rename_family(self, *, old: str, new: str) -> None:
         old = str(old).strip()
@@ -460,6 +498,8 @@ class Repository:
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Rename Family", f"{old} -> {new}")
 
     def delete_family(self, *, name: str, force: bool = False) -> None:
         name = str(name).strip()
@@ -493,6 +533,8 @@ class Repository:
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Delete Family", f"Name: {name}, Force: {force}")
 
     # ---------- Lines ----------
     def upsert_line(
@@ -521,12 +563,16 @@ class Repository:
 
             # Invalidate cached program for this process
             con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+        
+        self.log_audit("CONFIG", "Upsert Line", f"Proc: {process}, ID: {line_id}, Name: {name}, Fams: {len(families)}")
 
     def delete_line(self, *, process: str = "terminaciones", line_id: int) -> None:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             con.execute("DELETE FROM line_config WHERE process = ? AND line_id = ?", (process, int(line_id)))
             con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+        
+        self.log_audit("CONFIG", "Delete Line", f"Proc: {process}, ID: {line_id}")
 
     def get_lines(self, *, process: str = "terminaciones") -> list[dict]:
         process = self._normalize_process(process)
@@ -573,6 +619,8 @@ class Repository:
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Set Family", f"{material} -> {family_id}")
 
     def upsert_part_master(
         self,
@@ -660,6 +708,8 @@ class Repository:
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Upsert Part", f"Material: {material} Family: {family_id}")
 
     def update_part_process_times(
         self,
@@ -697,16 +747,26 @@ class Repository:
 
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit(
+            "MASTER_DATA",
+            "Update Times",
+            f"Mat {material}: V={vulcanizado_dias}, M={mecanizado_dias}, I={inspeccion_externa_dias}"
+        )
 
     def delete_part(self, *, material: str) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM material_master WHERE material = ?", (str(material).strip(),))
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Delete Part", f"Material: {material}")
 
     def delete_all_parts(self) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM material_master")
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit("MASTER_DATA", "Delete All Parts", "Cleared all material master data")
 
     def get_parts_rows(self) -> list[dict]:
         """Return the part master as UI-friendly dict rows."""
@@ -1209,6 +1269,12 @@ class Repository:
                 )
             # Invalidate any previously generated program
             con.execute("DELETE FROM last_program")
+        
+        self.log_audit(
+            "PRIORITY",
+            "Set Priority" if is_priority else "Unset Priority",
+            f"Pedido: {ped}, Pos: {pos}"
+        )
 
     def delete_all_pedido_priorities(self, *, keep_tests: bool = True) -> None:
         """Clear all pedido/posición priority flags.
@@ -1521,6 +1587,9 @@ class Repository:
 
     # ---------- Import ----------
     def import_excel_bytes(self, *, kind: str, content: bytes) -> None:
+        size_kb = len(content) / 1024
+        self.log_audit("DATA_LOAD", f"Importing {kind.upper()}", f"Size: {size_kb:.1f} KB")
+
         read_excel_bytes(content)
 
         # The app currently supports SAP-driven imports only.
@@ -2506,13 +2575,17 @@ class Repository:
                 con.execute("DELETE FROM last_program WHERE process = ?", (process,))
                 return 0
 
-            # Vision lookup: (pedido,posicion) -> (fecha_pedido_iso, cod_material)
+            # Vision lookup: (pedido,posicion) -> (fecha_pedido_iso, cod_material, cliente)
             vision_rows = con.execute(
-                "SELECT pedido, posicion, fecha_de_pedido, cod_material FROM sap_vision_snapshot"
+                "SELECT pedido, posicion, fecha_de_pedido, cod_material, cliente FROM sap_vision_snapshot"
             ).fetchall()
-            vision_by_key: dict[tuple[str, str], tuple[str, str | None]] = {}
+            vision_by_key: dict[tuple[str, str], tuple[str, str | None, str | None]] = {}
             for r in vision_rows:
-                vision_by_key[(str(r[0]).strip(), str(r[1]).strip())] = (str(r[2]).strip(), (str(r[3]).strip() if r[3] is not None else None))
+                vision_by_key[(str(r[0]).strip(), str(r[1]).strip())] = (
+                    str(r[2]).strip(),
+                    (str(r[3]).strip() if r[3] is not None else None),
+                    (str(r[4]).strip() if r[4] is not None else None)
+                )
 
         # Group pieces by (pedido,posicion,material,is_test)
         # Use the raw lote string for uniqueness so alphanumeric lotes don't collide
@@ -2570,12 +2643,12 @@ class Repository:
         # Keep correlativos as min/max only (not used for planning UI at this stage).
         order_rows: list[tuple] = []
         for (pedido, posicion, material, is_test), lotes in pieces.items():
-            fecha_pedido_iso, _ = vision_by_key[(pedido, posicion)]
+            fecha_pedido_iso, _, cliente = vision_by_key[(pedido, posicion)]
             cantidad = int(len(lotes))
             lote_ints = [self._lote_to_int(ls) for ls in lotes]
             corr_inicio = int(min(lote_ints))
             corr_fin = int(max(lote_ints))
-            order_rows.append((pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, None, int(is_test)))
+            order_rows.append((pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, None, int(is_test), cliente))
 
         # Deterministic order
         order_rows.sort(key=lambda t: (t[4], t[0], t[1], -int(t[8] or 0), t[2]))
@@ -2584,8 +2657,8 @@ class Repository:
             con.execute("DELETE FROM orders WHERE process = ?", (process,))
             con.executemany(
                 """
-                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [(process, almacen, *row) for row in order_rows],
             )
@@ -2610,23 +2683,23 @@ class Repository:
             def_prio = prio_vals.get("normal", 3)
 
             for row in order_rows:
-                # row: (pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, tpm, is_test)
-                # Note: row[8] is is_test
+                # row: (pedido, posicion, material, cantidad, fecha_pedido_iso, corr_inicio, corr_fin, tpm, is_test, cliente)
+                # Note: row[8] is is_test, row[9] is cliente
                 key = (row[0], row[1], int(row[8]))
                 
                 if key in existing_map:
                     jid = existing_map[key]
                     seen_existing_ids.add(jid)
                     con.execute(
-                        "UPDATE job SET qty_total=?, qty_remaining=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
-                        (int(row[3]), int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), jid)
+                        "UPDATE job SET qty_total=?, qty_remaining=?, material=?, fecha_entrega=?, corr_min=?, corr_max=?, cliente=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                        (int(row[3]), int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None, jid)
                     )
                 else:
                     new_jid = str(uuid4())
                     con.execute(
-                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test, state, fecha_entrega, corr_min, corr_max) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
-                        (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[3]), def_prio, int(row[8]), str(row[4]), int(row[5]), int(row[6]))
+                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty_total, qty_remaining, priority, is_test, state, fecha_entrega, corr_min, corr_max, cliente) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                        (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[3]), def_prio, int(row[8]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None)
                     )
 
             # Delete jobs not in current MB52 snapshot
@@ -2669,11 +2742,11 @@ class Repository:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test FROM orders WHERE process = ?",
+                "SELECT pedido, posicion, material, cantidad, fecha_entrega, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente FROM orders WHERE process = ?",
                 (process,),
             ).fetchall()
         out: list[Order] = []
-        for pedido, posicion, material, cantidad, fecha_entrega, primer, ultimo, tpm, is_test in rows:
+        for pedido, posicion, material, cantidad, fecha_entrega, primer, ultimo, tpm, is_test, cliente in rows:
             out.append(
                 Order(
                     pedido=str(pedido),
@@ -2685,6 +2758,7 @@ class Repository:
                     ultimo_correlativo=int(ultimo),
                     tiempo_proceso_min=float(tpm) if tpm is not None else None,
                     is_test=bool(int(is_test or 0)),
+                    cliente=str(cliente) if cliente else None,
                 )
             )
         return out
@@ -2693,7 +2767,7 @@ class Repository:
         process = self._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT job_id, pedido, posicion, material, qty_total, priority, fecha_entrega, is_test, notes, corr_min, corr_max FROM job WHERE process_id = ?",
+                "SELECT job_id, pedido, posicion, material, qty_total, priority, fecha_entrega, is_test, notes, corr_min, corr_max, cliente FROM job WHERE process_id = ?",
                 (process,),
             ).fetchall()
         
@@ -2711,7 +2785,8 @@ class Repository:
                     is_test=bool(r["is_test"]),
                     notes=r["notes"],
                     corr_min=r["corr_min"],
-                    corr_max=r["corr_max"]
+                    corr_max=r["corr_max"],
+                    cliente=r["cliente"]
                 )
             )
         return out
@@ -2799,6 +2874,33 @@ class Repository:
             for r in rows
         ]
 
+    def _refresh_program_with_locks(self, process: str) -> None:
+        """Update last_program in-place with current locks, avoiding full regen."""
+        last = self.load_last_program(process=process)
+
+        if last is None:
+            # No cache to update; delete to ensure next load generates fresh
+            with self.db.connect() as con:
+                con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+            return
+
+        program = last["program"]
+        errors = last.get("errors") or []
+        
+        # Re-apply locks. This respects the current DB state of locks (added/removed/moved).
+        # It removes locked items from their old positions and inserts them intotheir new locked positions.
+        new_prog, new_errors = self._apply_in_progress_locks(process=process, program=program, errors=errors)
+        
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = json.dumps({"program": new_prog, "errors": new_errors})
+        
+        with self.db.connect() as con:
+            con.execute(
+                "INSERT INTO last_program(process, program_json, generated_on) VALUES(?, ?, ?) "
+                "ON CONFLICT(process) DO UPDATE SET program_json=excluded.program_json, generated_on=excluded.generated_on",
+                (process, payload, now)
+            )
+
     def mark_in_progress(
         self,
         *,
@@ -2815,6 +2917,7 @@ class Repository:
         if not pedido_s or not posicion_s:
             raise ValueError("Pedido/posición inválidos")
         marked_at = datetime.now().isoformat(timespec="seconds")
+        
         with self.db.connect() as con:
             # Split-aware default: create/update split_id=1 with qty=0 (auto).
             try:
@@ -2832,6 +2935,15 @@ class Repository:
                     "line_id=excluded.line_id, marked_at=program_in_progress.marked_at",
                     (process, pedido_s, posicion_s, is_test_i, int(line_id), marked_at),
                 )
+            
+        self.log_audit(
+            "PROGRAM_UPDATE",
+            "Mark In-Progress",
+            f"Pedido {pedido_s}/{posicion_s} -> Line {line_id} (Test: {is_test_i})"
+        )
+
+        # Update cache in-place (fast) instead of invalidating (slow)
+        self._refresh_program_with_locks(process=process)
 
     def unmark_in_progress(
         self,
@@ -2863,6 +2975,15 @@ class Repository:
                 )
             except Exception:
                 pass
+            
+        self.log_audit(
+            "PROGRAM_UPDATE",
+            "Unmark In-Progress",
+            f"Pedido {pedido_s}/{posicion_s} (Test: {is_test_i})"
+        )
+
+        # Update cache in-place (fast) instead of invalidating (slow)
+        self._refresh_program_with_locks(process=process)
 
     def move_in_progress(
         self,
@@ -2889,6 +3010,9 @@ class Repository:
         if allow != "1":
             raise ValueError("Movimiento manual deshabilitado por configuración (ui_allow_move_in_progress_line)")
 
+        audit_target = None
+        audit_details = None
+
         with self.db.connect() as con:
             try:
                 if split_id is None:
@@ -2901,13 +3025,25 @@ class Repository:
                         "UPDATE program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
                         (int(line_id), process, pedido_s, posicion_s, is_test_i, int(split_id)),
                     )
-                return
+                
+                audit_target = "Move Line"
+                audit_details = f"Pedido {pedido_s}/{posicion_s} -> Line {line_id} (Split: {split_id or 'ALL'})"
+                
             except Exception:
                 # Backward-compatible fallback.
                 con.execute(
                     "UPDATE program_in_progress SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                     (int(line_id), process, pedido_s, posicion_s, is_test_i),
                 )
+                
+                audit_target = "Move Line (Legacy)"
+                audit_details = f"Pedido {pedido_s}/{posicion_s} -> Line {line_id}"
+        
+        if audit_target:
+            self.log_audit("PROGRAM_UPDATE", audit_target, audit_details)
+
+        # Outside transaction
+        self._refresh_program_with_locks(process=process)
 
     def create_balanced_split(
         self,
@@ -2986,6 +3122,15 @@ class Repository:
             except Exception:
                 # If split table isn't available, we cannot support splits.
                 raise
+        
+        self.log_audit(
+            "PROGRAM_UPDATE",
+            "Split Created",
+            f"Pedido {pedido_s}/{posicion_s} -> Sizes {qty1}, {qty2}"
+        )
+        
+        # Outside transaction
+        self._refresh_program_with_locks(process=process)
 
     def _apply_in_progress_locks(
         self,
@@ -3012,7 +3157,8 @@ class Repository:
         template_by_key: dict[tuple[str, str, int], dict] = {}
         for items in out.values():
             for r in items:
-                r.setdefault("in_progress", 0)
+                # Reset visual flag; it will be re-set to 1 if the item matches a current lock.
+                r["in_progress"] = 0
                 key = self._row_key_from_program_row(r)
                 if key is not None and key not in template_by_key:
                     template_by_key[key] = dict(r)
@@ -3194,6 +3340,15 @@ class Repository:
                 "ON CONFLICT(process) DO UPDATE SET generated_on=excluded.generated_on, program_json=excluded.program_json",
                 (process, generated_on, payload),
             )
+        
+        # Audit log
+        total_items = sum(len(lines) for lines in merged_program.values())
+        err_items = len(merged_errors or [])
+        self.log_audit(
+            "PROGRAM_GEN",
+            "Program Saved",
+            f"Process: {process}, Scheduled: {total_items}, Errors: {err_items}"
+        )
 
     def load_last_program(self, *, process: str = "terminaciones") -> dict | None:
         process = self._normalize_process(process)

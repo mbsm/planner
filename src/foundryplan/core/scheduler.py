@@ -159,7 +159,7 @@ def generate_dispatch_program(
             "pedido": job.pedido,
             "posicion": job.posicion,
             "material": job.material,
-            "numero_parte": job.material, # Legacy alias for UI
+            "numero_parte": job.material[-5:] if len(job.material) >= 5 else job.material, # Truncated for UI
             "cantidad": job.qty_total,
             "corr_inicio": job.corr_min, # Legacy alias for UI
             "corr_fin": job.corr_max, # Legacy alias for UI
@@ -170,6 +170,7 @@ def generate_dispatch_program(
             "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
             "start_by": start_date.isoformat(),
             "notes": job.notes,
+            "cliente": job.cliente,
             # Constraints info only for debug?
             "family_id": part.family_id,
             "familia": part.family_id # Legacy alias for UI

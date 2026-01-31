@@ -11,18 +11,32 @@ from foundryplan.settings import Settings, default_db_path
 from foundryplan.data.db import Db
 from foundryplan.data.repository import Repository
 from foundryplan.ui.pages import register_pages
+from foundryplan.logging_conf import configure_logging
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Planta Rancagua")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    settings = Settings(db_path=default_db_path(), host=args.host, port=args.port)
+    configure_logging(args.log_level)
+
+    settings = Settings(
+        db_path=default_db_path(),
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+    )
 
     db = Db(settings.db_path)
     db.ensure_schema()
@@ -48,7 +62,7 @@ def main() -> None:
 
             loop.set_exception_handler(_handler)
 
-        ui.run(host=settings.host, port=settings.port, title=planta, reload=False)
+    ui.run(host=settings.host, port=settings.port, title=planta, reload=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

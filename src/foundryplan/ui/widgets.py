@@ -144,6 +144,11 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             if active_key == "config_materiales"
                             else "Maestro materiales"
                         )
+                        label_audit = (
+                            "✓ Auditoría"
+                            if active_key == "audit"
+                            else "Auditoría"
+                        )
                         # label_pedidos = (
                         #     "✓ Pedidos"
                         #     if active_key == "config_pedidos"
@@ -153,6 +158,8 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
+                        ui.separator()
+                        ui.menu_item(label_audit, on_click=lambda: ui.navigate.to("/audit"))
                         # ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))
 
 
@@ -189,7 +196,7 @@ def render_line_tables(
                 line_label = f"Línea {display_id}"
                 if line_names and lookup_id in line_names and str(line_names[lookup_id]).strip():
                     line_label = str(line_names[lookup_id]).strip()
-                ui.label(line_label).classes("text-xl font-semibold")
+
                 families: list[str] = []
                 if line_families and lookup_id in line_families:
                     families = [f for f in line_families[lookup_id] if f]
@@ -202,14 +209,30 @@ def render_line_tables(
                         }
                     )
 
-                if families:
-                    ui.label(", ".join(families)).classes("text-sm text-slate-600")
+                rows = list(items)
+
+                total_units = 0
+                for r in rows:
+                    try:
+                        total_units += int(r.get("cantidad") or 0)
+                    except Exception:
+                        continue
+                
+                # --- Header ---
+                with ui.row().classes("w-full items-center justify-between pb-2 border-b border-slate-100"):
+                    with ui.column().classes("gap-0"):
+                         ui.label(line_label).classes("text-lg font-bold text-slate-800")
+                         if families:
+                             ui.label(", ".join(families)).classes("text-xs text-slate-500 font-medium")
+                    
+                    with ui.chip().props("dense square outline color=primary"):
+                        ui.label(f"{total_units} pza").classes("text-xs font-bold")
 
                 if not items:
-                    ui.label("(sin tareas)").classes("text-gray-500")
+                    with ui.column().classes("w-full h-32 items-center justify-center text-slate-400 gap-2"):
+                        ui.icon("block", size="sm")
+                        ui.label("Sin tareas asignadas").classes("text-sm")
                     continue
-
-                rows = list(items)
 
                 def _format_lotes_range(row: dict) -> str:
                     a = row.get("corr_inicio")
@@ -228,8 +251,21 @@ def render_line_tables(
                         bi_s = bi_s[1:]
                     return ai_s if ai_s == bi_s else f"{ai_s}-{bi_s}"
 
+                def _format_date(date_str: str) -> str:
+                    s = str(date_str or "").strip()
+                    # Try YYYY-MM-DD
+                    if len(s) >= 10 and "-" in s:
+                        try:
+                            parts = s.split("T")[0].split("-")  # Handle 2023-01-01T00:00:00
+                            if len(parts) == 3:
+                                return f"{parts[2]}/{parts[1]}"
+                        except Exception:
+                            pass
+                    return s
+
                 for r in rows:
                     r["lotes_rango"] = _format_lotes_range(r)
+                    r["fecha_entrega_fmt"] = _format_date(r.get("fecha_entrega"))
                     r.setdefault("in_progress", 0)
                     r.setdefault("_pt_line_id", int(line_id_for_table))
                     # Keep a stable field for UI logic; scheduler encodes tests via prio_kind.
@@ -238,27 +274,29 @@ def render_line_tables(
 
                 tbl = ui.table(
                     columns=[
-                        {"name": "prio_kind", "label": "", "field": "prio_kind"},
-                        {"name": "pedido", "label": "Pedido", "field": "pedido"},
-                        {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                        {"name": "lotes_rango", "label": "Lotes", "field": "lotes_rango"},
-                        {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
-                        {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
-                        {"name": "familia", "label": "Familia", "field": "familia"},
-                        {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
+                        {"name": "prio_kind", "label": "", "field": "prio_kind", "align": "center"},
+                        {"name": "cliente", "label": "Cliente", "field": "cliente", "align": "left"},
+                        {"name": "pedido", "label": "Pedido", "field": "pedido", "align": "left"},
+                        {"name": "posicion", "label": "Pos", "field": "posicion", "align": "left"},
+                        {"name": "lotes_rango", "label": "Lotes", "field": "lotes_rango", "align": "left"},
+                        {"name": "numero_parte", "label": "Parte", "field": "numero_parte", "align": "left"},
+                        {"name": "cantidad", "label": "Cant.", "field": "cantidad", "align": "right"},
+                        {"name": "familia", "label": "Familia", "field": "familia", "align": "left"},
+                        {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega_fmt", "align": "left"},
                     ],
                     rows=rows,
                     row_key="_row_id",
-                ).classes("w-full pt-program-table").props("dense flat bordered separator=cell wrap-cells")
+                ).classes("w-full pt-program-table").props("dense flat vertical-separator wrap-cells")
 
                 # Use body-cell slots (like Maestro de materiales) to keep NiceGUI/Quasar row events.
-                # We color every cell of the row when in_progress=1 for a dark-green highlight.
+                # Highlight in-progress rows with a light blue background.
                 tbl.add_slot(
                     "body-cell",
                     r"""
 <q-td
         :props="props"
-        :style="Number(props.row.in_progress) === 1 ? 'background-color: rgb(0, 120, 190); color: white;' : ''"
+        :style="Number(props.row.in_progress) === 1 ? 'background-color: #eff6ff;' : ''"
+        :class="Number(props.row.in_progress) === 1 ? 'text-blue-900 font-medium' : ''"
 >
     {{ props.value }}
 </q-td>
@@ -269,29 +307,18 @@ def render_line_tables(
                     r"""
 <q-td
         :props="props"
-        :style="Number(props.row.in_progress) === 1 ? 'background-color: rgb(0, 120, 190); color: white;' : ''"
+        :style="Number(props.row.in_progress) === 1 ? 'background-color: #eff6ff;' : ''"
 >
-    <q-icon v-if="props.value === 'test'" name="science" color="warning" size="18px">
+    <q-icon v-if="props.value === 'test'" name="science" class="text-amber-500" size="xs">
         <q-tooltip>Prueba (lote con letras)</q-tooltip>
     </q-icon>
-    <q-icon v-else-if="props.value === 'priority'" name="priority_high" color="negative" size="18px">
+    <q-icon v-else-if="props.value === 'priority'" name="priority_high" class="text-red-500" size="xs">
         <q-tooltip>Prioridad</q-tooltip>
     </q-icon>
-    <q-icon v-else name="remove" color="grey-6" size="18px">
-        <q-tooltip>Normal</q-tooltip>
-    </q-icon>
+    <div v-else class="w-4"></div>
 </q-td>
 """,
                 )
-
-                total_units = 0
-                for r in rows:
-                    try:
-                        total_units += int(r.get("cantidad") or 0)
-                    except Exception:
-                        continue
-                with ui.row().classes("w-full justify-end mt-2"):
-                    ui.label(f"Total unidades: {total_units:,}").classes("text-sm text-slate-600 font-semibold")
 
                 if repo is not None:
                     if int(line_id_for_table or 0) <= 0:
@@ -334,6 +361,10 @@ def render_line_tables(
                     btn_move = None
                     btn_split = None
 
+                    # Containers for conditional sections
+                    move_section = None
+                    split_section = None
+
                     with dialog:
                         with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 560px"):
                             title_lbl = ui.label("").classes("text-xl font-semibold")
@@ -341,32 +372,35 @@ def render_line_tables(
 
                             # Collapsible section: move (optional)
                             if allow_move_line:
-                                with ui.expansion("Mover a línea").props("dense").classes("w-full"):
-                                    line_select = ui.select(
-                                        options=_program_line_options(),
-                                        label="Línea destino",
-                                        value=int(line_id_for_table),
-                                    ).props("outlined dense")
-                                    with ui.row().classes("justify-end gap-2"):
-                                        btn_move = ui.button("Mover", icon="swap_horiz").props("unelevated color=secondary")
+                                move_section = ui.column().classes("w-full p-0 m-0")
+                                with move_section:
+                                    with ui.expansion("Mover a línea").props("dense").classes("w-full"):
+                                        line_select = ui.select(
+                                            options=_program_line_options(),
+                                            label="Línea destino",
+                                            value=int(line_id_for_table),
+                                        ).props("outlined dense")
+                                        with ui.row().classes("justify-end gap-2"):
+                                            btn_move = ui.button("Mover", icon="swap_horiz").props("unelevated color=secondary")
 
                             # Collapsible section: split
-                            with ui.expansion("Dividir (split)").props("dense").classes("w-full"):
-                                ui.label("Crea 2 partes y reparte correlativos en forma balanceada.").classes(
-                                    "text-xs text-slate-600"
-                                )
-                                with ui.row().classes("justify-end gap-2"):
-                                    btn_split = ui.button("Crear split balanceado", icon="call_split").props(
-                                        "unelevated"
+                            split_section = ui.column().classes("w-full p-0 m-0")
+                            with split_section:
+                                with ui.expansion("Dividir (split)").props("dense").classes("w-full"):
+                                    ui.label("Crea 2 partes y reparte correlativos en forma balanceada.").classes(
+                                        "text-xs text-slate-600"
                                     )
-                                    btn_split.style("background-color: rgb(0, 120, 190); color: white;")
+                                    with ui.row().classes("justify-end gap-2"):
+                                        btn_split = ui.button("Crear split balanceado", icon="call_split").props(
+                                            "unelevated"
+                                        ).classes("bg-sky-700 text-white")
 
                             ui.separator()
                             with ui.row().classes("justify-end gap-2"):
+
                                 ui.button("Cancelar", on_click=dialog.close).props("flat")
                                 btn_unmark = ui.button("Quitar en proceso").props("unelevated color=grey-7")
-                                btn_mark = ui.button("Marcar en proceso").props("unelevated")
-                                btn_mark.style("background-color: rgb(0, 120, 190); color: white;")
+                                btn_mark = ui.button("Marcar en proceso").props("unelevated").classes("bg-sky-700 text-white")
 
                     def _pick_row(args) -> dict | None:
                         def _walk(obj):
@@ -438,10 +472,17 @@ def render_line_tables(
                             btn_mark.visible = not in_prog
                         if btn_unmark is not None:
                             btn_unmark.visible = in_prog
-                        if btn_move is not None:
+                        
+                        # Section visibility depends on in_prog state
+                        if move_section is not None:
+                            move_section.visible = in_prog
+                        elif btn_move is not None:
+                             # Fallback if section variable not used (should not happen with new code)
                             btn_move.visible = in_prog
-                        if btn_split is not None:
-                            # Split only makes sense for in-progress rows.
+                            
+                        if split_section is not None:
+                            split_section.visible = in_prog
+                        elif btn_split is not None:
                             btn_split.visible = in_prog
 
                     def _do_mark_unmark(*, mark: bool, line_id: int = line_id_for_table) -> None:
