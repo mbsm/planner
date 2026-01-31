@@ -1919,9 +1919,9 @@ class Repository:
                     COALESCE(descripcion_material, '') AS descripcion_material,
                     COALESCE(fecha_entrega, '') AS fecha_entrega,
                     solicitado,
-                    x_programar, programado, por_fundir, desmoldeo, tt, terminaciones,
+                    x_programar, programado, x_fundir, desmoldeo, tt, terminacion,
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
-                    en_vulcanizado, pend_vulcanizado, rech_insp_externa, lib_vulcanizado_de,
+                    en_vulcaniz, pend_vulcanizado, rech_insp_externa, lib_vulcaniz_de,
                     bodega, despachado, rechazo
                 FROM sap_vision_snapshot
                 WHERE pedido = ? AND posicion = ?
@@ -1945,15 +1945,15 @@ class Repository:
                 return None
 
         # Sumar Lib. Vulcanizado (DE) a En Vulcanizado
-        en_vulcanizado_total = (_opt_int(row["en_vulcanizado"]) or 0) + (_opt_int(row["lib_vulcanizado_de"]) or 0) if "en_vulcanizado" in row.keys() and "lib_vulcanizado_de" in row.keys() else (_opt_int(row.get("en_vulcanizado")) if "en_vulcanizado" in row.keys() else None)
+        en_vulcanizado_total = (_opt_int(row["en_vulcaniz"]) or 0) + (_opt_int(row["lib_vulcaniz_de"]) or 0) if "en_vulcaniz" in row.keys() and "lib_vulcaniz_de" in row.keys() else (_opt_int(row.get("en_vulcaniz")) if "en_vulcaniz" in row.keys() else None)
 
         stages = [
             ("x_programar", "Por programar en la planta"),
             ("programado", "Por Moldear"),
-            ("por_fundir", "Por Fundir"),
+            ("x_fundir", "Por Fundir"),
             ("desmoldeo", "En enfriamiento"),
             ("tt", "En Tratamientos Térmicos"),
-            ("terminaciones", "En Terminaciones"),
+            ("terminacion", "En Terminaciones"),
             ("pend_vulcanizado", "Por Vulcanizar"),
             ("en_vulcanizado_computed", "En Vulcanizado"),
             ("insp_externa", "Insp. Externa"),
