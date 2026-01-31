@@ -238,7 +238,7 @@ def test_update_jobs_from_vision(temp_db):
     # First import MB52
     mb52_rows = [
         {
-            "material": "43633021531",
+            "material": "40233021531",
             "centro": "4000",
             "almacen": "4035",
             "lote": "001-001",
@@ -248,7 +248,7 @@ def test_update_jobs_from_vision(temp_db):
             "en_control_calidad": 0,
         },
         {
-            "material": "43633021531",
+            "material": "40233021531",
             "centro": "4000",
             "almacen": "4035",
             "lote": "001-002",
@@ -275,7 +275,7 @@ def test_update_jobs_from_vision(temp_db):
     vision_ws.append([
         "1010044531",  # Pedido
         "10",  # Pos
-        "43633021531",  # Cod Material
+        "40233021531",  # Cod Material
         "TEST PART",  # Descripción
         "2026-02-15",  # Fecha de pedido
         "2026-03-01",  # Fecha Entrega
