@@ -101,6 +101,11 @@ Este documento detalla el schema de base de datos (tablas SQLite), mapeo desde f
 1. **Encabezados**: Se normalizan variantes comunes (ej: `pos` → `posicion`, `fecha_pedido` → `fecha_de_pedido`).
 2. **Columnas alias por campo de progreso**: Se buscan aliases conocidas (ej: `x_fundir`, `porfundir`, `fundir` → `x_fundir`).
 3. **Conversión**: Pesos se normalizan a tons (kg → tons); fechas se parsean desde Excel.
+4. **Filtros de importación**:
+   - Material: Solo familias 402/403/404 (código debe empezar con estos prefijos)
+   - Fecha de pedido: Solo pedidos con `fecha_de_pedido > 2023-12-31`
+   - Status comercial: Solo registros con `status_comercial = "Activo"` (o NULL/vacío)
+   - Tipo posición: Todos los tipos se importan (incluyendo ZTLH)
 
 **Importante - Todas las cantidades en piezas**:
 - **TODOS los campos de avance/progreso** (`solicitado`, `x_programar`, `programado`, `desmoldeo`, `tt`, `terminacion`, `bodega`, `despachado`, **`x_fundir`**) están en **unidades (piezas)**.

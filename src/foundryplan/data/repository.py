@@ -2101,15 +2101,13 @@ class Repository:
             if not fecha_de_pedido or fecha_de_pedido <= "2023-12-31":
                 continue
 
-            # Filter: Tipo posicion != ZTLH
-            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
-            if tipo_posicion == "ZTLH":
-                continue
-
             # Filter: Status comercial (Active only)
             status_comercial = str(r.get("status_comercial", "") or "").strip() or None
             if status_comercial and status_comercial != "Activo":
                 continue
+
+            # Store tipo_posicion for reference (no filter)
+            tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
 
             desc = str(r.get("descripcion_material", "")).strip() or None
             fecha_entrega = None

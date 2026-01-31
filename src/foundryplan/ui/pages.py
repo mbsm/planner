@@ -162,12 +162,12 @@ def register_pages(repo: Repository) -> None:
             for r in overdue:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
                 # Show only last 5 digits of plano
-                plano = str(r.get("numero_parte") or "")
+                plano = str(r.get("material") or "")
                 r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
             for r in due_soon:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
                 # Show only last 5 digits of plano
-                plano = str(r.get("numero_parte") or "")
+                plano = str(r.get("material") or "")
                 r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
 
             with ui.row().classes("w-full gap-4 items-stretch"):
@@ -781,146 +781,6 @@ def register_pages(repo: Repository) -> None:
                     else:
                         ui.label("No hay pedidos dentro de las próximas 6 semanas.").classes("text-slate-600")
 
-    @ui.page("/avance")
-    def avance() -> None:
-        render_nav(active="avance", repo=repo)
-        with page_container():
-            ui.label("Avance (MB52)").classes("text-2xl font-semibold")
-            ui.label(
-                "Reporte de salidas (brutas) desde MB52 vs la carga anterior, mapeadas al último programa de Terminaciones."
-            ).classes("pt-subtitle")
-            ui.separator()
-
-            rep = repo.load_mb52_progress_last(process="terminaciones")
-            if rep is None:
-                ui.label("Aún no hay reporte. Sube MB52 (modo replace) para generarlo.").classes("text-slate-600")
-                return
-
-            gen = str(rep.get("generated_on") or "").strip()
-            base = str(rep.get("program_generated_on") or "").strip()
-            prev_n = int(rep.get("mb52_prev_count") or 0)
-            curr_n = int(rep.get("mb52_curr_count") or 0)
-            if gen:
-                ui.label(f"Última actualización avance: {gen}").classes("text-slate-600")
-            if base:
-                ui.label(f"Programa base: {base}").classes("text-slate-600")
-            ui.label(f"MB52 usable (prev/curr): {prev_n} / {curr_n}").classes("text-slate-600")
-            ui.separator()
-
-            lines = rep.get("lines") or {}
-
-            def _format_lotes_range(row: dict) -> str:
-                a = row.get("corr_inicio")
-                b = row.get("corr_fin")
-                try:
-                    ai = int(a)
-                    bi = int(b)
-                except Exception:
-                    return ""
-                ai_s = str(ai % 10000).zfill(4)
-                bi_s = str(bi % 10000).zfill(4)
-                if ai_s.startswith("0"):
-                    ai_s = ai_s[1:]
-                if bi_s.startswith("0"):
-                    bi_s = bi_s[1:]
-                return ai_s if ai_s == bi_s else f"{ai_s}-{bi_s}"
-
-            # Render by line, like the program.
-            with ui.element("div").classes("w-full grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-4 items-stretch"):
-                for raw_line_id, items in sorted(lines.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 10**9):
-                    try:
-                        line_id = int(raw_line_id)
-                    except Exception:
-                        continue
-                    rows = list(items or [])
-                    for r in rows:
-                        r["lotes_rango"] = _format_lotes_range(r)
-
-                    with ui.card().classes("w-full h-full flex flex-col"):
-                        ui.label(f"Línea {line_id}").classes("text-xl font-semibold")
-                        if not rows:
-                            ui.label("(sin salidas)").classes("text-gray-500")
-                            continue
-                        ui.table(
-                            columns=[
-                                {"name": "prio_kind", "label": "", "field": "prio_kind"},
-                                {"name": "pedido", "label": "Pedido", "field": "pedido"},
-                                {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                                {"name": "lotes_rango", "label": "Lotes", "field": "lotes_rango"},
-                                {"name": "numero_parte", "label": "Parte", "field": "numero_parte"},
-                                {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
-                                {"name": "salio", "label": "Salió", "field": "salio"},
-                                {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
-                            ],
-                            rows=rows,
-                            row_key="_row_id",
-                        ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
-
-            unplanned = list(rep.get("unplanned") or [])
-            if unplanned:
-                ui.separator()
-                ui.label("Salidas no programadas").classes("text-xl font-semibold")
-                ui.label(
-                    "Salidas MB52 que no calzan con ningún rango del programa (por pedido/posición)."
-                ).classes("text-slate-600")
-                ui.table(
-                    columns=[
-                        {"name": "pedido", "label": "Pedido", "field": "pedido"},
-                        {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                        {"name": "salio", "label": "Salió", "field": "salio"},
-                    ],
-                    rows=unplanned,
-                    row_key="_row_id",
-                ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
-
-    @ui.page("/avance_vision")
-    def avance_vision() -> None:
-        render_nav(active="avance", repo=repo)
-        with page_container():
-            ui.label("Salidas Visión Planta").classes("text-2xl font-semibold")
-            ui.label(
-                "Pedidos que salieron de Visión Planta desde la última actualización (despachados o eliminados)."
-            ).classes("pt-subtitle")
-            ui.separator()
-
-            rep = repo.load_vision_progress_last()
-            if rep is None:
-                ui.label("Aún no hay reporte. Sube Visión Planta para generarlo.").classes("text-slate-600")
-                return
-
-            gen = str(rep.get("generated_on") or "").strip()
-            exited_count = int(rep.get("exited_count") or 0)
-            
-            if gen:
-                ui.label(f"Última actualización: {gen}").classes("text-slate-600")
-            ui.label(f"Pedidos que salieron: {exited_count}").classes("text-slate-600")
-            ui.separator()
-
-            exited_orders = list(rep.get("exited_orders") or [])
-            if not exited_orders:
-                ui.label("No hay pedidos que hayan salido desde la última actualización.").classes("text-slate-600")
-                return
-
-            # Add row IDs for table
-            for i, row in enumerate(exited_orders):
-                row["_row_id"] = f"{row['pedido']}|{row['posicion']}|{i}"
-
-            ui.table(
-                columns=[
-                    {"name": "pedido", "label": "Pedido", "field": "pedido"},
-                    {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                    {"name": "cliente", "label": "Cliente", "field": "cliente"},
-                    {"name": "cod_material", "label": "Material", "field": "cod_material"},
-                    {"name": "descripcion_material", "label": "Descripción", "field": "descripcion_material"},
-                    {"name": "solicitado", "label": "Solicitado", "field": "solicitado"},
-                    {"name": "despachado", "label": "Despachado", "field": "despachado"},
-                    {"name": "bodega", "label": "Bodega", "field": "bodega"},
-                    {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
-                ],
-                rows=exited_orders,
-                row_key="_row_id",
-            ).classes("w-full").props("dense flat bordered separator=cell wrap-cells")
-
     @ui.page("/config")
     def config_lines() -> None:
         render_nav(active="config_lineas", repo=repo)
@@ -1205,10 +1065,19 @@ def register_pages(repo: Repository) -> None:
                             repo.import_excel_bytes(kind=kind, content=content)
                         filename = getattr(e.file, "name", None) or getattr(e.file, "filename", None)
                         extra = f" ({filename})" if filename else ""
+
                         if kind in {"mb52", "sap_mb52"}:
                             ui.notify(f"Importado: MB52{extra} (filas: {repo.count_sap_mb52()})")
+                        elif kind in {"vision", "vision_planta", "sap_vision"}:
+                            ui.notify(f"Importado: Visión Planta{extra} (filas: {repo.count_sap_vision()})")
+                        else:
+                            ui.notify(f"Importado: {kind}{extra}")
 
+                        # Check for missing master data (MB52 or Visión)
+                        if kind in {"mb52", "sap_mb52", "vision", "vision_planta", "sap_vision"}:
                             missing_by_material: dict[str, dict] = {}
+                            
+                            # Check MB52 missing parts
                             for proc in repo.processes.keys():
                                 for it in repo.get_missing_parts_from_mb52_for(process=proc):
                                     material = str(it.get("material", "")).strip()
@@ -1223,11 +1092,57 @@ def register_pages(repo: Repository) -> None:
                                         },
                                     )
                                     rec["processes"].add(proc)
+                                    # Populate existing master data if available
+                                    for key in [
+                                        "family_id",
+                                        "vulcanizado_dias",
+                                        "mecanizado_dias",
+                                        "inspeccion_externa_dias",
+                                        "mec_perf_inclinada",
+                                        "sobre_medida_mecanizado",
+                                        "aleacion",
+                                        "piezas_por_molde",
+                                        "peso_bruto_ton",
+                                        "tiempo_enfriamiento_molde_dias",
+                                    ]:
+                                        if key not in rec:
+                                            rec[key] = it.get(key)
+                            
+                            # Check Visión missing parts
+                            for it in repo.get_missing_parts_from_vision_for():
+                                material = str(it.get("material", "")).strip()
+                                if not material:
+                                    continue
+                                rec = missing_by_material.setdefault(
+                                    material,
+                                    {
+                                        "material": material,
+                                        "texto_breve": str(it.get("texto_breve", "") or "").strip(),
+                                        "processes": set(),
+                                    },
+                                )
+                                rec["processes"].add("Visión")
+                                # Populate existing master data if available
+                                for key in [
+                                    "family_id",
+                                    "vulcanizado_dias",
+                                    "mecanizado_dias",
+                                    "inspeccion_externa_dias",
+                                    "mec_perf_inclinada",
+                                    "sobre_medida_mecanizado",
+                                    "aleacion",
+                                    "piezas_por_molde",
+                                    "peso_bruto_ton",
+                                    "tiempo_enfriamiento_molde_dias",
+                                ]:
+                                    if key not in rec:
+                                        rec[key] = it.get(key)
 
                             missing_master = [missing_by_material[k] for k in sorted(missing_by_material.keys())]
                             if missing_master:
                                 families = repo.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
-                                dialog = ui.dialog().props("persistent")
+                                # persistent: prevents closing on backdrop click or ESC
+                                dialog = ui.dialog().props("persistent backdrop-filter='blur(4px)'")
                                 entries: dict[str, dict] = {}
                                 with dialog:
                                     with ui.card().classes("w-[min(1100px,95vw)]"):
@@ -1253,13 +1168,41 @@ def register_pages(repo: Repository) -> None:
                                                         if procs:
                                                             ui.label(", ".join(procs)).classes("text-xs text-slate-500")
 
-                                                    fam = ui.select(families, value="Otros", label="Familia").classes("w-56")
-                                                    v = ui.number("Vulc (d)", value=0, min=0, max=365, step=1).classes("w-28")
-                                                    m = ui.number("Mec (d)", value=0, min=0, max=365, step=1).classes("w-28")
-                                                    i = ui.number("Insp ext (d)", value=0, min=0, max=365, step=1).classes("w-32")
-                                                    mpi = ui.checkbox("Mec perf incl.", value=False).props("dense")
-                                                    sm = ui.checkbox("Sobre medida", value=False).props("dense")
-                                                    entries[material] = {"fam": fam, "v": v, "m": m, "i": i, "mpi": mpi, "sm": sm}
+                                                    fam_val = str(it.get("family_id") or "Otros") if it.get("family_id") else "Otros"
+                                                    v_val = int(it.get("vulcanizado_dias") or 0)
+                                                    m_val = int(it.get("mecanizado_dias") or 0)
+                                                    i_val = int(it.get("inspeccion_externa_dias") or 0)
+                                                    mpi_val = bool(int(it.get("mec_perf_inclinada") or 0))
+                                                    sm_val = bool(int(it.get("sobre_medida_mecanizado") or 0))
+                                                    aleacion_val = str(it.get("aleacion") or "")
+                                                    ppm_val = float(it.get("piezas_por_molde") or 0.0)
+                                                    pb_val = float(it.get("peso_bruto_ton") or 0.0)
+                                                    tenfr_val = int(it.get("tiempo_enfriamiento_molde_dias") or 0)
+
+                                                    # Layout:
+                                                    # Row 1: Familia, Aleacion, Piezas/Molde, Peso Bruto, Enfriamiento
+                                                    # Row 2: Vulc, Mec, Insp, Checkboxes
+                                                    with ui.column().classes("w-full gap-1"):
+                                                        with ui.row().classes("items-end w-full gap-3"):
+                                                            fam = ui.select(families, value=fam_val, label="Familia").classes("w-40")
+                                                            ale = ui.input("Aleación", value=aleacion_val).classes("w-28")
+                                                            ppm = ui.number("Pza/Molde", value=ppm_val, min=0, step=0.1).classes("w-24")
+                                                            pb = ui.number("P. Bruto (t)", value=pb_val, min=0, step=0.001).classes("w-24")
+                                                            tenfr = ui.number("Enfr (d)", value=tenfr_val, min=0, step=1).classes("w-20")
+
+                                                        with ui.row().classes("items-end w-full gap-3"):
+                                                            v = ui.number("Vulc (d)", value=v_val, min=0, max=365, step=1).classes("w-24")
+                                                            m = ui.number("Mec (d)", value=m_val, min=0, max=365, step=1).classes("w-24")
+                                                            i = ui.number("Insp (d)", value=i_val, min=0, max=365, step=1).classes("w-24")
+                                                            mpi = ui.checkbox("Mec perf incl.", value=mpi_val).props("dense")
+                                                            sm = ui.checkbox("Sobre medida", value=sm_val).props("dense")
+                                                    
+                                                    entries[material] = {
+                                                        "fam": fam, "v": v, "m": m, "i": i,
+                                                        "mpi": mpi, "sm": sm,
+                                                        "ale": ale, "ppm": ppm, "pb": pb, "tenfr": tenfr
+                                                    }
+                                                ui.separator().classes("my-2")
 
                                         ui.separator()
                                         with ui.row().classes("justify-end w-full gap-3"):
@@ -1270,13 +1213,17 @@ def register_pages(repo: Repository) -> None:
                                                     for material, w in entries.items():
                                                         fam_val = str(w["fam"].value or "Otros").strip() or "Otros"
                                                         repo.upsert_part_master(
-                                                            numero_parte=material,
-                                                            familia=fam_val,
+                                                            material=material,
+                                                            family_id=fam_val,
                                                             vulcanizado_dias=int(w["v"].value or 0),
                                                             mecanizado_dias=int(w["m"].value or 0),
                                                             inspeccion_externa_dias=int(w["i"].value or 0),
                                                             mec_perf_inclinada=bool(w["mpi"].value),
-                                                            sobre_medida=bool(w["sm"].value),
+                                                            sobre_medida_mecanizado=bool(w["sm"].value),
+                                                            aleacion=str(w["ale"].value or "").strip(),
+                                                            piezas_por_molde=float(w["ppm"].value or 0.0),
+                                                            peso_bruto_ton=float(w["pb"].value or 0.0),
+                                                            tiempo_enfriamiento_molde_dias=int(w["tenfr"].value or 0),
                                                         )
 
                                                     ui.notify("Maestro actualizado")
@@ -1292,10 +1239,6 @@ def register_pages(repo: Repository) -> None:
                                 dialog.open()
                                 # Don't continue auto generation until user completes master.
                                 return
-                        elif kind in {"vision", "vision_planta", "sap_vision"}:
-                            ui.notify(f"Importado: Visión Planta{extra} (filas: {repo.count_sap_vision()})")
-                        else:
-                            ui.notify(f"Importado: {kind}{extra}")
 
                         await refresh_from_sap_all(notify=False)
 
@@ -1436,7 +1379,7 @@ def register_pages(repo: Repository) -> None:
                         columns=[
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte"},
+                            {"name": "numero_parte", "label": "Plano", "field": "material"},
                             {"name": "cantidad", "label": "Stock (MB52)", "field": "cantidad"},
                             {"name": "fecha_entrega", "label": "Fecha pedido", "field": "fecha_entrega"},
                         ],
@@ -1463,7 +1406,8 @@ def register_pages(repo: Repository) -> None:
                 needle = str(q.value or "").strip().lower()
                 if not needle:
                     return list(rows_all)
-                return [r for r in rows_all if needle in str(r.get("familia", "")).lower()]
+                # Field changed to family_id in Repo
+                return [r for r in rows_all if needle in str(r.get("family_id", "")).lower()]
 
             def refresh_rows() -> None:
                 nonlocal rows_all, families
@@ -1474,11 +1418,11 @@ def register_pages(repo: Repository) -> None:
 
             tbl = ui.table(
                 columns=[
-                    {"name": "familia", "label": "Familia", "field": "familia"},
+                    {"name": "familia", "label": "Familia", "field": "family_id"},
                     {"name": "parts_count", "label": "# Partes asignadas", "field": "parts_count"},
                 ],
                 rows=filtered_rows(),
-                row_key="familia",
+                row_key="family_id",
             ).props("dense flat bordered")
 
             q.on(
@@ -1609,7 +1553,7 @@ def register_pages(repo: Repository) -> None:
                         if isinstance(d.get("row"), dict) and row_found is None:
                             row_found = d.get("row")
 
-                        if row_found is None and "familia" in d:
+                        if row_found is None and "family_id" in d:
                             row_found = d
 
                         if key_found is None:
@@ -1623,7 +1567,7 @@ def register_pages(repo: Repository) -> None:
                 row, key = _pick_row_and_key(args)
                 fam = ""
                 if isinstance(row, dict):
-                    fam = str(row.get("familia") or "").strip()
+                    fam = str(row.get("family_id") or "").strip()
                 elif key is not None:
                     fam = str(key).strip()
 
@@ -1720,27 +1664,27 @@ def register_pages(repo: Repository) -> None:
                     return [_decorate_row(r) for r in rows_all]
                 out = []
                 for r in rows_all:
-                    if needle in str(r.get("numero_parte", "")).lower():
+                    if needle in str(r.get("material", "")).lower():
                         out.append(_decorate_row(r))
                 return out
 
             tbl = ui.table(
                 columns=[
-                    {"name": "numero_parte", "label": "Material", "field": "numero_parte"},
-                    {"name": "familia", "label": "Familia", "field": "familia"},
+                    {"name": "material", "label": "Material", "field": "material"},
+                    {"name": "familia", "label": "Familia", "field": "family_id"},
                     {"name": "vulcanizado_dias", "label": "Vulc (d)", "field": "vulcanizado_dias"},
                     {"name": "mecanizado_dias", "label": "Mec (d)", "field": "mecanizado_dias"},
                     {"name": "inspeccion_externa_dias", "label": "Insp ext (d)", "field": "inspeccion_externa_dias"},
-                    {"name": "peso_ton", "label": "Peso Unitario", "field": "peso_ton"},
+                    {"name": "peso_ton", "label": "Peso Unitario", "field": "peso_unitario_ton"},
                     {"name": "mec_perf_inclinada", "label": "Mec perf incl.", "field": "mec_perf_inclinada"},
-                    {"name": "sobre_medida", "label": "Sobre medida", "field": "sobre_medida"},
+                    {"name": "sobre_medida", "label": "Sobre medida", "field": "sobre_medida_mecanizado"},
                 ],
                 rows=filtered_rows(),
-                row_key="numero_parte",
+                row_key="material",
             ).props("dense flat bordered")
 
             tbl.add_slot(
-                "body-cell-numero_parte",
+                "body-cell-material",
                 r"""
 <q-td :props="props">
   <span :class="props.row && props.row._missing_times ? 'text-negative font-medium' : ''">{{ props.value }}</span>
@@ -1834,14 +1778,14 @@ def register_pages(repo: Repository) -> None:
                         def do_save() -> None:
                             try:
                                 repo.upsert_part_master(
-                                    numero_parte=np_label.text,
-                                    familia=str(fam_sel.value),
+                                    material=np_label.text,
+                                    family_id=str(fam_sel.value),
                                     vulcanizado_dias=int(v.value) if v.value is not None else None,
                                     mecanizado_dias=int(m.value) if m.value is not None else None,
                                     inspeccion_externa_dias=int(i.value) if i.value is not None else None,
-                                    peso_ton=float(pt.value) if pt.value is not None else None,
+                                    peso_unitario_ton=float(pt.value) if pt.value is not None else None,
                                     mec_perf_inclinada=bool(mpi_chk.value),
-                                    sobre_medida=bool(sm_chk.value),
+                                    sobre_medida_mecanizado=bool(sm_chk.value),
                                 )
                                 ui.notify("Guardado")
                             except Exception as ex:
@@ -1863,7 +1807,7 @@ def register_pages(repo: Repository) -> None:
                         ui.button("Cancelar", on_click=delete_one_dialog.close).props("flat")
 
                         def do_delete_one() -> None:
-                            repo.delete_part(numero_parte=np_label.text)
+                            repo.delete_part(material=np_label.text)
                             delete_one_dialog.close()
                             edit_dialog.close()
                             ui.notify("Material eliminado")
@@ -1877,7 +1821,7 @@ def register_pages(repo: Repository) -> None:
                 if not np_s:
                     return None
                 for r in rows_all:
-                    if str(r.get("numero_parte", "")).strip() == np_s:
+                    if str(r.get("material", "")).strip() == np_s:
                         return r
                 return None
 
@@ -1896,7 +1840,7 @@ def register_pages(repo: Repository) -> None:
                     np_desc.text = repo.get_mb52_texto_breve(material=np_s)
                 except Exception:
                     np_desc.text = ""
-                fam_sel.value = str(row_data.get("familia") or "Otros")
+                fam_sel.value = str(row_data.get("family_id") or "Otros")
                 v.value = row_data.get("vulcanizado_dias") if row_data.get("vulcanizado_dias") is not None else 0
                 m.value = row_data.get("mecanizado_dias") if row_data.get("mecanizado_dias") is not None else 0
                 i.value = (
@@ -1904,9 +1848,9 @@ def register_pages(repo: Repository) -> None:
                     if row_data.get("inspeccion_externa_dias") is not None
                     else 0
                 )
-                pt.value = row_data.get("peso_ton") if row_data.get("peso_ton") is not None else 0
+                pt.value = row_data.get("peso_unitario_ton") if row_data.get("peso_unitario_ton") is not None else 0
                 mpi_chk.value = bool(int(row_data.get("mec_perf_inclinada") or 0))
-                sm_chk.value = bool(int(row_data.get("sobre_medida") or 0))
+                sm_chk.value = bool(int(row_data.get("sobre_medida_mecanizado") or 0))
                 edit_dialog.open()
 
             def on_row_event(e):
@@ -1999,7 +1943,8 @@ def register_pages(repo: Repository) -> None:
                         current_rows = list(getattr(tbl, "rows", []) or [])
                         if 0 <= row_index < len(current_rows) and isinstance(current_rows[row_index], dict):
                             r0 = current_rows[row_index]
-                            open_editor(numero_parte=str(r0.get("numero_parte") or "").strip(), row=r0)
+                            np_val = r0.get("material") or r0.get("numero_parte") or ""
+                            open_editor(numero_parte=str(np_val).strip(), row=r0)
                             return
                     except Exception:
                         pass
@@ -2407,8 +2352,8 @@ def register_pages(repo: Repository) -> None:
                             {"name": "prio_kind", "label": "", "field": "prio_kind"},
                             {"name": "pedido", "label": "Pedido", "field": "pedido"},
                             {"name": "posicion", "label": "Pos.", "field": "posicion"},
-                            {"name": "numero_parte", "label": "Plano", "field": "numero_parte"},
-                            {"name": "familia", "label": "Familia", "field": "familia"},
+                            {"name": "numero_parte", "label": "Plano", "field": "material"},
+                            {"name": "familia", "label": "Familia", "field": "family_id"},
                             {"name": "cantidad", "label": "Cantidad", "field": "cantidad"},
                             {"name": "fecha_entrega", "label": "Entrega", "field": "fecha_entrega"},
                             {"name": "error", "label": "Error", "field": "error"},

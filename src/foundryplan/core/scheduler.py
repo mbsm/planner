@@ -119,7 +119,12 @@ def generate_dispatch_program(
             errors.append({
                 "job_id": job.job_id,
                 "error": "Material no encontrado en maestro",
-                "material": job.material
+                "material": job.material,
+                "pedido": job.pedido,
+                "posicion": job.posicion,
+                "cantidad": job.qty_total,
+                "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
+                "prio_kind": "test" if job.is_test else ("priority" if job.priority <= 2 else "normal"),
             })
             continue
             
@@ -134,7 +139,12 @@ def generate_dispatch_program(
                 "job_id": job.job_id,
                 "error": "Sin línea compatible (restricciones)",
                 "material": job.material,
-                "family": part.family_id
+                "family_id": part.family_id,
+                "pedido": job.pedido,
+                "posicion": job.posicion,
+                "cantidad": job.qty_total,
+                "fecha_entrega": job.fecha_entrega.isoformat() if job.fecha_entrega else None,
+                "prio_kind": "test" if job.is_test else ("priority" if job.priority <= 2 else "normal"),
             })
             continue
             
