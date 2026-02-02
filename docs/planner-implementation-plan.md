@@ -62,13 +62,13 @@ Planner order tuple: `(order_id, part_id, qty, due_date)`
 
 ### 4.2 Parts
 Planner part tuple: `(part_id, flask_size, cool_hours, finish_hours, gross_weight_ton, alloy)`
-- Source: `material_master` + **new planner part overrides**
+- Source: `material_master` (columns added for planner)
   - `part_id` = `material`
   - `gross_weight_ton` = `peso_unitario_ton`
   - `alloy` = `aleacion`
-  - `flask_size`, `cool_hours`, `finish_hours` are **not in current schema** -> add overrides:
-    - Option A: add columns to `material_master`
-    - Option B (recommended): new table `planner_part_overrides`
+  - `flask_size` = `flask_size`
+  - `cool_hours` = `tiempo_enfriamiento_molde_dias * 24`
+  - `finish_hours` = 0 (pending spec detail)
 
 ### 4.3 Resources
 Planner resource tuple (spec): flasks + per-day capacities
@@ -87,15 +87,22 @@ Planner calendar is precomputed working days:
 
 ### 4.5 Initial state (replanning)
 Inputs for Monday morning:
-- `initial_order_progress`: molded_qty_credit
-  - Option 1: derive from `sap_vision_snapshot` stage columns (`x_fundir` / `por_fundir`)
-  - Option 2: derive from MB52 in moldeo warehouse (if exists)
-  - Option 3: manual input (UI)
+- `initial_order_progress`: **computed (blocking if missing data)**
+  - Use `x_fundir` from `sap_vision_snapshot` (castings) and convert to molds:
+    - `molds_remaining = ceil(x_fundir / piezas_por_molde)`
+  - Subtract MB52 molds in **moldeo warehouse** (configurable):
+    - `moldes_en_almacen_moldeo` = count of MB52 units in `app_config.sap_almacen_moldeo`
+  - Final credit:
+    - `molded_qty_credit = max(0, molds_remaining - moldes_en_almacen_moldeo)`
+  - **Block planner** if `piezas_por_molde` is missing for any part.
 - `initial_patterns_loaded`: manual input (UI)
-- `initial_flask_inuse`: manual input or derived if tracking exists
+- `initial_flask_inuse`: **derived from MB52 moldeo stock**
+  - Query MB52 in `app_config.sap_almacen_moldeo`
+  - Map each mold to `flask_size` via master data
+  - Assume current molds release after **cooling days**:
+    - `release_workday_index = cool_days[p]`
+  - **Note:** to be accurate we need SAP info for when each mold was poured; otherwise we assume “poured today”.
 - `initial_pour_load`: manual input (UI)
-
-**Recommendation:** start with manual inputs (UI), then automate later.
 
 ## 5) UI changes
 
@@ -110,11 +117,9 @@ Add **Plan** page entry.
 
 ### 5.3 Config > Planner
 Inputs:
-- horizon length (working days)
-- holiday calendar
+- holiday calendar (excluye días no hábiles)
 - resources (flask counts, capacities)
-- part overrides (flask size, cool/finish hours)
-- initial state inputs (progress, patterns loaded, flasks in use, pour load)
+- initial state inputs (progress, patterns loaded, flasks in use, pour load) — pendiente de UI
 
 ## 6) CP-SAT model (per spec)
 We will implement **exactly** the variables/constraints in the spec:

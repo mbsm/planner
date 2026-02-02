@@ -83,6 +83,7 @@ def test_material_master_structure(temp_db):
         "material": "TEXT",
         "family_id": "TEXT",
         "aleacion": "TEXT",
+        "flask_size": "TEXT",
         "piezas_por_molde": "REAL",
         "peso_bruto_ton": "REAL",
         "tiempo_enfriamiento_molde_dias": "INTEGER",

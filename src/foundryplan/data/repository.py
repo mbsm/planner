@@ -4,6 +4,7 @@ import time
 import json
 import re
 from datetime import date, datetime
+import math
 from uuid import uuid4
 
 from foundryplan.core.models import AuditEntry, Job, Line, Order, Part
@@ -707,6 +708,7 @@ class Repository:
         piezas_por_molde: float | None = None,
         peso_bruto_ton: float | None = None,
         tiempo_enfriamiento_molde_dias: int | None = None,
+        flask_size: str | None = None,
     ) -> None:
         """Upsert a part master row including family and optional process times."""
         material = str(material).strip()
@@ -750,6 +752,9 @@ class Repository:
         mec_perf = 1 if bool(mec_perf_inclinada) else 0
         sm = 1 if bool(sobre_medida_mecanizado) else 0
         aleacion_val = str(aleacion).strip() if aleacion else None
+        flask_val = str(flask_size).strip().upper() if flask_size else None
+        if flask_val is not None and flask_val not in {"S", "M", "L"}:
+            raise ValueError("flask_size inválido (debe ser S/M/L)")
 
         # Ensure family exists in catalog
         self.add_family(name=family_id)
@@ -758,9 +763,9 @@ class Repository:
             con.execute(
                 "INSERT INTO material_master("
                 "material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
-                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, piezas_por_molde, peso_bruto_ton, tiempo_enfriamiento_molde_dias"
+                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, peso_bruto_ton, tiempo_enfriamiento_molde_dias"
                 ") "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(material) DO UPDATE SET "
                 "family_id=excluded.family_id, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
@@ -770,10 +775,11 @@ class Repository:
                 "mec_perf_inclinada=excluded.mec_perf_inclinada, "
                 "sobre_medida_mecanizado=excluded.sobre_medida_mecanizado, "
                 "aleacion=excluded.aleacion, "
+                "flask_size=excluded.flask_size, "
                 "piezas_por_molde=excluded.piezas_por_molde, "
                 "peso_bruto_ton=excluded.peso_bruto_ton, "
                 "tiempo_enfriamiento_molde_dias=excluded.tiempo_enfriamiento_molde_dias",
-                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, ppm, pb, t_enfr),
+                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, flask_val, ppm, pb, t_enfr),
             )
 
             # Invalidate any previously generated program
@@ -842,7 +848,9 @@ class Repository:
         """Return the part master as UI-friendly dict rows."""
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM material_master ORDER BY material"
+                "SELECT material, family_id, flask_size, aleacion, piezas_por_molde, peso_bruto_ton, tiempo_enfriamiento_molde_dias, "
+                "vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado "
+                "FROM material_master ORDER BY material"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1248,6 +1256,431 @@ class Repository:
                     (centro, almacen),
                 ).fetchone()[0]
             )
+
+    # ---------- Planner helpers ----------
+    def _planner_moldeo_almacen(self) -> str:
+        raw = str(self.get_config(key="sap_almacen_moldeo", default="4032") or "").strip()
+        return self._normalize_sap_key(raw) or raw
+
+    def _planner_holidays(self) -> set[date]:
+        raw = str(self.get_config(key="planner_holidays", default="") or "")
+        tokens = [t.strip() for t in re.split(r"[,\n; ]+", raw) if t.strip()]
+        out: set[date] = set()
+        for tok in tokens:
+            try:
+                out.add(date.fromisoformat(tok))
+            except Exception:
+                continue
+        return out
+
+    def get_planner_initial_order_progress(self, *, asof_date: date) -> list[dict]:
+        """Compute molded_qty_credit per order from Vision x_fundir and MB52 moldeo stock.
+
+        molded_qty_credit = max(0, ceil(x_fundir / piezas_por_molde) - moldes_en_almacen_moldeo)
+        Blocks if any part is missing piezas_por_molde.
+        """
+        centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
+        almacen = self._planner_moldeo_almacen()
+        if not centro or not almacen:
+            raise ValueError("Config faltante: sap_centro o sap_almacen_moldeo")
+
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT
+                    v.pedido,
+                    v.posicion,
+                    MAX(COALESCE(v.cod_material, '')) AS material,
+                    MAX(COALESCE(v.x_fundir, 0)) AS x_fundir,
+                    MAX(COALESCE(p.piezas_por_molde, 0)) AS piezas_por_molde
+                FROM sap_vision_snapshot v
+                LEFT JOIN material_master p
+                  ON p.material = v.cod_material
+                GROUP BY v.pedido, v.posicion
+                """,
+            ).fetchall()
+
+            mb_counts = con.execute(
+                f"""
+                SELECT documento_comercial AS pedido, posicion_sd AS posicion, COUNT(*) AS cnt
+                FROM sap_mb52_snapshot
+                WHERE centro = ?
+                  AND almacen = ?
+                  AND {self._mb52_availability_predicate_sql(process='moldeo')}
+                  AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
+                  AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
+                GROUP BY documento_comercial, posicion_sd
+                """,
+                (str(self._normalize_sap_key(centro) or centro), str(almacen)),
+            ).fetchall()
+
+        mb_map = {(str(r["pedido"]).strip(), str(r["posicion"]).strip()): int(r["cnt"] or 0) for r in mb_counts}
+        missing_ppm: list[str] = []
+        out: list[dict] = []
+
+        for r in rows:
+            pedido = str(r["pedido"]).strip()
+            posicion = str(r["posicion"]).strip()
+            material = str(r["material"]).strip()
+            if not pedido or not posicion:
+                continue
+            ppm = float(r["piezas_por_molde"] or 0)
+            if ppm <= 0:
+                missing_ppm.append(material or f"{pedido}/{posicion}")
+                continue
+            x_fundir = float(r["x_fundir"] or 0)
+            molds_remaining = int(math.ceil(x_fundir / ppm)) if x_fundir > 0 else 0
+            molds_in_stock = int(mb_map.get((pedido, posicion), 0))
+            credit = max(0, molds_remaining - molds_in_stock)
+            if credit > 0:
+                out.append(
+                    {
+                        "order_id": f"{pedido}/{posicion}",
+                        "molded_qty_credit": int(credit),
+                        "asof_date": asof_date.isoformat(),
+                    }
+                )
+
+        if missing_ppm:
+            uniq = sorted({m for m in missing_ppm if m})
+            raise ValueError(f"Faltan piezas_por_molde para: {', '.join(uniq[:50])}")
+
+        return out
+
+    def get_planner_initial_flask_inuse(self, *, asof_date: date) -> list[dict]:
+        """Derive initial flask usage from MB52 moldeo stock.
+
+        release_workday_index = cool_days (tiempo_enfriamiento_molde_dias).
+        Blocks if flask_size or cool_days are missing.
+        """
+        centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
+        almacen = self._planner_moldeo_almacen()
+        if not centro or not almacen:
+            raise ValueError("Config faltante: sap_centro o sap_almacen_moldeo")
+
+        with self.db.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT
+                    m.documento_comercial AS pedido,
+                    m.posicion_sd AS posicion,
+                    m.material AS material,
+                    COUNT(*) AS cnt,
+                    MAX(COALESCE(p.flask_size, '')) AS flask_size,
+                    MAX(COALESCE(p.tiempo_enfriamiento_molde_dias, 0)) AS cool_days
+                FROM sap_mb52_snapshot m
+                LEFT JOIN material_master p
+                  ON p.material = m.material
+                WHERE m.centro = ?
+                  AND m.almacen = ?
+                  AND {self._mb52_availability_predicate_sql(process='moldeo')}
+                  AND m.documento_comercial IS NOT NULL AND TRIM(m.documento_comercial) <> ''
+                  AND m.posicion_sd IS NOT NULL AND TRIM(m.posicion_sd) <> ''
+                GROUP BY m.documento_comercial, m.posicion_sd, m.material
+                """,
+                (str(self._normalize_sap_key(centro) or centro), str(almacen)),
+            ).fetchall()
+
+        missing: list[str] = []
+        agg: dict[tuple[str, int], int] = {}
+        for r in rows:
+            material = str(r["material"]).strip()
+            flask_size = str(r["flask_size"] or "").strip().upper()
+            cool_days = int(r["cool_days"] or 0)
+            if flask_size not in {"S", "M", "L"} or cool_days <= 0:
+                missing.append(material or f"{r['pedido']}/{r['posicion']}")
+                continue
+            release_idx = int(cool_days)
+            key = (flask_size, release_idx)
+            agg[key] = agg.get(key, 0) + int(r["cnt"] or 0)
+
+        if missing:
+            uniq = sorted({m for m in missing if m})
+            raise ValueError(f"Faltan flask_size/tiempo_enfriamiento_molde_dias para: {', '.join(uniq[:50])}")
+
+        return [
+            {
+                "flask_size": size,
+                "release_workday_index": idx,
+                "qty_inuse": qty,
+                "asof_date": asof_date.isoformat(),
+            }
+            for (size, idx), qty in sorted(agg.items(), key=lambda x: (x[0][0], x[0][1]))
+        ]
+
+    # ---------- Planner DB helpers ----------
+    def ensure_planner_scenario(self, *, name: str | None = None) -> int:
+        scenario_name = str(name or "default").strip() or "default"
+        with self.db.connect() as con:
+            row = con.execute(
+                "SELECT scenario_id FROM planner_scenarios WHERE name = ?",
+                (scenario_name,),
+            ).fetchone()
+            if row:
+                return int(row[0])
+            con.execute("INSERT INTO planner_scenarios(name) VALUES(?)", (scenario_name,))
+            return int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    def replace_planner_parts(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_parts WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_parts(
+                    scenario_id, part_id, flask_size, cool_hours, finish_hours, gross_weight_ton, alloy
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def replace_planner_orders(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_orders WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_orders(
+                    scenario_id, order_id, part_id, qty, due_date, priority
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def replace_planner_calendar(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_calendar_workdays WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_calendar_workdays(
+                    scenario_id, workday_index, date, week_index
+                ) VALUES(?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def replace_planner_initial_order_progress(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_initial_order_progress WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_initial_order_progress(
+                    scenario_id, asof_date, order_id, molded_qty_credit
+                ) VALUES(?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def replace_planner_initial_flask_inuse(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_initial_flask_inuse WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_initial_flask_inuse(
+                    scenario_id, asof_date, flask_size, release_workday_index, qty_inuse
+                ) VALUES(?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def get_planner_resources(self, *, scenario_id: int) -> dict | None:
+        with self.db.connect() as con:
+            row = con.execute(
+                """
+                SELECT flasks_S, flasks_M, flasks_L, molding_max_per_day, molding_max_same_part_per_day, pour_max_ton_per_day, notes
+                FROM planner_resources
+                WHERE scenario_id = ?
+                """,
+                (int(scenario_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_planner_resources(
+        self,
+        *,
+        scenario_id: int,
+        flasks_S: int,
+        flasks_M: int,
+        flasks_L: int,
+        molding_max_per_day: int,
+        molding_max_same_part_per_day: int,
+        pour_max_ton_per_day: float,
+        notes: str | None = None,
+    ) -> None:
+        with self.db.connect() as con:
+            con.execute(
+                """
+                INSERT INTO planner_resources(
+                    scenario_id, flasks_S, flasks_M, flasks_L,
+                    molding_max_per_day, molding_max_same_part_per_day, pour_max_ton_per_day, notes
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scenario_id) DO UPDATE SET
+                    flasks_S=excluded.flasks_S,
+                    flasks_M=excluded.flasks_M,
+                    flasks_L=excluded.flasks_L,
+                    molding_max_per_day=excluded.molding_max_per_day,
+                    molding_max_same_part_per_day=excluded.molding_max_same_part_per_day,
+                    pour_max_ton_per_day=excluded.pour_max_ton_per_day,
+                    notes=excluded.notes
+                """,
+                (
+                    int(scenario_id),
+                    int(flasks_S),
+                    int(flasks_M),
+                    int(flasks_L),
+                    int(molding_max_per_day),
+                    int(molding_max_same_part_per_day),
+                    float(pour_max_ton_per_day),
+                    str(notes).strip() if notes else None,
+                ),
+            )
+
+    def sync_planner_inputs_from_sap(
+        self,
+        *,
+        scenario_id: int,
+        asof_date: date,
+        horizon_buffer_days: int = 10,
+    ) -> dict:
+        """Build planner inputs from current SAP snapshots and master data.
+
+        Returns summary stats.
+        """
+        asof_iso = asof_date.isoformat()
+
+        # Orders from Vision
+        with self.db.connect() as con:
+            orders_rows = con.execute(
+                """
+                SELECT
+                    v.pedido,
+                    v.posicion,
+                    MAX(COALESCE(v.cod_material, '')) AS material,
+                    MAX(COALESCE(v.fecha_de_pedido, '')) AS fecha_de_pedido,
+                    MAX(COALESCE(v.solicitado, 0)) AS solicitado
+                FROM sap_vision_snapshot v
+                GROUP BY v.pedido, v.posicion
+                HAVING MAX(COALESCE(v.fecha_de_pedido, '')) <> ''
+                """,
+            ).fetchall()
+
+            prio_rows = con.execute(
+                """
+                SELECT pedido, posicion, COALESCE(kind,'') AS kind
+                FROM orderpos_priority
+                WHERE COALESCE(is_priority, 0) = 1
+                """,
+            ).fetchall()
+
+            prio_map: dict[tuple[str, str], str] = {}
+            for r in prio_rows:
+                prio_map[(str(r[0]).strip(), str(r[1]).strip())] = str(r[2] or "").strip().lower()
+
+        orders_out: list[tuple] = []
+        max_due = None
+        for r in orders_rows:
+            pedido = str(r["pedido"]).strip()
+            posicion = str(r["posicion"]).strip()
+            material = str(r["material"]).strip()
+            due = str(r["fecha_de_pedido"]).strip()
+            qty = int(r["solicitado"] or 0)
+            if not pedido or not posicion or not material or not due:
+                continue
+            order_id = f"{pedido}/{posicion}"
+            kind = prio_map.get((pedido, posicion), "")
+            if kind == "test":
+                priority = 1
+            elif kind:
+                priority = 10
+            else:
+                priority = 100
+            orders_out.append((scenario_id, order_id, material, qty, due, priority))
+            try:
+                d = date.fromisoformat(due)
+                if max_due is None or d > max_due:
+                    max_due = d
+            except Exception:
+                pass
+
+        if not orders_out:
+            raise ValueError("No hay órdenes válidas en Visión para planificar")
+
+        # Parts from material_master for referenced materials
+        materials = sorted({o[2] for o in orders_out})
+        with self.db.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT material, flask_size, tiempo_enfriamiento_molde_dias, peso_unitario_ton, aleacion
+                FROM material_master
+                WHERE material IN ({','.join(['?'] * len(materials))})
+                """,
+                materials,
+            ).fetchall()
+
+        part_map = {str(r[0]): r for r in rows}
+        missing_parts: list[str] = []
+        parts_out: list[tuple] = []
+        max_lag_days = 0
+        for mat in materials:
+            r = part_map.get(mat)
+            if not r:
+                missing_parts.append(mat)
+                continue
+            flask_size = str(r[1] or "").strip().upper()
+            cool_days = int(r[2] or 0)
+            weight = float(r[3] or 0.0)
+            alloy = str(r[4] or "").strip() or None
+            if flask_size not in {"S", "M", "L"} or cool_days <= 0:
+                missing_parts.append(mat)
+                continue
+            cool_hours = float(cool_days) * 24.0
+            finish_hours = 0.0
+            parts_out.append((scenario_id, mat, flask_size, cool_hours, finish_hours, weight, alloy))
+            lag_days = 1 + int(math.ceil(cool_hours / 24.0)) + 1 + int(math.ceil(finish_hours / 24.0)) + 1
+            if lag_days > max_lag_days:
+                max_lag_days = lag_days
+
+        if missing_parts:
+            uniq = sorted(set(missing_parts))
+            raise ValueError(f"Faltan datos de flask_size/cool_days en maestro para: {', '.join(uniq[:50])}")
+
+        # Build calendar_workdays (Mon-Fri, excluding holidays)
+        holidays = self._planner_holidays()
+        if max_due is None:
+            max_due = asof_date
+        target_end = max_due.toordinal() + max_lag_days + int(horizon_buffer_days)
+        workdays: list[tuple] = []
+        d = asof_date
+        idx = 0
+        while d.toordinal() <= target_end:
+            if d.weekday() < 5 and d not in holidays:
+                week_index = idx // 5
+                workdays.append((scenario_id, idx, d.isoformat(), week_index))
+                idx += 1
+            d = date.fromordinal(d.toordinal() + 1)
+
+        # Initial order progress (credit)
+        progress_rows = self.get_planner_initial_order_progress(asof_date=asof_date)
+        progress_out = [(scenario_id, r["asof_date"], r["order_id"], int(r["molded_qty_credit"])) for r in progress_rows]
+
+        # Initial flask in use
+        flask_rows = self.get_planner_initial_flask_inuse(asof_date=asof_date)
+        flask_out = [
+            (scenario_id, r["asof_date"], r["flask_size"], int(r["release_workday_index"]), int(r["qty_inuse"]))
+            for r in flask_rows
+        ]
+
+        # Persist all
+        self.replace_planner_parts(scenario_id=scenario_id, rows=parts_out)
+        self.replace_planner_orders(scenario_id=scenario_id, rows=orders_out)
+        self.replace_planner_calendar(scenario_id=scenario_id, rows=workdays)
+        self.replace_planner_initial_order_progress(scenario_id=scenario_id, rows=progress_out)
+        self.replace_planner_initial_flask_inuse(scenario_id=scenario_id, rows=flask_out)
+
+        return {
+            "scenario_id": int(scenario_id),
+            "orders": len(orders_out),
+            "parts": len(parts_out),
+            "workdays": len(workdays),
+        }
 
     # ---------- Pedido priority master ----------
     def get_pedidos_master_rows(self) -> list[dict]:

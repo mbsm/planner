@@ -7,6 +7,7 @@ from nicegui import ui
 
 from foundryplan.core.scheduler import generate_dispatch_program
 from foundryplan.data.repository import Repository
+from foundryplan.planner.api import prepare_and_sync
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
 
 
@@ -783,6 +784,26 @@ def register_pages(repo: Repository) -> None:
                     else:
                         ui.label("No hay pedidos dentro de las próximas 6 semanas.").classes("text-slate-600")
 
+    @ui.page("/plan")
+    def planner_page() -> None:
+        render_nav(active="plan", repo=repo)
+        with page_container():
+            ui.label("Plan (Moldeo)").classes("text-2xl font-semibold")
+            ui.label("Preparación de inputs del Planner (sin solver aún).").classes("text-sm text-slate-600")
+            with ui.row().classes("items-center gap-2"):
+                asof = ui.input("Asof (lunes)", value=date.today().isoformat())
+                scenario = ui.input("Scenario", value="default")
+
+                def _run_sync() -> None:
+                    try:
+                        d = date.fromisoformat(str(asof.value))
+                        res = prepare_and_sync(repo, asof_date=d, scenario_name=str(scenario.value or "default"))
+                        ui.notify(f"Planner inputs listos: {res}", type="positive")
+                    except Exception as ex:
+                        ui.notify(f"Error preparando planner: {ex}", color="negative")
+
+                ui.button("Preparar inputs", on_click=_run_sync).props("color=primary")
+
     @ui.page("/audit")
     def audit_log() -> None:
         render_nav(active="audit", repo=repo)
@@ -864,6 +885,7 @@ def register_pages(repo: Repository) -> None:
                         insp_ext_in = ui.input("Insp. Externa", value=repo.get_config(key="sap_almacen_inspeccion_externa", default="4046") or "4046")
                         por_vulc_in = ui.input("Por Vulcanizar", value=repo.get_config(key="sap_almacen_por_vulcanizar", default="4047") or "4047")
                         en_vulc_in = ui.input("En Vulcanizado", value=repo.get_config(key="sap_almacen_en_vulcanizado", default="4048") or "4048")
+                        moldeo_in = ui.input("Moldeo (Planner)", value=repo.get_config(key="sap_almacen_moldeo", default="4032") or "4032")
                     
                     with ui.row().classes("w-full justify-end mt-4"):
                          def save_cfg() -> None:
@@ -877,6 +899,7 @@ def register_pages(repo: Repository) -> None:
                             repo.set_config(key="sap_almacen_inspeccion_externa", value=str(insp_ext_in.value or "").strip())
                             repo.set_config(key="sap_almacen_por_vulcanizar", value=str(por_vulc_in.value or "").strip())
                             repo.set_config(key="sap_almacen_en_vulcanizado", value=str(en_vulc_in.value or "").strip())
+                            repo.set_config(key="sap_almacen_moldeo", value=str(moldeo_in.value or "").strip())
                             repo.set_config(
                                 key="ui_allow_move_in_progress_line",
                                 value="1" if bool(allow_move_line_chk.value) else "0",
@@ -1122,6 +1145,8 @@ def register_pages(repo: Repository) -> None:
                                                         with ui.row().classes("items-end w-full gap-3"):
                                                             fam = ui.select(families, value=fam_val, label="Familia").classes("w-40")
                                                             ale = ui.input("Aleación", value=aleacion_val).classes("w-28")
+                                                            flask_val = str(it.get("flask_size") or "").strip().upper()
+                                                            flask = ui.select(["S", "M", "L"], value=flask_val or None, label="Flask").classes("w-20")
                                                             ppm = ui.number("Pza/Molde", value=ppm_val, min=0, step=0.1).classes("w-24")
                                                             pb = ui.number("P. Bruto (t)", value=pb_val, min=0, step=0.001).classes("w-24")
                                                             tenfr = ui.number("Enfr (d)", value=tenfr_val, min=0, step=1).classes("w-20")
@@ -1133,11 +1158,11 @@ def register_pages(repo: Repository) -> None:
                                                             mpi = ui.checkbox("Mec perf incl.", value=mpi_val).props("dense")
                                                             sm = ui.checkbox("Sobre medida", value=sm_val).props("dense")
                                                     
-                                                    entries[material] = {
-                                                        "fam": fam, "v": v, "m": m, "i": i,
-                                                        "mpi": mpi, "sm": sm,
-                                                        "ale": ale, "ppm": ppm, "pb": pb, "tenfr": tenfr
-                                                    }
+                                                        entries[material] = {
+                                                            "fam": fam, "v": v, "m": m, "i": i,
+                                                            "mpi": mpi, "sm": sm,
+                                                            "ale": ale, "flask": flask, "ppm": ppm, "pb": pb, "tenfr": tenfr
+                                                        }
                                                 ui.separator().classes("my-2")
 
                                         ui.separator()
@@ -1157,6 +1182,7 @@ def register_pages(repo: Repository) -> None:
                                                             mec_perf_inclinada=bool(w["mpi"].value),
                                                             sobre_medida_mecanizado=bool(w["sm"].value),
                                                             aleacion=str(w["ale"].value or "").strip(),
+                                                            flask_size=str(w["flask"].value or "").strip(),
                                                             piezas_por_molde=float(w["ppm"].value or 0.0),
                                                             peso_bruto_ton=float(w["pb"].value or 0.0),
                                                             tiempo_enfriamiento_molde_dias=int(w["tenfr"].value or 0),
@@ -1608,6 +1634,9 @@ def register_pages(repo: Repository) -> None:
                 columns=[
                     {"name": "material", "label": "Material", "field": "material"},
                     {"name": "familia", "label": "Familia", "field": "family_id"},
+                    {"name": "flask", "label": "Flask", "field": "flask_size"},
+                    {"name": "ppm", "label": "Pza/Molde", "field": "piezas_por_molde"},
+                    {"name": "enfr", "label": "Enfr (d)", "field": "tiempo_enfriamiento_molde_dias"},
                     {"name": "vulcanizado_dias", "label": "Vulc (d)", "field": "vulcanizado_dias"},
                     {"name": "mecanizado_dias", "label": "Mec (d)", "field": "mecanizado_dias"},
                     {"name": "inspeccion_externa_dias", "label": "Insp ext (d)", "field": "inspeccion_externa_dias"},
@@ -1633,6 +1662,26 @@ def register_pages(repo: Repository) -> None:
                 r"""
 <q-td :props="props">
     <span v-if="props.value !== null && props.value !== undefined && String(props.value) !== ''">{{ Number(props.value).toFixed(1) }}</span>
+    <span v-else class="text-slate-400">—</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-ppm",
+                r"""
+<q-td :props="props">
+    <span v-if="props.value !== null && props.value !== undefined && String(props.value) !== ''">{{ Number(props.value).toFixed(1) }}</span>
+    <span v-else class="text-slate-400">—</span>
+</q-td>
+""",
+            )
+
+            tbl.add_slot(
+                "body-cell-enfr",
+                r"""
+<q-td :props="props">
+    <span v-if="props.value !== null && props.value !== undefined && String(props.value) !== ''">{{ Number(props.value) }}</span>
     <span v-else class="text-slate-400">—</span>
 </q-td>
 """,
@@ -1697,6 +1746,18 @@ def register_pages(repo: Repository) -> None:
                         i.props("outlined dense")
                         pt.props("outlined dense")
 
+                    with ui.row().classes("w-full items-end gap-4 pt-2"):
+                        ale = ui.input("Aleación", value="").classes("w-40")
+                        flask = ui.select(["S", "M", "L"], value=None, label="Flask").classes("w-24")
+                        ppm = ui.number("Pza/Molde", value=0, min=0, step=0.1).classes("w-32")
+                        pb = ui.number("P. Bruto (t)", value=0, min=0, step=0.001).classes("w-32")
+                        tenfr = ui.number("Enfr (d)", value=0, min=0, step=1).classes("w-24")
+                        ale.props("outlined dense")
+                        flask.props("outlined dense")
+                        ppm.props("outlined dense")
+                        pb.props("outlined dense")
+                        tenfr.props("outlined dense")
+
                     with ui.row().classes("w-full items-center gap-6 pt-2"):
                         mpi_chk = ui.checkbox("Mec perf inclinada", value=False).props("dense")
                         sm_chk = ui.checkbox("Sobre medida", value=False).props("dense")
@@ -1722,6 +1783,11 @@ def register_pages(repo: Repository) -> None:
                                     peso_unitario_ton=float(pt.value) if pt.value is not None else None,
                                     mec_perf_inclinada=bool(mpi_chk.value),
                                     sobre_medida_mecanizado=bool(sm_chk.value),
+                                    aleacion=str(ale.value or "").strip(),
+                                    flask_size=str(flask.value or "").strip(),
+                                    piezas_por_molde=float(ppm.value) if ppm.value is not None else None,
+                                    peso_bruto_ton=float(pb.value) if pb.value is not None else None,
+                                    tiempo_enfriamiento_molde_dias=int(tenfr.value) if tenfr.value is not None else None,
                                 )
                                 ui.notify("Guardado")
                             except Exception as ex:
@@ -1785,6 +1851,15 @@ def register_pages(repo: Repository) -> None:
                     else 0
                 )
                 pt.value = row_data.get("peso_unitario_ton") if row_data.get("peso_unitario_ton") is not None else 0
+                ale.value = str(row_data.get("aleacion") or "")
+                flask.value = str(row_data.get("flask_size") or "").strip().upper() or None
+                ppm.value = row_data.get("piezas_por_molde") if row_data.get("piezas_por_molde") is not None else 0
+                pb.value = row_data.get("peso_bruto_ton") if row_data.get("peso_bruto_ton") is not None else 0
+                tenfr.value = (
+                    row_data.get("tiempo_enfriamiento_molde_dias")
+                    if row_data.get("tiempo_enfriamiento_molde_dias") is not None
+                    else 0
+                )
                 mpi_chk.value = bool(int(row_data.get("mec_perf_inclinada") or 0))
                 sm_chk.value = bool(int(row_data.get("sobre_medida_mecanizado") or 0))
                 edit_dialog.open()
@@ -1899,6 +1974,110 @@ def register_pages(repo: Repository) -> None:
             # Open editor only on double-click.
             tbl.on("rowDblClick", on_row_event)
             tbl.on("rowDblclick", on_row_event)
+
+    @ui.page("/config/planner")
+    def config_planner() -> None:
+        render_nav(active="config_planner", repo=repo)
+        with page_container():
+            ui.label("Planner (Moldeo)").classes("text-2xl font-semibold")
+            ui.label("Capacidades, flasks y calendario de trabajo.").classes("pt-subtitle")
+
+            def _load_resources(name: str) -> tuple[int, dict]:
+                scenario_name = str(name or "default").strip() or "default"
+                scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                resources = repo.get_planner_resources(scenario_id=scenario_id) or {}
+                return scenario_id, resources
+
+            with ui.row().classes("items-end w-full gap-3"):
+                scenario_in = ui.input("Scenario", value="default").classes("w-56")
+
+                def _load_click() -> None:
+                    _, res = _load_resources(str(scenario_in.value or "default"))
+                    flasks_s.value = int(res.get("flasks_S") or 0)
+                    flasks_m.value = int(res.get("flasks_M") or 0)
+                    flasks_l.value = int(res.get("flasks_L") or 0)
+                    molding_max.value = int(res.get("molding_max_per_day") or 0)
+                    molding_same.value = int(res.get("molding_max_same_part_per_day") or 0)
+                    pour_max.value = float(res.get("pour_max_ton_per_day") or 0.0)
+                    notes.value = str(res.get("notes") or "")
+                    holidays.value = str(repo.get_config(key="planner_holidays", default="") or "")
+                    for w in (flasks_s, flasks_m, flasks_l, molding_max, molding_same, pour_max, notes, holidays):
+                        w.update()
+
+                ui.button("Cargar", on_click=_load_click).props("outline")
+
+            scenario_id, res = _load_resources(str(scenario_in.value or "default"))
+
+            with ui.row().classes("w-full gap-6 items-start pt-3"):
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Capacidades").classes("text-lg font-medium text-slate-700 mb-2")
+                    with ui.column().classes("w-full gap-2"):
+                        molding_max = ui.number("Máx. moldes/día", value=int(res.get("molding_max_per_day") or 0), min=0, step=1)
+                        molding_same = ui.number(
+                            "Máx. mismo material/día",
+                            value=int(res.get("molding_max_same_part_per_day") or 0),
+                            min=0,
+                            step=1,
+                        )
+                        pour_max = ui.number(
+                            "Máx. colada (ton/día)",
+                            value=float(res.get("pour_max_ton_per_day") or 0.0),
+                            min=0,
+                            step=0.1,
+                        )
+                        molding_max.props("outlined dense")
+                        molding_same.props("outlined dense")
+                        pour_max.props("outlined dense")
+
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Flasks").classes("text-lg font-medium text-slate-700 mb-2")
+                    with ui.column().classes("w-full gap-2"):
+                        flasks_s = ui.number("Flasks S", value=int(res.get("flasks_S") or 0), min=0, step=1)
+                        flasks_m = ui.number("Flasks M", value=int(res.get("flasks_M") or 0), min=0, step=1)
+                        flasks_l = ui.number("Flasks L", value=int(res.get("flasks_L") or 0), min=0, step=1)
+                        flasks_s.props("outlined dense")
+                        flasks_m.props("outlined dense")
+                        flasks_l.props("outlined dense")
+
+            ui.separator().classes("my-4")
+
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Calendario").classes("text-lg font-medium text-slate-700 mb-2")
+                    holidays = ui.textarea(
+                        "Feriados (YYYY-MM-DD, separados por coma o línea)",
+                        value=str(repo.get_config(key="planner_holidays", default="") or ""),
+                    ).classes("w-full")
+                    holidays.props("outlined")
+                    ui.label("Los feriados se excluyen del calendario de trabajo.").classes("text-xs text-slate-500")
+
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Notas").classes("text-lg font-medium text-slate-700 mb-2")
+                    notes = ui.textarea("Notas del escenario", value=str(res.get("notes") or "")).classes("w-full")
+                    notes.props("outlined")
+
+            with ui.row().classes("w-full justify-end gap-2 pt-4"):
+                def save_planner_cfg() -> None:
+                    scenario_name = str(scenario_in.value or "default").strip() or "default"
+                    scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                    repo.upsert_planner_resources(
+                        scenario_id=scenario_id,
+                        flasks_S=int(flasks_s.value or 0),
+                        flasks_M=int(flasks_m.value or 0),
+                        flasks_L=int(flasks_l.value or 0),
+                        molding_max_per_day=int(molding_max.value or 0),
+                        molding_max_same_part_per_day=int(molding_same.value or 0),
+                        pour_max_ton_per_day=float(pour_max.value or 0.0),
+                        notes=str(notes.value or "").strip() or None,
+                    )
+                    repo.set_config(
+                        key="planner_holidays",
+                        value=str(holidays.value or "").strip(),
+                    )
+                    ui.notify("Configuración del planner guardada", type="positive")
+
+                ui.button("Guardar", icon="save", on_click=save_planner_cfg).props("unelevated color=primary")
+                ui.button("Ir a Plan", on_click=lambda: ui.navigate.to("/plan")).props("flat color=primary")
 
     # @ui.page("/config/pedidos")
     def config_pedidos() -> None:
@@ -2369,7 +2548,3 @@ def register_pages(repo: Repository) -> None:
             active_key="programa_en_vulcanizado",
             title="Programa - En Vulcanizado",
         )
-
-
-
-

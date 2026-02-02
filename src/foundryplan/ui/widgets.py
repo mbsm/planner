@@ -69,6 +69,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
     sections: list[tuple[str, str, str]] = [
         ("dashboard", "Pedidos", "/"),
         ("actualizar", "Actualizar", "/actualizar"),
+        ("plan", "Plan", "/plan"),
     ]
     production_program_active = active_key in {
         "programa_toma_dureza",
@@ -80,7 +81,14 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
         "programa_en_vulcanizado",
     }
 
-    config_active = active_key in {"config", "config_lineas", "config_familias", "config_materiales", "config_pedidos"}
+    config_active = active_key in {
+        "config",
+        "config_lineas",
+        "config_familias",
+        "config_materiales",
+        "config_pedidos",
+        "config_planner",
+    }
 
     with ui.header().classes("pt-header bg-white text-slate-900"):
         with ui.row().classes("w-full items-center justify-between gap-4 px-4 py-2"):
@@ -149,6 +157,11 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             if active_key == "audit"
                             else "Auditoría"
                         )
+                        label_planner = (
+                            "✓ Planner"
+                            if active_key == "config_planner"
+                            else "Planner"
+                        )
                         # label_pedidos = (
                         #     "✓ Pedidos"
                         #     if active_key == "config_pedidos"
@@ -158,6 +171,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
+                        ui.menu_item(label_planner, on_click=lambda: ui.navigate.to("/config/planner"))
                         ui.separator()
                         ui.menu_item(label_audit, on_click=lambda: ui.navigate.to("/audit"))
                         # ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))

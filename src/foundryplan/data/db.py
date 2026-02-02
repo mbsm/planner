@@ -73,6 +73,7 @@ class Db:
                     material TEXT PRIMARY KEY,
                     family_id TEXT,
                     aleacion TEXT,
+                    flask_size TEXT,
                     piezas_por_molde REAL,
                     peso_bruto_ton REAL,
                     tiempo_enfriamiento_molde_dias INTEGER,
@@ -284,6 +285,122 @@ class Db:
                     snapshot_at TEXT NOT NULL,
                     tons_por_entregar REAL NOT NULL,
                     tons_atrasadas REAL NOT NULL
+                );
+
+                -- ===== Planner tables (moldeo planner) =====
+                CREATE TABLE IF NOT EXISTS planner_scenarios (
+                    scenario_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_parts (
+                    scenario_id INTEGER NOT NULL,
+                    part_id TEXT NOT NULL,
+                    flask_size TEXT CHECK(flask_size IN ('S','M','L')),
+                    cool_hours REAL,
+                    finish_hours REAL,
+                    gross_weight_ton REAL,
+                    alloy TEXT,
+                    PRIMARY KEY (scenario_id, part_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_orders (
+                    scenario_id INTEGER NOT NULL,
+                    order_id TEXT NOT NULL,
+                    part_id TEXT NOT NULL,
+                    qty INTEGER,
+                    due_date TEXT,
+                    priority INTEGER DEFAULT 100,
+                    PRIMARY KEY (scenario_id, order_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_resources (
+                    scenario_id INTEGER PRIMARY KEY,
+                    flasks_S INTEGER,
+                    flasks_M INTEGER,
+                    flasks_L INTEGER,
+                    molding_max_per_day INTEGER,
+                    molding_max_same_part_per_day INTEGER,
+                    pour_max_ton_per_day REAL,
+                    notes TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_calendar_workdays (
+                    scenario_id INTEGER NOT NULL,
+                    workday_index INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    week_index INTEGER NOT NULL,
+                    PRIMARY KEY (scenario_id, workday_index),
+                    UNIQUE (scenario_id, date)
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_initial_order_progress (
+                    scenario_id INTEGER NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    molded_qty_credit INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_initial_patterns_loaded (
+                    scenario_id INTEGER NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    is_loaded INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_initial_flask_inuse (
+                    scenario_id INTEGER NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    flask_size TEXT CHECK(flask_size IN ('S','M','L')),
+                    release_workday_index INTEGER NOT NULL,
+                    qty_inuse INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_initial_pour_load (
+                    scenario_id INTEGER NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    workday_index INTEGER NOT NULL,
+                    tons_committed REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_plan_daily_order (
+                    scenario_id INTEGER NOT NULL,
+                    run_id TEXT NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    workday_index INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    part_id TEXT NOT NULL,
+                    molds_molded INTEGER NOT NULL,
+                    PRIMARY KEY (scenario_id, run_id, workday_index, order_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_plan_weekly_order (
+                    scenario_id INTEGER NOT NULL,
+                    run_id TEXT NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    week_index INTEGER NOT NULL,
+                    order_id TEXT NOT NULL,
+                    part_id TEXT NOT NULL,
+                    molds_molded_week INTEGER NOT NULL,
+                    PRIMARY KEY (scenario_id, run_id, week_index, order_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS planner_order_status (
+                    scenario_id INTEGER NOT NULL,
+                    run_id TEXT NOT NULL,
+                    asof_date TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    part_id TEXT NOT NULL,
+                    qty INTEGER NOT NULL,
+                    molded_qty_credit INTEGER NOT NULL,
+                    remaining_qty INTEGER NOT NULL,
+                    due_date TEXT NOT NULL,
+                    delivered_by_due INTEGER NOT NULL,
+                    late_qty INTEGER NOT NULL,
+                    completion_workday_index INTEGER,
+                    PRIMARY KEY (scenario_id, run_id, order_id)
                 );
 
                 -- Legacy program tables (backward compat)
@@ -667,6 +784,15 @@ class Db:
                     except Exception:
                         pass
 
+            # material_master: add flask_size if missing
+            if self._table_exists(con, "material_master"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(material_master)").fetchall()]
+                if "flask_size" not in cols:
+                    try:
+                        con.execute("ALTER TABLE material_master ADD COLUMN flask_size TEXT")
+                    except Exception:
+                        pass
+
             # Migrate app_config v1->v2 (key->config_key, value->config_value)
             if self._table_exists(con, "app_config"):
                 app_cols = [r[1] for r in con.execute("PRAGMA table_info(app_config)").fetchall()]
@@ -713,6 +839,7 @@ class Db:
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
 
             # Process warehouse mapping (by process_id + sap_almacen).
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_moldeo', '4032')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_terminaciones', '4035')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_toma_dureza', '4035')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_mecanizado', '4049')")
