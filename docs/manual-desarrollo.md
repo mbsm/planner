@@ -117,9 +117,14 @@ El sistema construye el universo de trabajo *a partir del stock disponible del p
     - Para cada proceso activo (`process.is_active=1`) se toma su `process.sap_almacen`.
     - Se filtra `sap_mb52_snapshot` por `centro` (config `sap_centro`), `almacen = process.sap_almacen` y un predicado de disponibilidad (`process.availability_predicate_json`).
     - Esto permite que cada proceso tenga su propia regla (ej.: Terminaciones vs Toma de Dureza).
-- **Job (cabecera)**: por defecto se crea/actualiza **1 job por (process_id, pedido, posición, material)**.
-    - `job.qty` es el **número de lotes** disponibles en el stock del proceso para ese pedido/posición/material.
-    - `job.is_test` se determina desde MB52: si el grupo contiene algún lote marcado como prueba (`sap_mb52_snapshot.is_test=1`), el job se marca como prueba.
+- **Job (cabecera)**: el **job es la unidad de trabajo que el Dispatcher despacha**.
+    - Representa un **conjunto de lotes** pertenecientes a un **pedido/posición** para un material, dentro de un proceso.
+    - Se crea/actualiza **1 job por (process_id, pedido, posición, material, is_test)**.
+    - `job.qty` es el **número de lotes** disponibles en el stock del proceso para ese bucket.
+    - `job.is_test` viene desde MB52 (`sap_mb52_snapshot.is_test`), derivado del lote:
+        - Lote alfanumérico ⇒ `is_test=1` (prueba)
+        - Lote numérico ⇒ `is_test=0` (normal)
+    - **Auto-split (prueba vs normal)**: si para el mismo (pedido/posición/material) existen lotes de prueba y lotes normales, el sistema crea **dos jobs separados**. Esto evita que un único lote de prueba “contamine” la prioridad/semántica del resto.
 - **JobUnit (detalle por lote)**: se crea **1 job_unit por lote** (`job_unit.lote`) con `qty=1`.
     - `job_unit.correlativo_int` se deriva desde el lote para orden/visualización.
 
@@ -147,7 +152,7 @@ Nota: existe además un split de UI para filas “en proceso” (`Repository.cre
     - “Urgente” proviene de marcas de usuario (`orderpos_priority`, excluyendo el tipo `test`).
 
 #### 3.1.4 Scheduling a colas por línea
-Con el universo de jobs listo, el scheduler genera colas por línea:
+Con el universo de jobs listo, el scheduler genera colas por línea. La **unidad mínima que se asigna a una línea es el job** (un conjunto de lotes por pedido/posición):
 
 - **Orden de procesamiento**: ordena jobs por `(priority ASC, start_by ASC, fecha_de_pedido ASC)`.
 - **Factibilidad**: para cada job toma su `Part` (maestro) y filtra líneas factibles con `check_constraints` (hoy principalmente `family_id`; otros atributos están soportados por la función).
