@@ -183,6 +183,69 @@ def test_create_jobs_test_priority(temp_db):
     assert term_job["priority"] == 1, "Should use 'prueba' priority (1)"
 
 
+def test_create_jobs_auto_split_test_and_normal_lotes(temp_db):
+    """If MB52 has mixed lotes (test + normal) for same key, split into separate jobs."""
+    db, _ = temp_db
+    repo = Repository(db)
+
+    mb52_rows = [
+        {
+            "material": "43633021531",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": "0030PD0674",  # Alphanumeric = test
+            "libre_utilizacion": 1,
+            "documento_comercial": "1010044531",
+            "posicion_sd": "10",
+            "en_control_calidad": 0,
+        },
+        {
+            "material": "43633021531",
+            "centro": "4000",
+            "almacen": "4035",
+            "lote": "001-001",  # Numeric = normal
+            "libre_utilizacion": 1,
+            "documento_comercial": "1010044531",
+            "posicion_sd": "10",
+            "en_control_calidad": 0,
+        },
+    ]
+
+    mb52_bytes = create_mock_mb52_excel(mb52_rows)
+    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+
+    with db.connect() as con:
+        jobs = con.execute(
+            "SELECT job_id, is_test, qty, priority FROM job WHERE process_id='terminaciones' AND pedido='1010044531' AND posicion='10' AND material='43633021531' ORDER BY is_test ASC"
+        ).fetchall()
+
+    assert len(jobs) == 2, "Should create 2 jobs: normal + test"
+
+    normal_job = jobs[0]
+    test_job = jobs[1]
+
+    assert normal_job["is_test"] == 0
+    assert normal_job["qty"] == 1
+    assert normal_job["priority"] == 3
+
+    assert test_job["is_test"] == 1
+    assert test_job["qty"] == 1
+    assert test_job["priority"] == 1
+
+    with db.connect() as con:
+        normal_units = con.execute(
+            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            (normal_job["job_id"],),
+        ).fetchall()
+        test_units = con.execute(
+            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            (test_job["job_id"],),
+        ).fetchall()
+
+    assert [r[0] for r in normal_units] == ["001-001"]
+    assert [r[0] for r in test_units] == ["0030PD0674"]
+
+
 def test_create_jobs_multiple_processes(temp_db):
     """Test that jobs are created for ALL active processes with stock."""
     db, _ = temp_db

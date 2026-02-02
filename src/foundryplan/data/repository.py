@@ -2284,15 +2284,16 @@ class Repository:
             # Filter MB52 by almacen and availability predicate
             avail_sql = self._mb52_availability_predicate_sql(process=process_id)
             
-            # Group by (pedido, posicion, material) and aggregate lotes
+            # Auto-split by test vs non-test lotes:
+            # create separate jobs per (pedido, posicion, material, is_test)
             rows = con.execute(
                 f"""
                 SELECT 
                     documento_comercial AS pedido,
                     posicion_sd AS posicion,
                     material,
-                    COUNT(*) AS qty,
-                    MAX(CASE WHEN is_test = 1 THEN 1 ELSE 0 END) AS has_test_lotes
+                    COALESCE(is_test, 0) AS is_test,
+                    COUNT(*) AS qty
                 FROM sap_mb52_snapshot
                 WHERE centro = ?
                   AND almacen = ?
@@ -2300,7 +2301,7 @@ class Repository:
                   AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
                   AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
                   AND material IS NOT NULL AND TRIM(material) <> ''
-                GROUP BY documento_comercial, posicion_sd, material
+                GROUP BY documento_comercial, posicion_sd, material, COALESCE(is_test, 0)
                 """,
                 (str(centro_normalized), almacen),
             ).fetchall()
@@ -2310,20 +2311,20 @@ class Repository:
                 posicion = str(r["posicion"]).strip()
                 material = str(r["material"]).strip()
                 qty = int(r["qty"])
-                is_test = int(r["has_test_lotes"])
+                is_test = int(r["is_test"] or 0)
                 
                 if not pedido or not posicion or not material:
                     continue
                 
-                # Check if jobs exist (may have multiple splits)
+                # Check if jobs exist (may have multiple splits) for this test-flag bucket
                 existing_jobs = con.execute(
                     """
                     SELECT job_id, qty
                     FROM job
-                    WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ?
+                    WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ? AND COALESCE(is_test, 0) = ?
                     ORDER BY qty ASC
                     """,
-                    (process_id, pedido, posicion, material),
+                    (process_id, pedido, posicion, material, int(is_test)),
                 ).fetchall()
                 
                 # Determine priority: test > urgent > normal
@@ -2371,7 +2372,7 @@ class Repository:
                     )
                     target_job_id = new_job_id
 
-                # Get all current MB52 lotes for this key
+                                # Get all current MB52 lotes for this key and this test flag
                 lotes_rows = con.execute(
                     f"""
                     SELECT lote, correlativo_int
@@ -2381,10 +2382,11 @@ class Repository:
                       AND documento_comercial = ?
                       AND posicion_sd = ?
                       AND material = ?
+                                            AND COALESCE(is_test, 0) = ?
                       AND {avail_sql}
                       AND lote IS NOT NULL AND TRIM(lote) <> ''
                     """,
-                    (str(centro_normalized), almacen, pedido, posicion, material),
+                                        (str(centro_normalized), almacen, pedido, posicion, material, int(is_test)),
                 ).fetchall()
                 
                 # Allocation Plan: job_id -> list of (lote, corr)
