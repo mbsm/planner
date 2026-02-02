@@ -1,36 +1,55 @@
-# Copilot instructions (Foundry Plan)
+# Copilot Instructions (Foundry Plan)
 
-## What this repo is
-- Windows-first NiceGUI web app that builds per-line work queues (“programa”) for multiple procesos from SAP Excel uploads (MB52 + Visión Planta) plus in-app master data (familias + tiempos), persisted in SQLite.
+## Project Overview
+Foundry Plan is a Windows-first production planning web app (NiceGUI + SQLite) that generates work queues for factory lines. It ingests SAP reports (Excel) to visualize stock and simulate production schedules ("programas").
 
-## Run / test (Windows)
-- Install deps: `.venv\Scripts\python.exe -m pip install -r requirements.txt`.
-- Run: `.venv\Scripts\python.exe run_app.py --port 8080` (adds `src/` to `sys.path`).
-- Tests: `.venv\Scripts\python.exe -m pytest`.
+## Architecture & Boundaries
+- **Entry Point**: `src/foundryplan/app.py` bootstraps the app, dependency injection, and routing.
+- **Persistence Layer**: `src/foundryplan/data/repository.py` is the **only** permitted access point to the DB. It handles all reads/writes.
+    - *Pattern*: UI widgets/pages must receive a `Repository` instance and use it; never query `Db` directly.
+- **Business Logic**: `src/foundryplan/dispatcher/scheduler.py` is a **pure functional** module.
+    - Input: `list[Line]`, `list[Job]`, `list[Part]`.
+    - Output: Scheduled queues.
+    - *Rule*: Logic here must be stateless. No DB access inside scheduler functions.
+- **Data Models**: `src/foundryplan/dispatcher/models.py`. 
+    - `Job`: Replaces deprecated `Order`. Represents a schedule-able unit.
+    - `Line`: Represents a production line with constraints.
+    - `Part`: Represents static metadata about a material (family, process times).
 
-## Big-picture architecture (respect boundaries)
-- Bootstrap: `src/foundryplan/app.py:main()` wires `Db` → `Repository` → `register_pages(repo)` and serves `/assets`.
-- UI: `src/foundryplan/ui/pages.py` + shared layout in `src/foundryplan/ui/widgets.py` (call `render_nav(repo=repo)` + `page_container()`).
-- Persistence: UI should only touch storage through `src/foundryplan/data/repository.py:Repository`.
-- DB schema/migrations: `src/foundryplan/data/db.py:Db.ensure_schema()` (WAL mode, best‑effort migrations; don’t break startup).
-- Scheduling core: `src/foundryplan/core/scheduler.py:generate_program()` is pure over dataclasses in `src/foundryplan/core/models.py`.
+## Data Flow (SAP → Scheduler)
+1. **Ingest**: User uploads MB52 (stock) and Vision (orders) Excel files.
+    - `Repository.import_excel_bytes` parses specific columns via `src/foundryplan/data/excel_io.py`.
+    - Data persists in raw tables: `sap_mb52_snapshot`, `sap_vision`.
+2. **Reconciliation**: `Repository` joins tables to build actionable items.
+    - Key Join: MB52 (`documento_comercial`, `posicion_sd`, `lote`) ↔ Vision (`pedido`, `posicion`).
+    - *Invariant*: Vision is the source of truth for dates (`fecha_de_pedido`).
+    - *Invariant*: Stock availability filters: `libre_utilizacion=1` AND `en_control_calidad=0` (configurable per process).
+3. **Scheduling**: `scheduler.generate_dispatch_program` creates the plan.
+    - Constraints: `check_constraints` matches `Part` attributes against `Line` config (e.g., `family_id`, `mec_perf_inclinada`).
+    - Sort Order: 
+        1. Tests (`Job.is_test`) 
+        2. Priority (`Job.priority` ASC)
+        3. Due Date (`Job.start_by`) based on `fecha_de_pedido` - process times.
 
-## Data flow (SAP → orders → program)
-- DB path is fixed: `db/foundryplan.db` (see `src/foundryplan/settings.py:default_db_path`).
-- Upload MB52 + Visión in `/actualizar` → `Repository.import_excel_bytes(kind='mb52'|'vision')` populates `sap_mb52` / `sap_vision`.
-- Rebuild derived `orders` per proceso: `Repository.try_rebuild_orders_from_sap_for(process=...)` joins MB52 (documento_comercial+posicion_sd+lote) with Visión (pedido+posicion) and groups lotes into correlativo ranges.
-- Procesos are keyed in `Repository.processes` and use per-process warehouse config (e.g., `sap_almacen_mecanizado`, `sap_almacen_inspeccion_externa`).
+## Developer Workflow
+- **Run (Dev)**: `\.venv\Scripts\python.exe run_app.py --port 8080`
+- **Tests**: `\.venv\Scripts\python.exe -m pytest`
+    - *Critical*: Run `pytest tests/test_scheduler_v2.py` after any logic change.
+    - `conftest.py` handles DB fixture setup.
+- **DB Migrations**: Schema defined in `src/foundryplan/data/db.py:Db.ensure_schema()`.
+    - Uses strict WAL mode. Schema updates are best-effort idempotent SQL commands on startup.
 
-## Project-specific invariants / conventions
-- **Dates**: SAP `fecha_entrega` is invalid; always use `fecha_de_pedido` as the source of truth for order dates/deadlines.
-- MB52 filtering is configurable via `sap_material_prefixes` (comma-separated; `*` means keep all); numeric keys normalized via `Repository._normalize_sap_key`.
-- “Usable” MB52 pieces: `libre_utilizacion=1` and `en_control_calidad=0`; special case `process='toma_de_dureza'` uses NOT‑available stock (`_mb52_availability_predicate_sql`).
-- Alphanumeric lotes: correlativos derive from the first digit group (`Repository._lote_to_int`); these rows can become tests (`Order.is_test`).
-- Config mutations invalidate derived data: `Repository.set_config(...)` clears `orders` + `last_program`; many master-data edits also clear `last_program`.
+## Specialized Context
+- **Lotes**: Alphanumeric lotes are treated as **Tests**. The numeric sequence (correlativo) is extracted from the first digit group.
+- **Config**: "Familias" and "Tiempos" are user-managed master data stored in SQLite. If missing for a part, it cannot be scheduled.
+- **UI Architecture**: `src/foundryplan/ui/` uses NiceGUI.
+    - `pages.py`: Routing and page composition.
+    - `widgets.py`: Reusable UI components.
+    - *Pattern*: Use `ui.refreshable` for dynamic content that updates on state changes.
 
-## Scheduling contract (keep tests in sync)
-- Sort key in `generate_program`: tests first (`Order.is_test`), then manual priority (`orderpos_priority`), then `start_by = fecha_entrega - (vulcanizado_dias + mecanizado_dias + inspeccion_externa_dias)`.
-- Assignment: among eligible lines (family allowed), choose the one with lowest current load.
-- Output rows include: `_row_id`, `prio_kind`, `pedido`, `posicion`, `numero_parte`, `cantidad`, `corr_inicio`, `corr_fin`, `familia`, `fecha_entrega`, `start_by`.
-- Program persistence merges “pinned/in-progress” rows from `program_in_progress_item` when saving/loading (`Repository.save_last_program` / `load_last_program`).
-- If you change scheduling behavior, update tests in `tests/test_scheduler.py`.
+## Important File Paths
+- Logic: `src/foundryplan/dispatcher/scheduler.py`
+- Models: `src/foundryplan/dispatcher/models.py`
+- Data Access: `src/foundryplan/data/repository.py`
+- DB Schema: `src/foundryplan/data/db.py`
+- Settings/Constants: `src/foundryplan/settings.py`

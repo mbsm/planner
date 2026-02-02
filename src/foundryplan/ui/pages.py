@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import date, datetime
 
 from nicegui import ui
 
-from foundryplan.core.scheduler import generate_dispatch_program
+from foundryplan.dispatcher.scheduler import generate_dispatch_program
 from foundryplan.data.repository import Repository
 from foundryplan.planner.api import prepare_and_sync
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
@@ -27,10 +28,12 @@ def register_pages(repo: Repository) -> None:
                 return False
             jobs = repo.get_jobs_model(process=process)
             parts = repo.get_parts_model()
+            pinned_program, remaining_jobs = repo.build_pinned_program_seed(process=process, jobs=jobs, parts=parts)
             program, errors = generate_dispatch_program(
                 lines=lines,
-                jobs=jobs,
+                jobs=remaining_jobs,
                 parts=parts,
+                pinned_program=pinned_program,
             )
             repo.save_last_program(process=process, program=program, errors=errors)
             updated = True
@@ -1017,12 +1020,41 @@ def register_pages(repo: Repository) -> None:
             def uploader(kind: str, label: str):
                 async def handle_upload(e):
                     try:
-                        content = await e.file.read()
+                        # Debugging unknown environment state
+                        print(f"DEBUG: UploadEvent e type={type(e)} dir={dir(e)}")
+                        
+                        content = None
+                        # Try 'content' (NiceGUI 2.0+ standard?)
+                        if hasattr(e, 'content'):
+                            content = e.content.read()
+                        # Try 'file' (Old NiceGUI or internal slot)
+                        elif hasattr(e, 'file'):
+                            f = e.file
+                            try:
+                                if hasattr(f, 'read'):
+                                    if inspect.iscoroutinefunction(f.read):
+                                        content = await f.read()
+                                    else:
+                                        content = f.read()
+                                else:
+                                    # Fallback: maybe 'file' is the content itself?
+                                    content = f
+                            except Exception as ex_read:
+                                print(f"DEBUG: Failed processing e.file: {ex_read}")
+                                raise
+
+                        if content is None:
+                             raise Exception(f"Could not extract file content. Attributes: {dir(e)}")
+
                         if kind in {"mb52", "sap_mb52"}:
                             repo.import_sap_mb52_bytes(content=content, mode="replace")
                         else:
                             repo.import_excel_bytes(kind=kind, content=content)
-                        filename = getattr(e.file, "name", None) or getattr(e.file, "filename", None)
+                        
+                        # Try to get filename safely
+                        filename = getattr(e, 'name', None)
+                        if not filename and hasattr(e, 'file') and hasattr(e.file, 'name'):
+                             filename = e.file.name
                         extra = f" ({filename})" if filename else ""
 
                         if kind in {"mb52", "sap_mb52"}:
@@ -1091,7 +1123,6 @@ def register_pages(repo: Repository) -> None:
                                     "sobre_medida_mecanizado",
                                     "aleacion",
                                     "piezas_por_molde",
-                                    "peso_bruto_ton",
                                     "tiempo_enfriamiento_molde_dias",
                                 ]:
                                     if key not in rec:
@@ -1135,11 +1166,10 @@ def register_pages(repo: Repository) -> None:
                                                     sm_val = bool(int(it.get("sobre_medida_mecanizado") or 0))
                                                     aleacion_val = str(it.get("aleacion") or "")
                                                     ppm_val = float(it.get("piezas_por_molde") or 0.0)
-                                                    pb_val = float(it.get("peso_bruto_ton") or 0.0)
                                                     tenfr_val = int(it.get("tiempo_enfriamiento_molde_dias") or 0)
 
                                                     # Layout:
-                                                    # Row 1: Familia, Aleacion, Piezas/Molde, Peso Bruto, Enfriamiento
+                                                    # Row 1: Familia, Aleacion, Piezas/Molde, Enfriamiento
                                                     # Row 2: Vulc, Mec, Insp, Checkboxes
                                                     with ui.column().classes("w-full gap-1"):
                                                         with ui.row().classes("items-end w-full gap-3"):
@@ -1148,7 +1178,6 @@ def register_pages(repo: Repository) -> None:
                                                             flask_val = str(it.get("flask_size") or "").strip().upper()
                                                             flask = ui.select(["S", "M", "L"], value=flask_val or None, label="Flask").classes("w-20")
                                                             ppm = ui.number("Pza/Molde", value=ppm_val, min=0, step=0.1).classes("w-24")
-                                                            pb = ui.number("P. Bruto (t)", value=pb_val, min=0, step=0.001).classes("w-24")
                                                             tenfr = ui.number("Enfr (d)", value=tenfr_val, min=0, step=1).classes("w-20")
 
                                                         with ui.row().classes("items-end w-full gap-3"):
@@ -1161,7 +1190,7 @@ def register_pages(repo: Repository) -> None:
                                                         entries[material] = {
                                                             "fam": fam, "v": v, "m": m, "i": i,
                                                             "mpi": mpi, "sm": sm,
-                                                            "ale": ale, "flask": flask, "ppm": ppm, "pb": pb, "tenfr": tenfr
+                                                            "ale": ale, "flask": flask, "ppm": ppm, "tenfr": tenfr
                                                         }
                                                 ui.separator().classes("my-2")
 
@@ -1184,7 +1213,6 @@ def register_pages(repo: Repository) -> None:
                                                             aleacion=str(w["ale"].value or "").strip(),
                                                             flask_size=str(w["flask"].value or "").strip(),
                                                             piezas_por_molde=float(w["ppm"].value or 0.0),
-                                                            peso_bruto_ton=float(w["pb"].value or 0.0),
                                                             tiempo_enfriamiento_molde_dias=int(w["tenfr"].value or 0),
                                                         )
 
@@ -1750,12 +1778,10 @@ def register_pages(repo: Repository) -> None:
                         ale = ui.input("Aleación", value="").classes("w-40")
                         flask = ui.select(["S", "M", "L"], value=None, label="Flask").classes("w-24")
                         ppm = ui.number("Pza/Molde", value=0, min=0, step=0.1).classes("w-32")
-                        pb = ui.number("P. Bruto (t)", value=0, min=0, step=0.001).classes("w-32")
                         tenfr = ui.number("Enfr (d)", value=0, min=0, step=1).classes("w-24")
                         ale.props("outlined dense")
                         flask.props("outlined dense")
                         ppm.props("outlined dense")
-                        pb.props("outlined dense")
                         tenfr.props("outlined dense")
 
                     with ui.row().classes("w-full items-center gap-6 pt-2"):
@@ -1786,7 +1812,6 @@ def register_pages(repo: Repository) -> None:
                                     aleacion=str(ale.value or "").strip(),
                                     flask_size=str(flask.value or "").strip(),
                                     piezas_por_molde=float(ppm.value) if ppm.value is not None else None,
-                                    peso_bruto_ton=float(pb.value) if pb.value is not None else None,
                                     tiempo_enfriamiento_molde_dias=int(tenfr.value) if tenfr.value is not None else None,
                                 )
                                 ui.notify("Guardado")

@@ -1,7 +1,7 @@
 import pytest
 from datetime import date
-from foundryplan.core.models import Job, Part, Line
-from foundryplan.core.scheduler import generate_dispatch_program, check_constraints
+from foundryplan.dispatcher.models import Job, Part, Line
+from foundryplan.dispatcher.scheduler import generate_dispatch_program, check_constraints
 
 def test_check_constraints():
     l1 = Line(line_id="L1", constraints={"family_id": {"A", "B"}})
@@ -72,3 +72,30 @@ def test_scheduler_balancing_and_start_by():
     
     row2 = q2[0]
     assert row2["prio_kind"] == "normal" # Prio 3
+
+
+def test_scheduler_pinned_program_affects_balancing():
+    lines = [
+        Line(line_id="L1", constraints={"family_id": {"A"}}),
+        Line(line_id="L2", constraints={"family_id": {"A"}}),
+    ]
+    parts = [Part(material="M1", family_id="A")]
+
+    # If L1 already has heavy in-progress load, the next job should go to L2.
+    pinned_program = {"L1": [{"_row_id": "PIN", "cantidad": 1000}]}
+    j1 = Job(
+        job_id="J1",
+        pedido="P1",
+        posicion="1",
+        material="M1",
+        qty=100,
+        priority=1,
+        fecha_de_pedido=date(2023, 1, 10),
+    )
+
+    queues, errors = generate_dispatch_program(lines=lines, jobs=[j1], parts=parts, pinned_program=pinned_program)
+    assert not errors
+
+    assert queues["L1"][0]["_row_id"] == "PIN"
+    assert len(queues["L2"]) == 1
+    assert queues["L2"][0]["job_id"] == "J1"

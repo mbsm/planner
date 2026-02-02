@@ -75,7 +75,6 @@ class Db:
                     aleacion TEXT,
                     flask_size TEXT,
                     piezas_por_molde REAL,
-                    peso_bruto_ton REAL,
                     tiempo_enfriamiento_molde_dias INTEGER,
                     vulcanizado_dias INTEGER,
                     mecanizado_dias INTEGER,
@@ -300,7 +299,7 @@ class Db:
                     flask_size TEXT CHECK(flask_size IN ('S','M','L')),
                     cool_hours REAL,
                     finish_hours REAL,
-                    gross_weight_ton REAL,
+                    net_weight_ton REAL,
                     alloy TEXT,
                     PRIMARY KEY (scenario_id, part_id)
                 );

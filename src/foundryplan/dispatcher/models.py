@@ -10,7 +10,8 @@ class Line:
     line_id: str
     constraints: dict[str, Any]
     load_capacity: float | None = None
-    
+
+
 @dataclass(frozen=True)
 class Job:
     job_id: str
@@ -23,14 +24,15 @@ class Job:
     is_test: bool = False
     notes: str | None = None
     cliente: str | None = None
-    
+
     # Scheduling info
     start_by: date | None = None
-    
+
     # Display info (legacy/detail)
     corr_min: int | None = None
     corr_max: int | None = None
-    
+
+
 @dataclass(frozen=True)
 class Order:
     # Deprecated v0.1 model
@@ -65,7 +67,7 @@ class Part:
 @dataclass
 class AuditEntry:
     id: int
-    timestamp: str 
+    timestamp: str
     category: str
     message: str
     details: str | None = None

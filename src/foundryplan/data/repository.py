@@ -3,11 +3,11 @@ from __future__ import annotations
 import time
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import math
 from uuid import uuid4
 
-from foundryplan.core.models import AuditEntry, Job, Line, Order, Part
+from foundryplan.dispatcher.models import AuditEntry, Job, Line, Order, Part
 from foundryplan.data.db import Db
 from foundryplan.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
 
@@ -706,7 +706,6 @@ class Repository:
         sobre_medida_mecanizado: bool = False,
         aleacion: str | None = None,
         piezas_por_molde: float | None = None,
-        peso_bruto_ton: float | None = None,
         tiempo_enfriamiento_molde_dias: int | None = None,
         flask_size: str | None = None,
     ) -> None:
@@ -737,12 +736,6 @@ class Repository:
             if pt < 0:
                 raise ValueError("peso_unitario_ton no puede ser negativo")
 
-        pb: float | None = None
-        if peso_bruto_ton is not None:
-            pb = float(peso_bruto_ton)
-            if pb < 0:
-                raise ValueError("peso_bruto_ton no puede ser negativo")
-        
         ppm: float | None = None
         if piezas_por_molde is not None:
             ppm = float(piezas_por_molde)
@@ -763,9 +756,9 @@ class Repository:
             con.execute(
                 "INSERT INTO material_master("
                 "material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
-                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, peso_bruto_ton, tiempo_enfriamiento_molde_dias"
+                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, tiempo_enfriamiento_molde_dias"
                 ") "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(material) DO UPDATE SET "
                 "family_id=excluded.family_id, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
@@ -777,9 +770,8 @@ class Repository:
                 "aleacion=excluded.aleacion, "
                 "flask_size=excluded.flask_size, "
                 "piezas_por_molde=excluded.piezas_por_molde, "
-                "peso_bruto_ton=excluded.peso_bruto_ton, "
                 "tiempo_enfriamiento_molde_dias=excluded.tiempo_enfriamiento_molde_dias",
-                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, flask_val, ppm, pb, t_enfr),
+                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, flask_val, ppm, t_enfr),
             )
 
             # Invalidate any previously generated program
@@ -1427,7 +1419,7 @@ class Repository:
             con.executemany(
                 """
                 INSERT INTO planner_parts(
-                    scenario_id, part_id, flask_size, cool_hours, finish_hours, gross_weight_ton, alloy
+                    scenario_id, part_id, flask_size, cool_hours, finish_hours, net_weight_ton, alloy
                 ) VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
@@ -3460,6 +3452,155 @@ class Repository:
             }
             for r in rows
         ]
+
+    def build_pinned_program_seed(
+        self,
+        *,
+        process: str = "terminaciones",
+        jobs: list[Job] | None = None,
+        parts: list[Part] | None = None,
+    ) -> tuple[dict[int, list[dict]], list[Job]]:
+        """Build a pinned (in-progress) program seed and filter remaining jobs.
+
+        This is used to improve dispatch quality: pinned items contribute to the initial
+        line loads, so the scheduler balances the remaining jobs around the real execution.
+
+        Returns:
+            (pinned_program, remaining_jobs)
+        """
+        process = self._normalize_process(process)
+
+        jobs_in = list(jobs) if jobs is not None else self.get_jobs_model(process=process)
+        parts_in = list(parts) if parts is not None else self.get_parts_model()
+
+        parts_by_material: dict[str, Part] = {p.material: p for p in parts_in if getattr(p, "material", None)}
+
+        locks = self.list_in_progress_locks(process=process)
+        if not locks:
+            return {}, jobs_in
+
+        manual_set = set(self.get_manual_priority_orderpos_set() or set())
+
+        def _prio_kind_for(*, is_test: int, pedido: str, posicion: str) -> str:
+            if int(is_test or 0) == 1:
+                return "test"
+            if (str(pedido), str(posicion)) in manual_set:
+                return "priority"
+            return "normal"
+
+        def _key(pedido: str, posicion: str, is_test: int) -> tuple[str, str, int]:
+            return (str(pedido).strip(), str(posicion).strip(), int(is_test or 0))
+
+        locked_key_set = {_key(lk["pedido"], lk["posicion"], int(lk.get("is_test") or 0)) for lk in locks}
+        remaining_jobs = [
+            j
+            for j in jobs_in
+            if _key(j.pedido, j.posicion, 1 if bool(getattr(j, "is_test", False)) else 0) not in locked_key_set
+        ]
+
+        # Group jobs by lock key, so pinned quantities reflect current job universe.
+        jobs_by_key: dict[tuple[str, str, int], list[Job]] = {}
+        for j in jobs_in:
+            k = _key(j.pedido, j.posicion, 1 if bool(getattr(j, "is_test", False)) else 0)
+            jobs_by_key.setdefault(k, []).append(j)
+
+        # Group locks by key so we can expand split_id.
+        locks_by_key: dict[tuple[str, str, int], list[dict]] = {}
+        for lk in locks:
+            k = _key(lk["pedido"], lk["posicion"], int(lk.get("is_test") or 0))
+            locks_by_key.setdefault(k, []).append(dict(lk))
+
+        pinned_program: dict[int, list[dict]] = {}
+        for k, group in locks_by_key.items():
+            group_sorted = sorted(group, key=lambda d: (str(d.get("marked_at") or ""), int(d.get("split_id") or 1)))
+
+            js = jobs_by_key.get(k) or []
+            if not js:
+                # If there is no job left for this key, we keep the lock in DB (legacy behavior)
+                # but do not pre-seed anything.
+                continue
+
+            # Aggregate current truth for the order position.
+            material = str(js[0].material)
+            total_qty = int(sum(int(j.qty or 0) for j in js))
+            fecha = None
+            for j in js:
+                if j.fecha_de_pedido is not None:
+                    fecha = j.fecha_de_pedido
+                    break
+            # Corr range: best-effort min corr_min.
+            corr_start = None
+            corr_candidates = [int(j.corr_min) for j in js if j.corr_min is not None]
+            if corr_candidates:
+                corr_start = min(corr_candidates)
+            if corr_start is None:
+                corr_start = 1
+
+            part = parts_by_material.get(material)
+            family_id = (part.family_id if part else "Otros")
+
+            # start_by consistent with scheduler formula (best-effort).
+            start_by_iso = None
+            fecha_iso = fecha.isoformat() if fecha else None
+            if fecha and part:
+                days = (part.vulcanizado_dias or 0) + (part.mecanizado_dias or 0) + (part.inspeccion_externa_dias or 0)
+                start_by_iso = (fecha - timedelta(days=days)).isoformat()
+            elif fecha:
+                start_by_iso = fecha.isoformat()
+
+            # Decide effective qty per split (qty=0 means "auto" and the last absorbs remaining).
+            stored_qtys: list[int] = [max(0, int(it.get("qty") or 0)) for it in group_sorted]
+            effective_qtys: list[int] = [0] * len(stored_qtys)
+            remaining = total_qty
+            for i in range(len(group_sorted)):
+                is_last = i == (len(group_sorted) - 1)
+                q_stored = stored_qtys[i]
+                if is_last:
+                    q_eff = max(0, remaining)
+                else:
+                    q_eff = max(0, min(q_stored, remaining)) if q_stored > 0 else 0
+                effective_qtys[i] = q_eff
+                remaining -= q_eff
+            if remaining > 0 and effective_qtys:
+                effective_qtys[-1] += remaining
+
+            corr_cursor = int(corr_start)
+            prio_kind = _prio_kind_for(is_test=k[2], pedido=k[0], posicion=k[1])
+            for it, q_eff in zip(group_sorted, effective_qtys):
+                line_id = int(it.get("line_id") or 0)
+                split_id = int(it.get("split_id") or 1)
+
+                row: dict = {
+                    "pedido": k[0],
+                    "posicion": k[1],
+                    "material": material,
+                    "numero_parte": material[-5:] if len(material) >= 5 else material,
+                    "cantidad": int(q_eff),
+                    "prio_kind": prio_kind,
+                    "is_test": int(k[2]),
+                    "in_progress": 1,
+                    "family_id": family_id,
+                    "familia": family_id,
+                    "fecha_de_pedido": fecha_iso,
+                    "start_by": start_by_iso,
+                    "_pt_split_id": int(split_id),
+                }
+
+                if q_eff > 0:
+                    row["corr_inicio"] = int(corr_cursor)
+                    row["corr_fin"] = int(corr_cursor + int(q_eff) - 1)
+                    corr_cursor += int(q_eff)
+                else:
+                    row["corr_inicio"] = int(corr_cursor)
+                    row["corr_fin"] = int(corr_cursor)
+
+                row["_row_id"] = (
+                    f"{k[0]}|{k[1]}|{material}|split{split_id}|{int(row['corr_inicio'])}-{int(row['corr_fin'])}"
+                )
+
+                pinned_program.setdefault(line_id, []).append(row)
+
+        return pinned_program, remaining_jobs
 
     def _refresh_program_with_locks(self, process: str) -> None:
         """Update last_program in-place with current locks, avoiding full regen."""

@@ -18,7 +18,7 @@ class PlannerPart:
     flask_size: str  # S/M/L
     cool_hours: float
     finish_hours: float
-    gross_weight_ton: float
+    net_weight_ton: float
     alloy: str | None = None
 
 
