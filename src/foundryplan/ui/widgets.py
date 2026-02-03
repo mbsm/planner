@@ -267,12 +267,16 @@ def render_line_tables(
 
                 def _format_date(date_str: str) -> str:
                     s = str(date_str or "").strip()
-                    # Try YYYY-MM-DD
+                    # Try YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
                     if len(s) >= 10 and "-" in s:
                         try:
                             parts = s.split("T")[0].split("-")  # Handle 2023-01-01T00:00:00
                             if len(parts) == 3:
-                                return f"{parts[2]}/{parts[1]}"
+                                # Format: dd-mm-yy
+                                day = parts[2]
+                                month = parts[1]
+                                year = parts[0][-2:]  # Last 2 digits of year
+                                return f"{day}-{month}-{year}"
                         except Exception:
                             pass
                     return s

@@ -13,6 +13,16 @@ from foundryplan.ui.widgets import page_container, render_line_tables, render_na
 
 
 def register_pages(repo: Repository) -> None:
+    def _format_date_ddmmyy(date_str: str | None) -> str:
+        """Convert ISO date string (YYYY-MM-DD) to dd-mm-yy format."""
+        if not date_str:
+            return ""
+        try:
+            d = datetime.fromisoformat(str(date_str).strip())
+            return d.strftime("%d-%m-%y")
+        except (ValueError, TypeError):
+            return str(date_str or "")
+
     def auto_generate_and_save(*, process: str = "terminaciones", notify: bool = True) -> bool:
         process = str(process or "terminaciones").strip().lower()
         updated = False
@@ -163,11 +173,13 @@ def register_pages(repo: Repository) -> None:
             # Pre-format tons for display (1 decimal) while keeping numeric `tons` for calculations.
             for r in overdue:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+                r["fecha_de_pedido"] = _format_date_ddmmyy(r.get("fecha_de_pedido"))
                 # Show only last 5 digits of plano
                 plano = str(r.get("material") or "")
                 r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
             for r in due_soon:
                 r["tons_fmt"] = f"{float(r.get('tons') or 0.0):,.1f}"
+                r["fecha_de_pedido"] = _format_date_ddmmyy(r.get("fecha_de_pedido"))
                 # Show only last 5 digits of plano
                 plano = str(r.get("material") or "")
                 r["numero_parte_fmt"] = plano[-5:] if len(plano) >= 5 else plano
@@ -318,6 +330,9 @@ def register_pages(repo: Repository) -> None:
                         # Pre-format tons_dispatch for display
                         for r in ready_to_dispatch:
                             r["tons_dispatch_fmt"] = f"{float(r.get('tons_dispatch') or 0.0):,.1f}"
+                            r["fecha_de_pedido"] = _format_date_ddmmyy(r.get("fecha_de_pedido"))
+                        for r in to_manufacture:
+                            r["fecha_de_pedido"] = _format_date_ddmmyy(r.get("fecha_de_pedido"))
                         # Calculate tons for each category
                         ready_tons = sum(float(r.get("tons_dispatch") or 0.0) for r in ready_to_dispatch)
                         to_mfg_tons = sum(float(r.get("tons") or 0.0) for r in to_manufacture)
@@ -2791,6 +2806,9 @@ def register_pages(repo: Repository) -> None:
                             ui.label(
                                 "Estas órdenes no se asignaron porque su familia no está permitida en ninguna línea."
                             ).classes("text-slate-600 mb-4")
+                            # Format dates in errors
+                            for err in errors:
+                                err["fecha_de_pedido"] = _format_date_ddmmyy(err.get("fecha_de_pedido"))
                             ui.table(
                                 columns=[
                                     {"name": "prio_kind", "label": "", "field": "prio_kind"},
