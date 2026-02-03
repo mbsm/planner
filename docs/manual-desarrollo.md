@@ -255,16 +255,20 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
    $$\sum_o \text{molds}[o,d] \times (\text{net\_weight}[o] \times \text{pieces\_per\_mold}[o])$$
    $$\le \text{pour\_max\_ton\_per\_day} - \text{initial\_pour\_load}[d] \quad \forall d$$
 
-5. **Disponibilidad de cajas por tamaño**:
-   - Para cada `flask_size`, no más de `flasks[size]` ocupadas simultáneamente
-   - Cada mold de tamaño $s$ moldado en día $d$ libera flask en día $d + \lceil \text{cool\_hours}/24 \rceil + 1$
+5. **Disponibilidad de cajas por tamaño** (RESTRICCIÓN CRÍTICA - cuello de botella de planta):
+   - Existen $n$ tamaños de cajas independientes: `flask_size` ∈ {"800", "1200", "1600", ...}
+   - Cada tamaño tiene su inventario total: `flask_inventory[flask_size]` (ej: 50 cajas de "800", 30 de "1200")
+   - Cada parte usa **siempre** la misma caja: `part.flask_size` es fijo
+   - Las restricciones son **independientes** entre tamaños (las cajas no se comparten entre tamaños diferentes)
+   - Para cada tamaño $s$ y día $d$:
+     $$\text{initial\_flask\_inuse}[s,d] + \sum_{o \in \text{orders\_by\_flask}[s]} \sum_{p=0}^{d} \mathbb{1}[\text{is\_cooling}(o,p,d)] \times \text{molds}[o,p] \le \text{flask\_inventory}[s]$$
+6. **Patrón activo solo si hay moldes**:
+   - `pattern_active[o,d] = 1` ⟺ `molds[o,d] > 0`
+   - Esta variable se usa para contar cambios de patrón en la función objetiv
+7. **Finish hours bounds**:
+   $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
 
-6. **Límite de patrones activos**: 
-   $$\sum_o \text{pattern\_active}[o,d] \le 6 \quad \forall d$$
-
-7. **Patrón activo solo si hay moldes o residuo**:
-   - `pattern_active[o,d] = 1` ⟹ `remaining_molds[o] > 0` O moldes en proceso de fundición/enfriamiento
-
+8
 8. **Finish hours bounds**:
    $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
 
@@ -276,7 +280,8 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
    - Sea `finish_workdays[o]` = $\lceil \text{finish\_hours\_real}[o]/24 / 8 \rceil$ (días hábiles, asumiendo 8h/día)
    - Sea `finish_day[o]` = `demolding_day[o]` + `finish_workdays[o]` (convertir a días hábiles)
    - `completion_day[o]` = `finish_day[o] + 1` (día siguiente a terminar, piezas en bodega)
-
+9. **Late days computation**:
+   $$\text{late\_days}[o] = \max(0, \text{completion\_day}[o] - \text{due\_day}[o]) \quad \forall o$$
 10. **On-Time definition**:
     $$\text{on\_time}[o] = 1 \text{ si } \text{completion\_day}[o] \le \text{due\_date}[o] \text{, else } 0$$
 
