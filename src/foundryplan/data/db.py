@@ -364,7 +364,24 @@ class Db:
                     scenario_id INTEGER NOT NULL,
                     asof_date TEXT NOT NULL,
                     workday_index INTEGER NOT NULL,
-                    tons_committed REAL NOT NULL
+                    tons_committed REAL NOT NULL,
+                    PRIMARY KEY (scenario_id, asof_date, workday_index)
+                );
+
+                CREATE TABLE IF NOT EXISTS sap_demolding_snapshot (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    material TEXT,
+                    texto_breve TEXT,
+                    lote TEXT,
+                    flask_id TEXT,
+                    demolding_date TEXT,
+                    demolding_time TEXT,
+                    mold_type TEXT,
+                    poured_date TEXT,
+                    poured_time TEXT,
+                    cooling_hours REAL,
+                    mold_quantity INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS planner_plan_daily_order (

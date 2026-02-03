@@ -1339,8 +1339,79 @@ class Repository:
 
         return out
 
+    def get_planner_initial_flask_inuse_from_demolding(self, *, asof_date: date) -> list[dict]:
+        """Derive initial flask usage from Reporte Desmoldeo (authoritative source).
+
+        Computes release day from demolding_date + cooling_hours.
+        Blocks if flask_size or cooling info are missing.
+        """
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT
+                    d.material AS material,
+                    d.lote AS lote,
+                    d.flask_id AS flask_id,
+                    d.demolding_date AS demolding_date,
+                    d.demolding_time AS demolding_time,
+                    d.cooling_hours AS cooling_hours,
+                    MAX(COALESCE(p.flask_size, '')) AS flask_size
+                FROM sap_demolding_snapshot d
+                LEFT JOIN material_master p
+                  ON p.material = d.material
+                """,
+            ).fetchall()
+
+        missing: list[str] = []
+        agg: dict[tuple[str, int], int] = {}
+        holidays = self._planner_holidays()
+
+        for r in rows:
+            material = str(r["material"]).strip()
+            flask_size = str(r["flask_size"] or "").strip().upper()
+            cool_hours = float(r["cooling_hours"] or 0.0)
+            demolding_date_str = str(r["demolding_date"] or "").strip()
+            if flask_size not in {"S", "M", "L"} or cool_hours <= 0 or not demolding_date_str:
+                missing.append(material or "<unknown>")
+                continue
+
+            try:
+                demolding_date = date.fromisoformat(demolding_date_str)
+            except Exception:
+                missing.append(material)
+                continue
+
+            # Release day = demolding_date + ceil(cool_hours/24) calendar days
+            cool_calendar_days = int(math.ceil(cool_hours / 24.0))
+            release_date = date.fromordinal(demolding_date.toordinal() + cool_calendar_days + 1)
+
+            # Map to workday_index from asof_date
+            d = asof_date
+            idx = 0
+            while d < release_date:
+                if d.weekday() < 5 and d not in holidays:
+                    idx += 1
+                d = date.fromordinal(d.toordinal() + 1)
+
+            key = (flask_size, idx)
+            agg[key] = agg.get(key, 0) + 1
+
+        if missing:
+            uniq = sorted({m for m in missing if m})
+            raise ValueError(f"Faltan flask_size/cooling_hours/demolding_date para: {', '.join(uniq[:50])}")
+
+        return [
+            {
+                "flask_size": size,
+                "release_workday_index": idx,
+                "qty_inuse": qty,
+                "asof_date": asof_date.isoformat(),
+            }
+            for (size, idx), qty in sorted(agg.items(), key=lambda x: (x[0][0], x[0][1]))
+        ]
+
     def get_planner_initial_flask_inuse(self, *, asof_date: date) -> list[dict]:
-        """Derive initial flask usage from MB52 moldeo stock.
+        """Derive initial flask usage from MB52 moldeo stock (fallback if Reporte Desmoldeo unavailable).
 
         release_workday_index = cool_days (tiempo_enfriamiento_molde_dias).
         Blocks if flask_size or cool_days are missing.
@@ -1473,6 +1544,98 @@ class Repository:
                 """,
                 rows,
             )
+
+    def replace_planner_initial_pour_load(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_initial_pour_load WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_initial_pour_load(
+                    scenario_id, asof_date, workday_index, tons_committed
+                ) VALUES(?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def replace_planner_initial_patterns_loaded(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        """Set which orders have patterns currently loaded on the molding line.
+
+        rows: [(scenario_id, asof_date, order_id, is_loaded), ...]
+        """
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_initial_patterns_loaded WHERE scenario_id = ?", (int(scenario_id),))
+            con.executemany(
+                """
+                INSERT INTO planner_initial_patterns_loaded(
+                    scenario_id, asof_date, order_id, is_loaded
+                ) VALUES(?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def get_planner_initial_patterns_loaded(self, *, scenario_id: int, asof_date: date) -> list[dict]:
+        """Retrieve orders with patterns currently loaded."""
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT order_id, is_loaded
+                FROM planner_initial_patterns_loaded
+                WHERE scenario_id = ? AND asof_date = ?
+                """,
+                (int(scenario_id), asof_date.isoformat()),
+            ).fetchall()
+        return [{"order_id": r["order_id"], "is_loaded": int(r["is_loaded"] or 0)} for r in rows]
+
+    def get_planner_initial_pour_load(self, *, asof_date: date) -> list[dict]:
+        """Compute initial pour load from MB52 moldeo stock (WIP not yet poured).
+
+        Metal per mold = net_weight_ton × pieces_per_mold.
+        Forward-fill capacity (ASAP pouring policy).
+        """
+        centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
+        almacen = self._planner_moldeo_almacen()
+        if not centro or not almacen:
+            raise ValueError("Config faltante: sap_centro o sap_almacen_moldeo")
+
+        with self.db.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT
+                    m.material AS material,
+                    COUNT(*) AS cnt,
+                    MAX(COALESCE(p.peso_unitario_ton, 0)) AS net_weight_ton,
+                    MAX(COALESCE(p.piezas_por_molde, 0)) AS pieces_per_mold
+                FROM sap_mb52_snapshot m
+                LEFT JOIN material_master p
+                  ON p.material = m.material
+                WHERE m.centro = ?
+                  AND m.almacen = ?
+                  AND {self._mb52_availability_predicate_sql(process='moldeo')}
+                GROUP BY m.material
+                """,
+                (str(self._normalize_sap_key(centro) or centro), str(almacen)),
+            ).fetchall()
+
+        missing: list[str] = []
+        wip_molds: list[dict] = []
+        for r in rows:
+            material = str(r["material"]).strip()
+            cnt = int(r["cnt"] or 0)
+            net_weight = float(r["net_weight_ton"] or 0.0)
+            pieces_per_mold = float(r["pieces_per_mold"] or 0.0)
+            if net_weight <= 0 or pieces_per_mold <= 0:
+                missing.append(material)
+                continue
+            metal_per_mold = net_weight * pieces_per_mold
+            wip_molds.append({"material": material, "cnt": cnt, "metal_per_mold": metal_per_mold})
+
+        if missing:
+            uniq = sorted(set(missing))
+            raise ValueError(f"Faltan peso_unitario_ton/piezas_por_molde para: {', '.join(uniq[:50])}")
+
+        # Forward-fill: pour ASAP from day 0
+        # We'll return aggregated tons per relative day offset (caller maps to workday_index)
+        return wip_molds
 
     def get_planner_resources(self, *, scenario_id: int) -> dict | None:
         with self.db.connect() as con:
@@ -1685,11 +1848,44 @@ class Repository:
         progress_rows = self.get_planner_initial_order_progress(asof_date=asof_date)
         progress_out = [(scenario_id, r["asof_date"], r["order_id"], int(r["remaining_molds"])) for r in progress_rows]
 
-        # Initial flask in use
-        flask_rows = self.get_planner_initial_flask_inuse(asof_date=asof_date)
+        # Initial flask in use: prefer Reporte Desmoldeo, fallback to MB52
+        try:
+            flask_rows = self.get_planner_initial_flask_inuse_from_demolding(asof_date=asof_date)
+        except Exception:
+            # Fallback to MB52-based estimate if Reporte Desmoldeo unavailable
+            flask_rows = self.get_planner_initial_flask_inuse(asof_date=asof_date)
+
         flask_out = [
             (scenario_id, r["asof_date"], r["flask_size"], int(r["release_workday_index"]), int(r["qty_inuse"]))
             for r in flask_rows
+        ]
+
+        # Initial pour load: forward-fill WIP molds from MB52
+        wip_molds = self.get_planner_initial_pour_load(asof_date=asof_date)
+        pour_capacity_per_day = self.get_planner_resources(scenario_id=scenario_id)
+        if pour_capacity_per_day is None:
+            max_pour = 100.0  # Default if not configured
+        else:
+            max_pour = float(pour_capacity_per_day.get("pour_max_ton_per_day", 100.0))
+
+        # Forward-fill: allocate WIP to earliest workdays
+        pour_load_by_day: dict[int, float] = {}
+        day_idx = 0
+        for mold_info in wip_molds:
+            metal = float(mold_info["metal_per_mold"])
+            cnt = int(mold_info["cnt"])
+            total_metal = metal * cnt
+            while total_metal > 0:
+                capacity_left = max_pour - pour_load_by_day.get(day_idx, 0.0)
+                allocated = min(total_metal, capacity_left)
+                pour_load_by_day[day_idx] = pour_load_by_day.get(day_idx, 0.0) + allocated
+                total_metal -= allocated
+                if total_metal > 0:
+                    day_idx += 1
+
+        pour_out = [
+            (scenario_id, asof_date.isoformat(), idx, tons)
+            for idx, tons in sorted(pour_load_by_day.items())
         ]
 
         # Persist all
@@ -1698,6 +1894,7 @@ class Repository:
         self.replace_planner_calendar(scenario_id=scenario_id, rows=workdays)
         self.replace_planner_initial_order_progress(scenario_id=scenario_id, rows=progress_out)
         self.replace_planner_initial_flask_inuse(scenario_id=scenario_id, rows=flask_out)
+        self.replace_planner_initial_pour_load(scenario_id=scenario_id, rows=pour_out)
 
         return {
             "scenario_id": int(scenario_id),
