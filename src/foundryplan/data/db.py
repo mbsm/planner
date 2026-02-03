@@ -907,6 +907,8 @@ class Db:
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_num_workers', '0')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_relative_gap', '0.01')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_log_progress', '0')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_horizon_days', '30')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_horizon_buffer_days', '10')")
 
             # Process warehouse mapping (by process_id + sap_almacen).
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_moldeo', '4032')")

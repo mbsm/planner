@@ -1532,6 +1532,96 @@ class Repository:
             for r in rows
         ]
 
+    def get_planner_parts_rows(self, *, scenario_id: int) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT part_id, flask_size, cool_hours, finish_hours, min_finish_hours,
+                       pieces_per_mold, net_weight_ton, alloy
+                FROM planner_parts
+                WHERE scenario_id = ?
+                """,
+                (int(scenario_id),),
+            ).fetchall()
+        return [
+            {
+                "part_id": str(r[0]),
+                "flask_size": str(r[1] or ""),
+                "cool_hours": float(r[2] or 0.0),
+                "finish_hours": float(r[3] or 0.0),
+                "min_finish_hours": float(r[4] or 0.0),
+                "pieces_per_mold": float(r[5] or 0.0),
+                "net_weight_ton": float(r[6] or 0.0),
+                "alloy": str(r[7]) if r[7] is not None else None,
+            }
+            for r in rows
+        ]
+
+    def get_planner_calendar_rows(self, *, scenario_id: int) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT workday_index, date
+                FROM planner_calendar_workdays
+                WHERE scenario_id = ?
+                ORDER BY workday_index ASC
+                """,
+                (int(scenario_id),),
+            ).fetchall()
+        return [
+            {"workday_index": int(r[0]), "date": str(r[1])}
+            for r in rows
+        ]
+
+    def get_planner_initial_order_progress_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT order_id, remaining_molds
+                FROM planner_initial_order_progress
+                WHERE scenario_id = ? AND asof_date = ?
+                """,
+                (int(scenario_id), asof_date.isoformat()),
+            ).fetchall()
+        return [
+            {"order_id": str(r[0]), "remaining_molds": int(r[1] or 0)}
+            for r in rows
+        ]
+
+    def get_planner_initial_flask_inuse_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT flask_size, release_workday_index, qty_inuse
+                FROM planner_initial_flask_inuse
+                WHERE scenario_id = ? AND asof_date = ?
+                """,
+                (int(scenario_id), asof_date.isoformat()),
+            ).fetchall()
+        return [
+            {
+                "flask_size": str(r[0] or ""),
+                "release_workday_index": int(r[1] or 0),
+                "qty_inuse": int(r[2] or 0),
+            }
+            for r in rows
+        ]
+
+    def get_planner_initial_pour_load_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT workday_index, tons_committed
+                FROM planner_initial_pour_load
+                WHERE scenario_id = ? AND asof_date = ?
+                """,
+                (int(scenario_id), asof_date.isoformat()),
+            ).fetchall()
+        return [
+            {"workday_index": int(r[0]), "tons_committed": float(r[1] or 0.0)}
+            for r in rows
+        ]
+
     def replace_planner_calendar(self, *, scenario_id: int, rows: list[tuple]) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM planner_calendar_workdays WHERE scenario_id = ?", (int(scenario_id),))

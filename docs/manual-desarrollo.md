@@ -190,21 +190,21 @@ Nota: los ítems marcados “en proceso” se muestran fijados en su línea y al
 ### 3.2 Planner (Nuevo)
 Responsable de la planificación de *Moldeo* (nivel orden, semanal).
 - **Ubicación**: `src/foundryplan/planner/`
-- **Objetivo**: Decidir cuántos moldes producir por día por pedido, optimizando entrega a tiempo, minimizando cambios de patrón y uso de capacidad reducida.
+- **Objetivo**: Decidir cuántos moldes producir por día por pedido, optimizando entrega a tiempo, minimizando cambios de modelo y uso de capacidad reducida.
 - **Entradas**:
     - `PlannerOrder`: Pedidos pendientes (Visión) + `remaining_molds`.
     - `PlannerPart`: Atributos de moldeo (`flask_size`, `cool_hours`, `pieces_per_mold`, `finish_hours`, `min_finish_hours`).
     - `PlannerResource`: Capacidades diarias (molding, pouring, flasks).
-    - `PlannerInitialConditions`: WIP actual (patterns loaded, flasks in use, pour load).
+    - `PlannerInitialConditions`: WIP actual (modelos cargados, flasks en uso, carga de colada).
 - **Solver**: Modela el problema como CSP usando OR-Tools CP-SAT.
-    - Maximiza entrega a tiempo, con penalidades por cambios de patrón y reducción de tiempos.
+    - Maximiza entrega a tiempo, con penalidades por cambios de modelo y reducción de tiempos.
 
 #### 3.2.1 Decisiones de modelado (Moldeo)
 - **`remaining_molds`**: representa *moldes pendientes de fabricar* para el pedido (no hechos aún).
-- **Patrones (pattern) = `order_id`**: un patrón puede servir a varias órdenes, pero la política de cambio es por orden.
-    - **Regla blanda (soft)**: preferir terminar la orden antes de cambiar patrón; se modela como penalidad en el objetivo.
-    - **Límite duro**: máximo 6 patrones (órdenes) activos en paralelo.
-    - **Finish before switch**: una orden debe tener `remaining_molds = 0` antes de desactivar su patrón.
+- **Modelos (pattern) = `order_id`**: un modelo puede servir a varias órdenes, pero la política de cambio es por orden.
+    - **Regla blanda (soft)**: preferir terminar la orden antes de cambiar modelo; se modela como penalidad en el objetivo.
+    - **Límite duro**: máximo 6 modelos (órdenes) activos en paralelo.
+    - **Finish before switch**: una orden debe tener `remaining_molds = 0` antes de desactivar su modelo.
 - **Uso de cajas (flasks)**:
     - **Fuente**: Reporte Desmoldeo (no MB52). La fecha de liberación de la caja se deriva del desmoldeo/enfriamiento reportado.
     - **Persistencia**: se carga en `planner_initial_flask_inuse` con `release_workday_index`.
@@ -236,7 +236,7 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
 - `molds[o, d]` ∈ ℤ⁺ := moldes de orden $o$ a moldear el día hábil $d$
 - `finish_hours_real[o]` ∈ ℝ := horas de terminación **reales** asignadas a orden $o$
   - Restricción: `min_finish_hours[o] ≤ finish_hours_real[o] ≤ nominal_finish_hours[o]`
-- `pattern_active[o, d]` ∈ {0,1} := patrón de orden $o$ activo en día $d$
+- `pattern_active[o, d]` ∈ {0,1} := modelo de orden $o$ activo en día $d$
 - `completion_day[o]` ∈ ℤ := día en que la última pieza de orden $o$ llega a bodega
 - `on_time[o]` ∈ {0,1} := 1 si `completion_day[o] ≤ due_date[o]`, 0 en caso contrario
 
@@ -262,9 +262,9 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
    - Las restricciones son **independientes** entre tamaños (las cajas no se comparten entre tamaños diferentes)
    - Para cada tamaño $s$ y día $d$:
      $$\text{initial\_flask\_inuse}[s,d] + \sum_{o \in \text{orders\_by\_flask}[s]} \sum_{p=0}^{d} \mathbb{1}[\text{is\_cooling}(o,p,d)] \times \text{molds}[o,p] \le \text{flask\_inventory}[s]$$
-6. **Patrón activo solo si hay moldes**:
-   - `pattern_active[o,d] = 1` ⟺ `molds[o,d] > 0`
-   - Esta variable se usa para contar cambios de patrón en la función objetiv
+6. **Modelo activo solo si hay moldes**:
+    - `pattern_active[o,d] = 1` ⟺ `molds[o,d] > 0`
+    - Esta variable se usa para contar cambios de modelo en la función objetivo
 7. **Finish hours bounds**:
    $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
 
@@ -302,11 +302,13 @@ Donde:
 Almacenados en `app_config` o tabla dedicada `planner_config`:
 - `planner_weight_late_days`: penalidad por días de atraso (default: 1000)
 - `planner_weight_finish_reduction`: penalidad por reducción de tiempos (default: 50)
-- `planner_weight_pattern_changes`: costo fijo por cambio de patrón (default: 100)
+- `planner_weight_pattern_changes`: costo fijo por cambio de modelo (default: 100)
 - `planner_solver_time_limit`: tiempo máximo del solver (segundos, default: 30)
 - `planner_solver_num_workers`: número de workers CP-SAT (0 = auto, default: 0)
 - `planner_solver_relative_gap`: límite de gap relativo para convergencia (default: 0.01)
 - `planner_solver_log_progress`: log de búsqueda (0/1, default: 0)
+- `planner_horizon_days`: horizonte de planificación por batch (días hábiles, default: 30)
+- `planner_horizon_buffer_days`: buffer calendario extra para cálculos (días, default: 10)
 - `planner_holidays`: conjunto de fechas no laborales (texto con fechas, separadas por coma o línea)
 
 #### 3.2.5 Implicancias en inputs
@@ -317,7 +319,7 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
 - `planner_orders` incluye `due_date` para cálculo de entregas y on-time detection.
 - `planner_resources` incluye `molding_max_per_day`, `molding_max_same_part_per_day`, `pour_max_ton_per_day`, `flasks_S/M/L`.
 - `planner_initial_order_progress` → `remaining_molds` (derivado de Vision)
-- `planner_initial_patterns_loaded` → entrada del usuario (qué órdenes tienen patrón activo hoy)
+- `planner_initial_patterns_loaded` → entrada del usuario (qué órdenes tienen modelo activo hoy)
 - `planner_initial_flask_inuse` → desde Reporte Desmoldeo
 - `planner_initial_pour_load` → desde MB52 (WIP no fundido)
 
@@ -337,7 +339,7 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
 - Calcular `start_by` por pedido:
     - `start_by = fecha_entrega - tiempo_total_proceso` (similar al dispatcher).
 - Ordenar pedidos por `start_by` y **llenar la planta** respetando restricciones diarias.
-- Para minimizar cambios de patrón:
+- Para minimizar cambios de modelo:
     - **Completar el pedido completo** antes de pasar al siguiente (usar todas las semanas necesarias).
 - Este enfoque es rápido y explicable, aunque no garantiza optimalidad global.
 
@@ -373,7 +375,7 @@ src/
 ### Definición del Problema
 Planificar la producción de moldes semanalmente (Lunes a Domingo).
 - **Unidad**: Moldes (no piezas individuales).
-- **Restricción Crítica**: Cambiar de patrón (molde) en una línea es costoso. Se prefiere agrupar la producción de un mismo pedido.
+- **Restricción Crítica**: Cambiar de modelo (molde) en una línea es costoso. Se prefiere agrupar la producción de un mismo pedido.
 - **Output**: Plan diario (`plan_daily_order`) indicando cantidad a moldear por `order_id` + `date`.
 
 ### Entidades Planner

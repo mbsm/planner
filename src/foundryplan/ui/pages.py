@@ -8,7 +8,7 @@ from nicegui import ui
 
 from foundryplan.dispatcher.scheduler import generate_dispatch_program
 from foundryplan.data.repository import Repository
-from foundryplan.planner.api import prepare_and_sync
+from foundryplan.planner.api import prepare_and_sync, run_planner
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
 
 
@@ -792,20 +792,184 @@ def register_pages(repo: Repository) -> None:
         render_nav(active="plan", repo=repo)
         with page_container():
             ui.label("Plan (Moldeo)").classes("text-2xl font-semibold")
-            ui.label("Preparación de inputs del Planner (sin solver aún).").classes("text-sm text-slate-600")
+            ui.label("Preparación de inputs y ejecución del Planner.").classes("text-sm text-slate-600")
             with ui.row().classes("items-center gap-2"):
                 asof = ui.input("Asof (lunes)", value=date.today().isoformat())
                 scenario = ui.input("Scenario", value="default")
+                
+                # Container for suggested horizon
+                suggested_horizon_label = ui.label("")
+                
+                horizon_days = ui.number(
+                    "Horizonte (días hábiles)",
+                    value=int(repo.get_config(key="planner_horizon_days", default="30") or 30),
+                    min=1,
+                    step=1,
+                ).classes("w-48")
+                horizon_buffer = ui.number(
+                    "Buffer horizonte (días)",
+                    value=int(repo.get_config(key="planner_horizon_buffer_days", default="10") or 10),
+                    min=0,
+                    step=1,
+                ).classes("w-48")
+                method = ui.select(
+                    ["heuristico", "solver", "combinado"],
+                    value="solver",
+                    label="Método",
+                ).classes("w-40")
+
+                def _update_suggested_horizon() -> None:
+                    """Calculate and display suggested horizon based on orders."""
+                    try:
+                        scenario_name = str(scenario.value or "default").strip() or "default"
+                        scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                        orders_rows = repo.get_planner_orders_rows(scenario_id=scenario_id)
+                        calendar_rows = repo.get_planner_calendar_rows(scenario_id=scenario_id)
+                        workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
+                        
+                        from foundryplan.planner.api import calculate_suggested_horizon
+                        suggested = calculate_suggested_horizon(orders_rows, workdays)
+                        
+                        if suggested is not None:
+                            suggested_horizon_label.set_text(
+                                f"📅 Horizonte sugerido: {suggested} días"
+                            )
+                            horizon_days.set_value(suggested)
+                        else:
+                            suggested_horizon_label.set_text("📅 Horizonte sugerido: (todos los días)")
+                    except Exception as ex:
+                        suggested_horizon_label.set_text(f"⚠️ Error: {ex}")
 
                 def _run_sync() -> None:
                     try:
                         d = date.fromisoformat(str(asof.value))
-                        res = prepare_and_sync(repo, asof_date=d, scenario_name=str(scenario.value or "default"))
+                        res = prepare_and_sync(
+                            repo,
+                            asof_date=d,
+                            scenario_name=str(scenario.value or "default"),
+                            horizon_buffer_days=int(horizon_buffer.value or 0),
+                        )
                         ui.notify(f"Planner inputs listos: {res}", type="positive")
+                        # Update suggested horizon after sync
+                        _update_suggested_horizon()
                     except Exception as ex:
                         ui.notify(f"Error preparando planner: {ex}", color="negative")
 
                 ui.button("Preparar inputs", on_click=_run_sync).props("color=primary")
+
+                def _run_planner() -> None:
+                    try:
+                        d = date.fromisoformat(str(asof.value))
+                        res = run_planner(
+                            repo,
+                            asof_date=d,
+                            scenario_name=str(scenario.value or "default"),
+                            method=str(method.value or "solver"),
+                            horizon_days=int(horizon_days.value or 0),
+                            horizon_buffer_days=int(horizon_buffer.value or 0),
+                        )
+                        status = str(res.get("status") or "OK")
+                        obj = res.get("objective")
+                        suggested = res.get("suggested_horizon_days", "N/A")
+                        actual = res.get("actual_horizon_days", "N/A")
+                        errors = res.get("errors", [])
+                        
+                        msg = f"Planner {method.value}: {status} obj={obj} (sugerido={suggested}, usado={actual})"
+                        if errors:
+                            msg += f" | Errores: {len(errors)}"
+                        
+                        ui.notify(msg, type="positive")
+                    except Exception as ex:
+                        ui.notify(f"Error ejecutando planner: {ex}", color="negative")
+
+                ui.button("Generar plan", on_click=_run_planner).props("outline")
+
+            ui.separator().classes("my-4")
+
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.card().classes("w-full p-4"):
+                    ui.label("Modelos cargados").classes("text-lg font-medium text-slate-700 mb-1")
+                    ui.label("Marca órdenes con modelo activo hoy. Esto afecta el costo de cambios de modelo.").classes(
+                        "text-xs text-slate-500 mb-3"
+                    )
+
+                    with ui.row().classes("items-end gap-3 mb-3"):
+                        asof_in = ui.input("Asof (YYYY-MM-DD)", value=date.today().isoformat()).classes("w-48")
+
+                        def _load_patterns() -> None:
+                            scenario_name = str(scenario.value or "default").strip() or "default"
+                            scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                            try:
+                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                            except Exception:
+                                ui.notify("Fecha Asof inválida", color="negative")
+                                return
+
+                            orders_rows = repo.get_planner_orders_rows(scenario_id=scenario_id)
+                            loaded_rows = repo.get_planner_initial_patterns_loaded(
+                                scenario_id=scenario_id,
+                                asof_date=asof_date,
+                            )
+                            loaded_set = {str(r["order_id"]) for r in loaded_rows if int(r.get("is_loaded") or 0) == 1}
+
+                            patterns_container.clear()
+                            pattern_inputs.clear()
+
+                            if not orders_rows:
+                                with patterns_container:
+                                    ui.label("No hay órdenes del planner para este escenario.").classes("text-slate-600")
+                                return
+
+                            with patterns_container:
+                                for r in orders_rows:
+                                    order_id = str(r.get("order_id") or "")
+                                    part_id = str(r.get("part_id") or "")
+                                    qty = int(r.get("qty") or 0)
+                                    due_date = str(r.get("due_date") or "")
+                                    prio = int(r.get("priority") or 0)
+
+                                    with ui.row().classes("w-full items-center gap-3 p-2 border-b border-slate-100"):
+                                        chk = ui.checkbox(
+                                            value=order_id in loaded_set,
+                                        ).props("dense")
+                                        ui.label(order_id).classes("font-mono text-sm w-40")
+                                        ui.label(part_id).classes("text-sm w-32 text-slate-600")
+                                        ui.label(f"qty={qty}").classes("text-sm w-24 text-slate-600")
+                                        ui.label(f"prio={prio}").classes("text-sm w-24 text-slate-600")
+                                        ui.label(due_date).classes("text-sm text-slate-500")
+
+                                    pattern_inputs[order_id] = chk
+
+                        def _save_patterns() -> None:
+                            scenario_name = str(scenario.value or "default").strip() or "default"
+                            scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                            try:
+                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                            except Exception:
+                                ui.notify("Fecha Asof inválida", color="negative")
+                                return
+
+                            if not pattern_inputs:
+                                ui.notify("No hay modelos cargados para guardar.", color="warning")
+                                return
+
+                            rows = [
+                                (
+                                    int(scenario_id),
+                                    asof_date.isoformat(),
+                                    str(order_id),
+                                    1 if bool(chk.value) else 0,
+                                )
+                                for order_id, chk in pattern_inputs.items()
+                            ]
+                            repo.replace_planner_initial_patterns_loaded(scenario_id=scenario_id, rows=rows)
+                            ui.notify("Modelos cargados guardados", type="positive")
+
+                        ui.button("Cargar", on_click=_load_patterns).props("outline")
+                        ui.button("Guardar", on_click=_save_patterns).props("outline")
+
+                    patterns_container = ui.column().classes("w-full max-h-[420px] overflow-y-auto border rounded")
+                    pattern_inputs: dict[str, ui.checkbox] = {}
 
     @ui.page("/audit")
     def audit_log() -> None:
@@ -2033,9 +2197,11 @@ def register_pages(repo: Repository) -> None:
                     solver_workers.value = int(repo.get_config(key="planner_solver_num_workers", default="0") or 0)
                     solver_gap.value = float(repo.get_config(key="planner_solver_relative_gap", default="0.01") or 0.01)
                     solver_log.value = str(repo.get_config(key="planner_solver_log_progress", default="0") or "0").strip() == "1"
+                    horizon_days.value = int(repo.get_config(key="planner_horizon_days", default="30") or 30)
+                    horizon_buffer.value = int(repo.get_config(key="planner_horizon_buffer_days", default="10") or 10)
                     for w in (flasks_s, flasks_m, flasks_l, molding_max, molding_same, pour_max, notes, holidays):
                         w.update()
-                    for w in (weight_late, weight_finish, weight_pattern, solver_time, solver_workers, solver_gap, solver_log):
+                    for w in (weight_late, weight_finish, weight_pattern, solver_time, solver_workers, solver_gap, solver_log, horizon_days, horizon_buffer):
                         w.update()
 
                 ui.button("Cargar", on_click=_load_click).props("outline")
@@ -2120,6 +2286,18 @@ def register_pages(repo: Repository) -> None:
                             min=0.0,
                             step=0.001,
                         )
+                        horizon_days = ui.number(
+                            "Horizonte (días hábiles)",
+                            value=int(repo.get_config(key="planner_horizon_days", default="30") or 30),
+                            min=1,
+                            step=1,
+                        )
+                        horizon_buffer = ui.number(
+                            "Buffer horizonte (días)",
+                            value=int(repo.get_config(key="planner_horizon_buffer_days", default="10") or 10),
+                            min=0,
+                            step=1,
+                        )
                         solver_log = ui.checkbox(
                             "Log progreso búsqueda",
                             value=str(repo.get_config(key="planner_solver_log_progress", default="0") or "0").strip() == "1",
@@ -2127,6 +2305,8 @@ def register_pages(repo: Repository) -> None:
                         solver_time.props("outlined dense")
                         solver_workers.props("outlined dense")
                         solver_gap.props("outlined dense")
+                        horizon_days.props("outlined dense")
+                        horizon_buffer.props("outlined dense")
 
             ui.separator().classes("my-4")
 
@@ -2144,67 +2324,6 @@ def register_pages(repo: Repository) -> None:
                     ui.label("Notas").classes("text-lg font-medium text-slate-700 mb-2")
                     notes = ui.textarea("Notas del escenario", value=str(res.get("notes") or "")).classes("w-full")
                     notes.props("outlined")
-
-            ui.separator().classes("my-4")
-
-            with ui.row().classes("w-full gap-6 items-start"):
-                with ui.card().classes("w-full p-4"):
-                    ui.label("Patrones cargados").classes("text-lg font-medium text-slate-700 mb-1")
-                    ui.label("Marca órdenes con patrón activo hoy. Esto afecta el costo de cambios de patrón.").classes(
-                        "text-xs text-slate-500 mb-3"
-                    )
-
-                    with ui.row().classes("items-end gap-3 mb-3"):
-                        asof_in = ui.input("Asof (YYYY-MM-DD)", value=date.today().isoformat()).classes("w-48")
-
-                        def _load_patterns() -> None:
-                            scenario_name = str(scenario_in.value or "default").strip() or "default"
-                            scenario_id = repo.ensure_planner_scenario(name=scenario_name)
-                            try:
-                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
-                            except Exception:
-                                ui.notify("Fecha Asof inválida", color="negative")
-                                return
-
-                            orders_rows = repo.get_planner_orders_rows(scenario_id=scenario_id)
-                            loaded_rows = repo.get_planner_initial_patterns_loaded(
-                                scenario_id=scenario_id,
-                                asof_date=asof_date,
-                            )
-                            loaded_set = {str(r["order_id"]) for r in loaded_rows if int(r.get("is_loaded") or 0) == 1}
-
-                            patterns_container.clear()
-                            pattern_inputs.clear()
-
-                            if not orders_rows:
-                                with patterns_container:
-                                    ui.label("No hay órdenes del planner para este escenario.").classes("text-slate-600")
-                                return
-
-                            with patterns_container:
-                                for r in orders_rows:
-                                    order_id = str(r.get("order_id") or "")
-                                    part_id = str(r.get("part_id") or "")
-                                    qty = int(r.get("qty") or 0)
-                                    due_date = str(r.get("due_date") or "")
-                                    prio = int(r.get("priority") or 0)
-
-                                    with ui.row().classes("w-full items-center gap-3 p-2 border-b border-slate-100"):
-                                        chk = ui.checkbox(
-                                            value=order_id in loaded_set,
-                                        ).props("dense")
-                                        ui.label(order_id).classes("font-mono text-sm w-40")
-                                        ui.label(part_id).classes("text-sm w-32 text-slate-600")
-                                        ui.label(f"qty={qty}").classes("text-sm w-24 text-slate-600")
-                                        ui.label(f"prio={prio}").classes("text-sm w-24 text-slate-600")
-                                        ui.label(due_date).classes("text-sm text-slate-500")
-
-                                    pattern_inputs[order_id] = chk
-
-                        ui.button("Cargar", on_click=_load_patterns).props("outline")
-
-                    patterns_container = ui.column().classes("w-full max-h-[420px] overflow-y-auto border rounded")
-                    pattern_inputs: dict[str, ui.checkbox] = {}
 
             with ui.row().classes("w-full justify-end gap-2 pt-4"):
                 def save_planner_cfg() -> None:
@@ -2252,35 +2371,17 @@ def register_pages(repo: Repository) -> None:
                         key="planner_solver_log_progress",
                         value="1" if bool(solver_log.value) else "0",
                     )
+                    repo.set_config(
+                        key="planner_horizon_days",
+                        value=str(horizon_days.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_horizon_buffer_days",
+                        value=str(horizon_buffer.value or "0").strip(),
+                    )
                     ui.notify("Configuración del planner guardada", type="positive")
 
-                def save_patterns_loaded() -> None:
-                    scenario_name = str(scenario_in.value or "default").strip() or "default"
-                    scenario_id = repo.ensure_planner_scenario(name=scenario_name)
-                    try:
-                        asof_date = date.fromisoformat(str(asof_in.value or "").strip())
-                    except Exception:
-                        ui.notify("Fecha Asof inválida", color="negative")
-                        return
-
-                    if not pattern_inputs:
-                        ui.notify("No hay patrones cargados para guardar.", color="warning")
-                        return
-
-                    rows = [
-                        (
-                            int(scenario_id),
-                            asof_date.isoformat(),
-                            str(order_id),
-                            1 if bool(chk.value) else 0,
-                        )
-                        for order_id, chk in pattern_inputs.items()
-                    ]
-                    repo.replace_planner_initial_patterns_loaded(scenario_id=scenario_id, rows=rows)
-                    ui.notify("Patrones cargados guardados", type="positive")
-
                 ui.button("Guardar Configuración", icon="save", on_click=save_planner_cfg).props("unelevated color=primary")
-                ui.button("Guardar Patrones", icon="bookmark", on_click=save_patterns_loaded).props("outline")
                 ui.button("Ir a Plan", on_click=lambda: ui.navigate.to("/plan")).props("flat color=primary")
 
     # @ui.page("/config/pedidos")
