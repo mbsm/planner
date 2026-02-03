@@ -900,6 +900,13 @@ class Db:
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_center', '4000')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_material_prefixes', '436')")
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_weight_late_days', '1000')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_weight_finish_reduction', '50')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_weight_pattern_changes', '100')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_time_limit', '30')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_num_workers', '0')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_relative_gap', '0.01')")
+            con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_solver_log_progress', '0')")
 
             # Process warehouse mapping (by process_id + sap_almacen).
             con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_almacen_moldeo', '4032')")

@@ -17,6 +17,7 @@ def solve_planner(
     initial_patterns_loaded: set[str],
     weights: dict[str, float] | None = None,
     time_limit_seconds: int = 30,
+    solver_params: dict[str, float | int | bool] | None = None,
 ) -> dict:
     """Solve molding plan using OR-Tools CP-SAT.
     
@@ -30,6 +31,7 @@ def solve_planner(
         initial_patterns_loaded: {order_id} of currently loaded patterns
         weights: Objective weights (late_days, finish_reduction, pattern_changes)
         time_limit_seconds: Solver time limit
+        solver_params: Optional CP-SAT parameters (num_search_workers, relative_gap_limit, log_search_progress)
         
     Returns:
         {
@@ -249,6 +251,13 @@ def solve_planner(
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
     solver.parameters.log_search_progress = False
+    if solver_params:
+        if "num_search_workers" in solver_params:
+            solver.parameters.num_search_workers = int(solver_params["num_search_workers"])
+        if "relative_gap_limit" in solver_params:
+            solver.parameters.relative_gap_limit = float(solver_params["relative_gap_limit"])
+        if "log_search_progress" in solver_params:
+            solver.parameters.log_search_progress = bool(solver_params["log_search_progress"])
     status = solver.Solve(model)
     
     # Extract solution

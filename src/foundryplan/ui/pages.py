@@ -2026,7 +2026,16 @@ def register_pages(repo: Repository) -> None:
                     pour_max.value = float(res.get("pour_max_ton_per_day") or 0.0)
                     notes.value = str(res.get("notes") or "")
                     holidays.value = str(repo.get_config(key="planner_holidays", default="") or "")
+                    weight_late.value = float(repo.get_config(key="planner_weight_late_days", default="1000") or 1000)
+                    weight_finish.value = float(repo.get_config(key="planner_weight_finish_reduction", default="50") or 50)
+                    weight_pattern.value = float(repo.get_config(key="planner_weight_pattern_changes", default="100") or 100)
+                    solver_time.value = int(repo.get_config(key="planner_solver_time_limit", default="30") or 30)
+                    solver_workers.value = int(repo.get_config(key="planner_solver_num_workers", default="0") or 0)
+                    solver_gap.value = float(repo.get_config(key="planner_solver_relative_gap", default="0.01") or 0.01)
+                    solver_log.value = str(repo.get_config(key="planner_solver_log_progress", default="0") or "0").strip() == "1"
                     for w in (flasks_s, flasks_m, flasks_l, molding_max, molding_same, pour_max, notes, holidays):
+                        w.update()
+                    for w in (weight_late, weight_finish, weight_pattern, solver_time, solver_workers, solver_gap, solver_log):
                         w.update()
 
                 ui.button("Cargar", on_click=_load_click).props("outline")
@@ -2064,6 +2073,61 @@ def register_pages(repo: Repository) -> None:
                         flasks_m.props("outlined dense")
                         flasks_l.props("outlined dense")
 
+            with ui.row().classes("w-full gap-6 items-start pt-3"):
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Objetivo").classes("text-lg font-medium text-slate-700 mb-2")
+                    with ui.column().classes("w-full gap-2"):
+                        weight_late = ui.number(
+                            "Peso atraso (late_days)",
+                            value=float(repo.get_config(key="planner_weight_late_days", default="1000") or 1000),
+                            min=0,
+                            step=1,
+                        )
+                        weight_finish = ui.number(
+                            "Peso reducción terminación",
+                            value=float(repo.get_config(key="planner_weight_finish_reduction", default="50") or 50),
+                            min=0,
+                            step=1,
+                        )
+                        weight_pattern = ui.number(
+                            "Peso cambio patrón",
+                            value=float(repo.get_config(key="planner_weight_pattern_changes", default="100") or 100),
+                            min=0,
+                            step=1,
+                        )
+                        weight_late.props("outlined dense")
+                        weight_finish.props("outlined dense")
+                        weight_pattern.props("outlined dense")
+
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Solver").classes("text-lg font-medium text-slate-700 mb-2")
+                    with ui.column().classes("w-full gap-2"):
+                        solver_time = ui.number(
+                            "Tiempo máx. (seg)",
+                            value=int(repo.get_config(key="planner_solver_time_limit", default="30") or 30),
+                            min=1,
+                            step=1,
+                        )
+                        solver_workers = ui.number(
+                            "Workers (0=auto)",
+                            value=int(repo.get_config(key="planner_solver_num_workers", default="0") or 0),
+                            min=0,
+                            step=1,
+                        )
+                        solver_gap = ui.number(
+                            "Gap relativo",
+                            value=float(repo.get_config(key="planner_solver_relative_gap", default="0.01") or 0.01),
+                            min=0.0,
+                            step=0.001,
+                        )
+                        solver_log = ui.checkbox(
+                            "Log progreso búsqueda",
+                            value=str(repo.get_config(key="planner_solver_log_progress", default="0") or "0").strip() == "1",
+                        ).classes("text-sm text-slate-600")
+                        solver_time.props("outlined dense")
+                        solver_workers.props("outlined dense")
+                        solver_gap.props("outlined dense")
+
             ui.separator().classes("my-4")
 
             with ui.row().classes("w-full gap-6 items-start"):
@@ -2080,6 +2144,67 @@ def register_pages(repo: Repository) -> None:
                     ui.label("Notas").classes("text-lg font-medium text-slate-700 mb-2")
                     notes = ui.textarea("Notas del escenario", value=str(res.get("notes") or "")).classes("w-full")
                     notes.props("outlined")
+
+            ui.separator().classes("my-4")
+
+            with ui.row().classes("w-full gap-6 items-start"):
+                with ui.card().classes("w-full p-4"):
+                    ui.label("Patrones cargados").classes("text-lg font-medium text-slate-700 mb-1")
+                    ui.label("Marca órdenes con patrón activo hoy. Esto afecta el costo de cambios de patrón.").classes(
+                        "text-xs text-slate-500 mb-3"
+                    )
+
+                    with ui.row().classes("items-end gap-3 mb-3"):
+                        asof_in = ui.input("Asof (YYYY-MM-DD)", value=date.today().isoformat()).classes("w-48")
+
+                        def _load_patterns() -> None:
+                            scenario_name = str(scenario_in.value or "default").strip() or "default"
+                            scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                            try:
+                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                            except Exception:
+                                ui.notify("Fecha Asof inválida", color="negative")
+                                return
+
+                            orders_rows = repo.get_planner_orders_rows(scenario_id=scenario_id)
+                            loaded_rows = repo.get_planner_initial_patterns_loaded(
+                                scenario_id=scenario_id,
+                                asof_date=asof_date,
+                            )
+                            loaded_set = {str(r["order_id"]) for r in loaded_rows if int(r.get("is_loaded") or 0) == 1}
+
+                            patterns_container.clear()
+                            pattern_inputs.clear()
+
+                            if not orders_rows:
+                                with patterns_container:
+                                    ui.label("No hay órdenes del planner para este escenario.").classes("text-slate-600")
+                                return
+
+                            with patterns_container:
+                                for r in orders_rows:
+                                    order_id = str(r.get("order_id") or "")
+                                    part_id = str(r.get("part_id") or "")
+                                    qty = int(r.get("qty") or 0)
+                                    due_date = str(r.get("due_date") or "")
+                                    prio = int(r.get("priority") or 0)
+
+                                    with ui.row().classes("w-full items-center gap-3 p-2 border-b border-slate-100"):
+                                        chk = ui.checkbox(
+                                            value=order_id in loaded_set,
+                                        ).props("dense")
+                                        ui.label(order_id).classes("font-mono text-sm w-40")
+                                        ui.label(part_id).classes("text-sm w-32 text-slate-600")
+                                        ui.label(f"qty={qty}").classes("text-sm w-24 text-slate-600")
+                                        ui.label(f"prio={prio}").classes("text-sm w-24 text-slate-600")
+                                        ui.label(due_date).classes("text-sm text-slate-500")
+
+                                    pattern_inputs[order_id] = chk
+
+                        ui.button("Cargar", on_click=_load_patterns).props("outline")
+
+                    patterns_container = ui.column().classes("w-full max-h-[420px] overflow-y-auto border rounded")
+                    pattern_inputs: dict[str, ui.checkbox] = {}
 
             with ui.row().classes("w-full justify-end gap-2 pt-4"):
                 def save_planner_cfg() -> None:
@@ -2099,9 +2224,63 @@ def register_pages(repo: Repository) -> None:
                         key="planner_holidays",
                         value=str(holidays.value or "").strip(),
                     )
+                    repo.set_config(
+                        key="planner_weight_late_days",
+                        value=str(weight_late.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_weight_finish_reduction",
+                        value=str(weight_finish.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_weight_pattern_changes",
+                        value=str(weight_pattern.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_solver_time_limit",
+                        value=str(solver_time.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_solver_num_workers",
+                        value=str(solver_workers.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_solver_relative_gap",
+                        value=str(solver_gap.value or "0").strip(),
+                    )
+                    repo.set_config(
+                        key="planner_solver_log_progress",
+                        value="1" if bool(solver_log.value) else "0",
+                    )
                     ui.notify("Configuración del planner guardada", type="positive")
 
-                ui.button("Guardar", icon="save", on_click=save_planner_cfg).props("unelevated color=primary")
+                def save_patterns_loaded() -> None:
+                    scenario_name = str(scenario_in.value or "default").strip() or "default"
+                    scenario_id = repo.ensure_planner_scenario(name=scenario_name)
+                    try:
+                        asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                    except Exception:
+                        ui.notify("Fecha Asof inválida", color="negative")
+                        return
+
+                    if not pattern_inputs:
+                        ui.notify("No hay patrones cargados para guardar.", color="warning")
+                        return
+
+                    rows = [
+                        (
+                            int(scenario_id),
+                            asof_date.isoformat(),
+                            str(order_id),
+                            1 if bool(chk.value) else 0,
+                        )
+                        for order_id, chk in pattern_inputs.items()
+                    ]
+                    repo.replace_planner_initial_patterns_loaded(scenario_id=scenario_id, rows=rows)
+                    ui.notify("Patrones cargados guardados", type="positive")
+
+                ui.button("Guardar Configuración", icon="save", on_click=save_planner_cfg).props("unelevated color=primary")
+                ui.button("Guardar Patrones", icon="bookmark", on_click=save_patterns_loaded).props("outline")
                 ui.button("Ir a Plan", on_click=lambda: ui.navigate.to("/plan")).props("flat color=primary")
 
     # @ui.page("/config/pedidos")

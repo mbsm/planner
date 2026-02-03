@@ -1509,6 +1509,29 @@ class Repository:
                 rows,
             )
 
+    def get_planner_orders_rows(self, *, scenario_id: int) -> list[dict]:
+        """Return planner orders for UI selection (patterns loaded)."""
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT order_id, part_id, qty, due_date, priority
+                FROM planner_orders
+                WHERE scenario_id = ?
+                ORDER BY priority ASC, due_date ASC, order_id ASC
+                """,
+                (int(scenario_id),),
+            ).fetchall()
+        return [
+            {
+                "order_id": str(r[0]),
+                "part_id": str(r[1]),
+                "qty": int(r[2] or 0),
+                "due_date": str(r[3] or ""),
+                "priority": int(r[4] or 0),
+            }
+            for r in rows
+        ]
+
     def replace_planner_calendar(self, *, scenario_id: int, rows: list[tuple]) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM planner_calendar_workdays WHERE scenario_id = ?", (int(scenario_id),))

@@ -300,10 +300,14 @@ Donde:
 
 #### 3.2.4 Parámetros configurables (UI)
 Almacenados en `app_config` o tabla dedicada `planner_config`:
-- `planner_weight_on_time`: peso del porcentaje on-time (default: 1000)
+- `planner_weight_late_days`: penalidad por días de atraso (default: 1000)
 - `planner_weight_finish_reduction`: penalidad por reducción de tiempos (default: 50)
 - `planner_weight_pattern_changes`: costo fijo por cambio de patrón (default: 100)
-- `planner_holidays`: conjunto de fechas no laborales (JSON)
+- `planner_solver_time_limit`: tiempo máximo del solver (segundos, default: 30)
+- `planner_solver_num_workers`: número de workers CP-SAT (0 = auto, default: 0)
+- `planner_solver_relative_gap`: límite de gap relativo para convergencia (default: 0.01)
+- `planner_solver_log_progress`: log de búsqueda (0/1, default: 0)
+- `planner_holidays`: conjunto de fechas no laborales (texto con fechas, separadas por coma o línea)
 
 #### 3.2.5 Implicancias en inputs
 - `planner_parts` debe incluir:
