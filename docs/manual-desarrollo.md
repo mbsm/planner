@@ -190,14 +190,148 @@ Nota: los ítems marcados “en proceso” se muestran fijados en su línea y al
 ### 3.2 Planner (Nuevo)
 Responsable de la planificación de *Moldeo* (nivel orden, semanal).
 - **Ubicación**: `src/foundryplan/planner/`
-- **Objetivo**: Decidir cuántos moldes producir por día por pedido.
+- **Objetivo**: Decidir cuántos moldes producir por día por pedido, optimizando entrega a tiempo, minimizando cambios de patrón y uso de capacidad reducida.
 - **Entradas**:
-    - `PlannerOrder`: Pedidos pendientes (Visión).
-    - `PlannerPart`: Atributos de moldeo (`flask_size`, `cool_hours`, etc.).
-    - `PlannerResource`: Capacidades diarias (tonelaje, cajas/día).
-- **Solver**: Modela el problema como CSP (Constraint Satisfaction Problem) usando OR-Tools.
-    - Minimiza cambios de patrón (setup costs).
-    - Respeta fechas de entrega.
+    - `PlannerOrder`: Pedidos pendientes (Visión) + `remaining_molds`.
+    - `PlannerPart`: Atributos de moldeo (`flask_size`, `cool_hours`, `pieces_per_mold`, `finish_hours`, `min_finish_hours`).
+    - `PlannerResource`: Capacidades diarias (molding, pouring, flasks).
+    - `PlannerInitialConditions`: WIP actual (patterns loaded, flasks in use, pour load).
+- **Solver**: Modela el problema como CSP usando OR-Tools CP-SAT.
+    - Maximiza entrega a tiempo, con penalidades por cambios de patrón y reducción de tiempos.
+
+#### 3.2.1 Decisiones de modelado (Moldeo)
+- **`remaining_molds`**: representa *moldes pendientes de fabricar* para el pedido (no hechos aún).
+- **Patrones (pattern) = `order_id`**: un patrón puede servir a varias órdenes, pero la política de cambio es por orden.
+    - **Regla blanda (soft)**: preferir terminar la orden antes de cambiar patrón; se modela como penalidad en el objetivo.
+    - **Límite duro**: máximo 6 patrones (órdenes) activos en paralelo.
+    - **Finish before switch**: una orden debe tener `remaining_molds = 0` antes de desactivar su patrón.
+- **Uso de cajas (flasks)**:
+    - **Fuente**: Reporte Desmoldeo (no MB52). La fecha de liberación de la caja se deriva del desmoldeo/enfriamiento reportado.
+    - **Persistencia**: se carga en `planner_initial_flask_inuse` con `release_workday_index`.
+- **Carga inicial de colada (pour load)**:
+    - Se calcula desde MB52 (todos los moldes fabricados **no fundidos**).
+    - **Metal por molde** = `net_weight_ton × pieces_per_mold`.
+    - Se distribuye **ASAP** llenando la capacidad diaria hacia adelante (forward fill) y se guarda en `planner_initial_pour_load`.
+- **Restricción de colada por día (hard)**:
+    - $$\sum_o \text{molds}_{o,d} \times (\text{net\_weight\_ton}_o \times \text{pieces\_per\_mold}_o) \le \text{pour\_max\_ton\_per\_day} - \text{initial\_pour\_load}_d$$
+- **Tiempos de terminación (flexible, dentro de límites)**:
+    - Cada orden tiene `finish_hours` nominal (fijo en `material_master`).
+    - Puede reducirse hasta `min_finish_hours` para respetar fecha comprometida.
+    - Si incluso con reducción máxima no se alcanza la fecha, la orden se marca **late (atrasada)**.
+
+#### 3.2.2 Supuestos de calendario (flujo de proceso)
+- **Moldeo**: se moldean piezas el día $d$ (día hábil).
+- **Fundición**: se funde el **siguiente día hábil**.
+- **Enfriamiento**: desde el día de fundido, contar $\lceil \text{cool\_hours}/24 \rceil$ días **calendario**.
+- **Desmoldeo**: ocurre el día siguiente al término del enfriamiento; las cajas retornan ese día.
+- **Terminación**: desde desmoldeo, aplicar `finish_hours[o]` como **días hábiles**.
+    - Valor **nominal** (desde `material_master`).
+    - Reducible hasta `min_finish_hours[o]` (también desde `material_master`).
+- **Bodega**: al día siguiente de terminar, las piezas llegan a bodega de producto terminado.
+- **On-Time Delivery**: orden $o$ es **on-time** si todas sus piezas llegan a bodega en o antes de `due_date[o]`.
+
+#### 3.2.3 Formulación matemática del Solver
+
+**Variables de decisión:**
+- `molds[o, d]` ∈ ℤ⁺ := moldes de orden $o$ a moldear el día hábil $d$
+- `finish_hours_real[o]` ∈ ℝ := horas de terminación **reales** asignadas a orden $o$
+  - Restricción: `min_finish_hours[o] ≤ finish_hours_real[o] ≤ nominal_finish_hours[o]`
+- `pattern_active[o, d]` ∈ {0,1} := patrón de orden $o$ activo en día $d$
+- `completion_day[o]` ∈ ℤ := día en que la última pieza de orden $o$ llega a bodega
+- `on_time[o]` ∈ {0,1} := 1 si `completion_day[o] ≤ due_date[o]`, 0 en caso contrario
+
+**Restricciones Hard:**
+
+1. **Cobertura de moldes**: 
+   $$\sum_d \text{molds}[o,d] = \text{remaining\_molds}[o] \quad \forall o$$
+
+2. **Capacidad moldeo por día**: 
+   $$\sum_o \text{molds}[o,d] \le \text{molding\_max\_per\_day} \quad \forall d$$
+
+3. **Capacidad moldeo por part/día**: 
+   $$\text{molds}[o,d] \le \text{molding\_max\_same\_part\_per\_day} \quad \forall o, d$$
+
+4. **Capacidad metal por día (considerando WIP inicial)**:
+   $$\sum_o \text{molds}[o,d] \times (\text{net\_weight}[o] \times \text{pieces\_per\_mold}[o])$$
+   $$\le \text{pour\_max\_ton\_per\_day} - \text{initial\_pour\_load}[d] \quad \forall d$$
+
+5. **Disponibilidad de cajas por tamaño**:
+   - Para cada `flask_size`, no más de `flasks[size]` ocupadas simultáneamente
+   - Cada mold de tamaño $s$ moldado en día $d$ libera flask en día $d + \lceil \text{cool\_hours}/24 \rceil + 1$
+
+6. **Límite de patrones activos**: 
+   $$\sum_o \text{pattern\_active}[o,d] \le 6 \quad \forall d$$
+
+7. **Patrón activo solo si hay moldes o residuo**:
+   - `pattern_active[o,d] = 1` ⟹ `remaining_molds[o] > 0` O moldes en proceso de fundición/enfriamiento
+
+8. **Finish hours bounds**:
+   $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
+
+9. **Completion day computation**:
+   - Sea `last_mold_day[o]` = último día en que se moldea molde de orden $o$
+   - Sea `pour_day[o]` = `last_mold_day[o] + 1` (día hábil siguiente)
+   - Sea `cool_calendar_days[o]` = $\lceil \text{cool\_hours}[o]/24 \rceil$
+   - Sea `demolding_day[o]` = `pour_day[o] + cool_calendar_days[o] + 1` (día calendario siguiente al enfriamiento)
+   - Sea `finish_workdays[o]` = $\lceil \text{finish\_hours\_real}[o]/24 / 8 \rceil$ (días hábiles, asumiendo 8h/día)
+   - Sea `finish_day[o]` = `demolding_day[o]` + `finish_workdays[o]` (convertir a días hábiles)
+   - `completion_day[o]` = `finish_day[o] + 1` (día siguiente a terminar, piezas en bodega)
+
+10. **On-Time definition**:
+    $$\text{on\_time}[o] = 1 \text{ si } \text{completion\_day}[o] \le \text{due\_date}[o] \text{, else } 0$$
+
+**Función Objetivo (MINIMIZAR, lineal):**
+
+$$\text{minimize} = w_{\text{late\_days}} \cdot \sum_o \text{late\_days}[o]$$
+$$+ w_{\text{finish\_reduction}} \cdot \sum_o (\text{nominal\_finish\_hours}[o] - \text{finish\_hours\_real}[o])$$
+$$+ w_{\text{pattern\_changes}} \cdot \text{num\_pattern\_switches}$$
+
+> Nota: se reemplaza **on-time delivery** por **late days** para mantener el problema **lineal y manejable** con el horizonte largo.
+
+Donde:
+- `late_days[o] = max(0, completion_day[o] - due_date[o])` (linealizable con variables auxiliares).
+- `num_pattern_switches` = número de veces que `pattern_active[o, d] = 1` y `pattern_active[o, d-1] = 0` (cambios de 0→1).
+- `w_late_days`, `w_finish_reduction`, `w_pattern_changes` son **parámetros configurables desde la GUI** (pesos/penalties).
+
+#### 3.2.4 Parámetros configurables (UI)
+Almacenados en `app_config` o tabla dedicada `planner_config`:
+- `planner_weight_on_time`: peso del porcentaje on-time (default: 1000)
+- `planner_weight_finish_reduction`: penalidad por reducción de tiempos (default: 50)
+- `planner_weight_pattern_changes`: costo fijo por cambio de patrón (default: 100)
+- `planner_holidays`: conjunto de fechas no laborales (JSON)
+
+#### 3.2.5 Implicancias en inputs
+- `planner_parts` debe incluir:
+    - `pieces_per_mold` (moldes x piezas)
+    - `finish_hours` (nominal, desde `material_master`)
+    - `min_finish_hours` (mínimo reducible, desde `material_master`)
+- `planner_orders` incluye `due_date` para cálculo de entregas y on-time detection.
+- `planner_resources` incluye `molding_max_per_day`, `molding_max_same_part_per_day`, `pour_max_ton_per_day`, `flasks_S/M/L`.
+- `planner_initial_order_progress` → `remaining_molds` (derivado de Vision)
+- `planner_initial_patterns_loaded` → entrada del usuario (qué órdenes tienen patrón activo hoy)
+- `planner_initial_flask_inuse` → desde Reporte Desmoldeo
+- `planner_initial_pour_load` → desde MB52 (WIP no fundido)
+
+#### 3.2.6 Enfoques de planificación (Optimización vs Heurístico)
+
+**A) Optimizador (OR-Tools) por bloques secuenciales**
+- El backlog puede ser 14–18 semanas, pero el tiempo real de fabricación por orden es 3–6 semanas.
+- Se resuelve el plan en **bloques de 30 días hábiles** (o ventana configurable).
+- Cada bloque **propaga su salida como condición inicial** del siguiente:
+    - flasks en uso, carga de colada pendiente y órdenes parcialmente moldeadas.
+- Supuesto de complejidad: resolver **n problemas de tamaño t/n** suele ser más rápido que 1 problema de tamaño t.
+- Esto permite responder preguntas de negocio:
+    - “¿Cuándo puedo entregar este pedido?”
+    - “¿Qué pedidos se afectan si fuerzo uno nuevo a una fecha?”
+
+**B) Heurístico (modo actual de planificación manual)**
+- Calcular `start_by` por pedido:
+    - `start_by = fecha_entrega - tiempo_total_proceso` (similar al dispatcher).
+- Ordenar pedidos por `start_by` y **llenar la planta** respetando restricciones diarias.
+- Para minimizar cambios de patrón:
+    - **Completar el pedido completo** antes de pasar al siguiente (usar todas las semanas necesarias).
+- Este enfoque es rápido y explicable, aunque no garantiza optimalidad global.
+
     - Respeta capacidad de líneas de moldeo.
 
 ---
