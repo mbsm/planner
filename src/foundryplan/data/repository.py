@@ -1266,9 +1266,9 @@ class Repository:
         return out
 
     def get_planner_initial_order_progress(self, *, asof_date: date) -> list[dict]:
-        """Compute molded_qty_credit per order from Vision x_fundir and MB52 moldeo stock.
+        """Compute remaining_molds per order from Vision x_fundir and MB52 moldeo stock.
 
-        molded_qty_credit = max(0, ceil(x_fundir / piezas_por_molde) - moldes_en_almacen_moldeo)
+        remaining_molds = max(0, ceil(x_fundir / piezas_por_molde) - moldes_en_almacen_moldeo)
         Blocks if any part is missing piezas_por_molde.
         """
         centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
@@ -1328,7 +1328,7 @@ class Repository:
                 out.append(
                     {
                         "order_id": f"{pedido}/{posicion}",
-                        "molded_qty_credit": int(credit),
+                        "remaining_molds": int(credit),
                         "asof_date": asof_date.isoformat(),
                     }
                 )
@@ -1419,8 +1419,9 @@ class Repository:
             con.executemany(
                 """
                 INSERT INTO planner_parts(
-                    scenario_id, part_id, flask_size, cool_hours, finish_hours, net_weight_ton, alloy
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    scenario_id, part_id, flask_size, cool_hours, finish_hours, min_finish_hours,
+                    pieces_per_mold, net_weight_ton, alloy
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1455,7 +1456,7 @@ class Repository:
             con.executemany(
                 """
                 INSERT INTO planner_initial_order_progress(
-                    scenario_id, asof_date, order_id, molded_qty_credit
+                    scenario_id, asof_date, order_id, remaining_molds
                 ) VALUES(?, ?, ?, ?)
                 """,
                 rows,
@@ -1600,7 +1601,15 @@ class Repository:
         with self.db.connect() as con:
             rows = con.execute(
                 f"""
-                SELECT material, flask_size, tiempo_enfriamiento_molde_dias, peso_unitario_ton, aleacion
+                SELECT
+                    material,
+                    flask_size,
+                    tiempo_enfriamiento_molde_dias,
+                    peso_unitario_ton,
+                    aleacion,
+                    piezas_por_molde,
+                    finish_hours,
+                    min_finish_hours
                 FROM material_master
                 WHERE material IN ({','.join(['?'] * len(materials))})
                 """,
@@ -1620,19 +1629,42 @@ class Repository:
             cool_days = int(r[2] or 0)
             weight = float(r[3] or 0.0)
             alloy = str(r[4] or "").strip() or None
+            pieces_per_mold = float(r[5] or 0.0)
+            finish_hours = float(r[6] or 0.0)
+            min_finish_hours = float(r[7] or 0.0)
             if flask_size not in {"S", "M", "L"} or cool_days <= 0:
                 missing_parts.append(mat)
                 continue
+            if pieces_per_mold <= 0 or finish_hours <= 0 or min_finish_hours <= 0:
+                missing_parts.append(mat)
+                continue
+            if min_finish_hours > finish_hours:
+                missing_parts.append(mat)
+                continue
             cool_hours = float(cool_days) * 24.0
-            finish_hours = 0.0
-            parts_out.append((scenario_id, mat, flask_size, cool_hours, finish_hours, weight, alloy))
+            parts_out.append(
+                (
+                    scenario_id,
+                    mat,
+                    flask_size,
+                    cool_hours,
+                    finish_hours,
+                    min_finish_hours,
+                    pieces_per_mold,
+                    weight,
+                    alloy,
+                )
+            )
             lag_days = 1 + int(math.ceil(cool_hours / 24.0)) + 1 + int(math.ceil(finish_hours / 24.0)) + 1
             if lag_days > max_lag_days:
                 max_lag_days = lag_days
 
         if missing_parts:
             uniq = sorted(set(missing_parts))
-            raise ValueError(f"Faltan datos de flask_size/cool_days en maestro para: {', '.join(uniq[:50])}")
+            raise ValueError(
+                "Faltan datos de flask_size/cool_days/piezas_por_molde/finish_hours/min_finish_hours en maestro para: "
+                f"{', '.join(uniq[:50])}"
+            )
 
         # Build calendar_workdays (Mon-Fri, excluding holidays)
         holidays = self._planner_holidays()
@@ -1651,7 +1683,7 @@ class Repository:
 
         # Initial order progress (credit)
         progress_rows = self.get_planner_initial_order_progress(asof_date=asof_date)
-        progress_out = [(scenario_id, r["asof_date"], r["order_id"], int(r["molded_qty_credit"])) for r in progress_rows]
+        progress_out = [(scenario_id, r["asof_date"], r["order_id"], int(r["remaining_molds"])) for r in progress_rows]
 
         # Initial flask in use
         flask_rows = self.get_planner_initial_flask_inuse(asof_date=asof_date)

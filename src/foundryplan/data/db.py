@@ -76,6 +76,8 @@ class Db:
                     flask_size TEXT,
                     piezas_por_molde REAL,
                     tiempo_enfriamiento_molde_dias INTEGER,
+                    finish_hours REAL,
+                    min_finish_hours REAL,
                     vulcanizado_dias INTEGER,
                     mecanizado_dias INTEGER,
                     inspeccion_externa_dias INTEGER,
@@ -299,6 +301,8 @@ class Db:
                     flask_size TEXT CHECK(flask_size IN ('S','M','L')),
                     cool_hours REAL,
                     finish_hours REAL,
+                    min_finish_hours REAL,
+                    pieces_per_mold REAL,
                     net_weight_ton REAL,
                     alloy TEXT,
                     PRIMARY KEY (scenario_id, part_id)
@@ -338,7 +342,7 @@ class Db:
                     scenario_id INTEGER NOT NULL,
                     asof_date TEXT NOT NULL,
                     order_id TEXT NOT NULL,
-                    molded_qty_credit INTEGER NOT NULL DEFAULT 0
+                    remaining_molds INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS planner_initial_patterns_loaded (
@@ -393,7 +397,7 @@ class Db:
                     order_id TEXT NOT NULL,
                     part_id TEXT NOT NULL,
                     qty INTEGER NOT NULL,
-                    molded_qty_credit INTEGER NOT NULL,
+                    remaining_molds INTEGER NOT NULL,
                     remaining_qty INTEGER NOT NULL,
                     due_date TEXT NOT NULL,
                     delivered_by_due INTEGER NOT NULL,
@@ -505,6 +509,49 @@ class Db:
                             )
                             """
                         )
+                    except Exception:
+                        pass
+
+            # Planner schema updates
+            if self._table_exists(con, "material_master"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(material_master)").fetchall()]
+                if "finish_hours" not in cols:
+                    try:
+                        con.execute("ALTER TABLE material_master ADD COLUMN finish_hours REAL")
+                    except Exception:
+                        pass
+                if "min_finish_hours" not in cols:
+                    try:
+                        con.execute("ALTER TABLE material_master ADD COLUMN min_finish_hours REAL")
+                    except Exception:
+                        pass
+
+            if self._table_exists(con, "planner_parts"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(planner_parts)").fetchall()]
+                if "min_finish_hours" not in cols:
+                    try:
+                        con.execute("ALTER TABLE planner_parts ADD COLUMN min_finish_hours REAL")
+                    except Exception:
+                        pass
+                if "pieces_per_mold" not in cols:
+                    try:
+                        con.execute("ALTER TABLE planner_parts ADD COLUMN pieces_per_mold REAL")
+                    except Exception:
+                        pass
+
+            if self._table_exists(con, "planner_initial_order_progress"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(planner_initial_order_progress)").fetchall()]
+                if "remaining_molds" not in cols:
+                    try:
+                        con.execute("ALTER TABLE planner_initial_order_progress ADD COLUMN remaining_molds INTEGER NOT NULL DEFAULT 0")
+                    except Exception:
+                        pass
+
+            if self._table_exists(con, "planner_order_status"):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(planner_order_status)").fetchall()]
+                if "remaining_molds" not in cols:
+                    try:
+                        con.execute("ALTER TABLE planner_order_status ADD COLUMN remaining_molds INTEGER NOT NULL DEFAULT 0")
                     except Exception:
                         pass
 
