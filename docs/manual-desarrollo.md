@@ -307,16 +307,26 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
 - `planner_solver_num_workers`: número de workers CP-SAT (0 = auto, default: 0)
 - `planner_solver_relative_gap`: límite de gap relativo para convergencia (default: 0.01)
 - `planner_solver_log_progress`: log de búsqueda (0/1, default: 0)
-- `planner_horizon_days`: horizonte de planificación por batch (días hábiles, default: 30)
+- `planner_horizon_days`: horizonte de planificación (días hábiles, default: 30)
 - `planner_horizon_buffer_days`: buffer calendario extra para cálculos (días, default: 10)
 - `planner_holidays`: conjunto de fechas no laborales (texto con fechas, separadas por coma o línea)
+
+**Auto-Horizonte (v2)**:
+- UI calcula automáticamente `horizonte_sugerido = index(última_due_date) + 10% buffer`
+- Usuario ve propuesta en label "📅 Horizonte sugerido: N días"
+- Puede aceptar o modificar manualmente
+- Retorno de `run_planner()` incluye:
+  - `suggested_horizon_days`: horizonte calculado desde órdenes
+  - `actual_horizon_days`: horizonte usado en ejecución
 
 #### 3.2.5 Implicancias en inputs
 - `planner_parts` debe incluir:
     - `pieces_per_mold` (moldes x piezas)
     - `finish_hours` (nominal, desde `material_master`)
     - `min_finish_hours` (mínimo reducible, desde `material_master`)
-- `planner_orders` incluye `due_date` para cálculo de entregas y on-time detection.
+    - `cool_hours` (horas de enfriamiento en molde, desde `material_master`)
+    - `net_weight_ton` (peso unitario en toneladas)
+- `planner_orders` incluye `due_date` para cálculo de `start_by` y entregas.
 - `planner_resources` incluye `molding_max_per_day`, `molding_max_same_part_per_day`, `pour_max_ton_per_day`, `flasks_S/M/L`.
 - `planner_initial_order_progress` → `remaining_molds` (derivado de Vision)
 - `planner_initial_patterns_loaded` → entrada del usuario (qué órdenes tienen modelo activo hoy)
@@ -325,25 +335,61 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
 
 #### 3.2.6 Enfoques de planificación (Optimización vs Heurístico)
 
-**A) Optimizador (OR-Tools) por bloques secuenciales**
+**A) Optimizador (OR-Tools)**
 - El backlog puede ser 14–18 semanas, pero el tiempo real de fabricación por orden es 3–6 semanas.
-- Se resuelve el plan en **bloques de 30 días hábiles** (o ventana configurable).
-- Cada bloque **propaga su salida como condición inicial** del siguiente:
+- Se resuelve el plan en un horizonte configurable (30 días hábiles por defecto). *Arquitectura preparada para bloques secuenciales futuros.*
+- Cada bloque puede propagar su salida como condición inicial del siguiente:
     - flasks en uso, carga de colada pendiente y órdenes parcialmente moldeadas.
 - Supuesto de complejidad: resolver **n problemas de tamaño t/n** suele ser más rápido que 1 problema de tamaño t.
 - Esto permite responder preguntas de negocio:
     - “¿Cuándo puedo entregar este pedido?”
     - “¿Qué pedidos se afectan si fuerzo uno nuevo a una fecha?”
 
-**B) Heurístico (modo actual de planificación manual)**
-- Calcular `start_by` por pedido:
-    - `start_by = fecha_entrega - tiempo_total_proceso` (similar al dispatcher).
-- Ordenar pedidos por `start_by` y **llenar la planta** respetando restricciones diarias.
-- Para minimizar cambios de modelo:
-    - **Completar el pedido completo** antes de pasar al siguiente (usar todas las semanas necesarias).
-- Este enfoque es rápido y explicable, aunque no garantiza optimalidad global.
+**B) Heurístico (Greedy capacity-first con start_by mejorado)**
 
-    - Respeta capacidad de líneas de moldeo.
+*Algoritmo mejorado (v2)*:
+- **Cálculo de `start_by` por orden** (fecha de inicio recomendada):
+  $$\text{start\_by} = \text{due\_date} - \left(\begin{array}{l}
+    \lceil\frac{\text{remaining\_molds}}{\text{molding\_max\_same\_part\_per\_day}}\rceil + \\
+    1 + \\
+    \lceil\frac{\text{cool\_hours}}{24}\rceil + \\
+    \lceil\frac{\text{finish\_hours}}{8 \times 24}\rceil + \\
+    \lceil\frac{\text{total\_process\_days}}{7} \times 2\rceil
+  \end{array}\right)$$
+  
+  Donde:
+  - Semanas de moldeo = $\lceil\frac{\text{remaining\_molds}}{\text{molding\_max\_same\_part\_per\_day}}\rceil$
+  - Pouring = 1 día hábil
+  - Cooling = $\lceil\frac{\text{cool\_hours}}{24}\rceil$ días calendario
+  - Finish = $\lceil\frac{\text{finish\_hours}}{8 \times 24}\rceil$ días hábiles (asumiendo 8h/día)
+  - Weekend buffer = $\lceil\frac{\text{process\_days}}{7} \times 2\rceil$ (2 días por cada 7 de proceso)
+
+- **Orden de procesamiento** (prioridad de scheduling):
+  1. Órdenes con `start_by <= hoy` (atrasadas) — máxima urgencia
+  2. Órdenes con modelo/patrón activo (minimiza cambios)
+  3. Por prioridad ASC (1=urgente, 3=normal)
+  4. Por `start_by` ASC (fechas más próximas)
+
+- **Capacidad diaria**: 
+  - Moldeo: `molding_max_per_day` global + `molding_max_same_part_per_day` por parte
+  - Cajas: Inventario S/M/L respetando días de enfriamiento
+  - Metal: `pour_max_ton_per_day` (menos WIP inicial)
+
+- **Garantía de cobertura**: 
+  - El heurístico intenta schedular TODOS los moldes faltantes en el horizonte.
+  - Si no cabe: retorna `status=HEURISTIC_INCOMPLETE` con lista de órdenes sin schedular.
+  - Lanza error si horizonte > 365 días (evita problemas de memoria/complejidad).
+
+- **Auto-horizonte**:
+  - UI calcula horizonte sugerido = index(última due_date) + 10% buffer
+  - Usuario puede aceptar o modificar manualmente.
+
+Este enfoque es rápido (greedy O(n log n)) y explicable, aunque no garantiza optimalidad global.
+
+**C) Combinado (Heurístico + Solver)**
+- Ejecuta heurístico primero → extrae solución como warm-start hints para CP-SAT
+- Pasa hints a CP-SAT para refinamiento/optimización
+- Permite convergencia más rápida del solver con mejor punto inicial factible
 
 ---
 

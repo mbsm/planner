@@ -794,7 +794,7 @@ def register_pages(repo: Repository) -> None:
             ui.label("Plan (Moldeo)").classes("text-2xl font-semibold")
             ui.label("Preparación de inputs y ejecución del Planner.").classes("text-sm text-slate-600")
             with ui.row().classes("items-center gap-2"):
-                asof = ui.input("Asof (lunes)", value=date.today().isoformat())
+                asof = ui.input("Asof (dd-mm-yyyy)", value=date.today().strftime("%d-%m-%Y"))
                 scenario = ui.input("Scenario", value="default")
                 
                 # Container for suggested horizon
@@ -842,7 +842,7 @@ def register_pages(repo: Repository) -> None:
 
                 def _run_sync() -> None:
                     try:
-                        d = date.fromisoformat(str(asof.value))
+                        d = datetime.strptime(str(asof.value or "").strip(), "%d-%m-%Y").date()
                         res = prepare_and_sync(
                             repo,
                             asof_date=d,
@@ -859,7 +859,7 @@ def register_pages(repo: Repository) -> None:
 
                 def _run_planner() -> None:
                     try:
-                        d = date.fromisoformat(str(asof.value))
+                        d = datetime.strptime(str(asof.value or "").strip(), "%d-%m-%Y").date()
                         res = run_planner(
                             repo,
                             asof_date=d,
@@ -894,13 +894,13 @@ def register_pages(repo: Repository) -> None:
                     )
 
                     with ui.row().classes("items-end gap-3 mb-3"):
-                        asof_in = ui.input("Asof (YYYY-MM-DD)", value=date.today().isoformat()).classes("w-48")
+                        asof_in = ui.input("Asof (dd-mm-yyyy)", value=date.today().strftime("%d-%m-%Y")).classes("w-48")
 
                         def _load_patterns() -> None:
                             scenario_name = str(scenario.value or "default").strip() or "default"
                             scenario_id = repo.ensure_planner_scenario(name=scenario_name)
                             try:
-                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                                asof_date = datetime.strptime(str(asof_in.value or "").strip(), "%d-%m-%Y").date()
                             except Exception:
                                 ui.notify("Fecha Asof inválida", color="negative")
                                 return
@@ -944,7 +944,7 @@ def register_pages(repo: Repository) -> None:
                             scenario_name = str(scenario.value or "default").strip() or "default"
                             scenario_id = repo.ensure_planner_scenario(name=scenario_name)
                             try:
-                                asof_date = date.fromisoformat(str(asof_in.value or "").strip())
+                                asof_date = datetime.strptime(str(asof_in.value or "").strip(), "%d-%m-%Y").date()
                             except Exception:
                                 ui.notify("Fecha Asof inválida", color="negative")
                                 return
