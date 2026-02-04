@@ -809,6 +809,108 @@ def register_pages(repo: Repository) -> None:
             # Container for weekly plan summary table (always visible)
             plan_summary_container = ui.column().classes("w-full mt-4")
             
+            # Container for resources/capacity table
+            resources_container = ui.column().classes("w-full mt-4")
+            
+            def _render_resources_table(scenario_name: str) -> None:
+                """Render weekly resources and capacity availability."""
+                resources_container.clear()
+                
+                try:
+                    scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
+                    resources = repo.planner.get_planner_resources(scenario_id=scenario_id)
+                    calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
+                    
+                    if not resources or not calendar_rows:
+                        with resources_container:
+                            ui.label("Recursos y Capacidades").classes("text-lg font-semibold mb-2")
+                            ui.label("Sin configuración de recursos. Configure en Config > Planner.").classes("text-sm text-slate-500")
+                        return
+                    
+                    workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
+                    
+                    # Group workdays by week
+                    weeks_data = {}
+                    for idx, d in enumerate(workdays):
+                        week_start = d - timedelta(days=d.weekday())
+                        week_key = week_start.isoformat()
+                        if week_key not in weeks_data:
+                            weeks_data[week_key] = {
+                                'start': week_start,
+                                'workdays': [],
+                                'workday_count': 0,
+                            }
+                        weeks_data[week_key]['workdays'].append(d)
+                        weeks_data[week_key]['workday_count'] += 1
+                    
+                    # Get shift configuration
+                    molding_shifts = resources.get("molding_shifts") or {}
+                    pour_shifts = resources.get("pour_shifts") or {}
+                    molding_per_shift = int(resources.get("molding_max_per_shift") or 0)
+                    pour_per_shift = float(resources.get("pour_max_ton_per_shift") or 0.0)
+                    
+                    day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+                    
+                    # Build table rows
+                    table_rows = []
+                    for week_key in sorted(weeks_data.keys())[:8]:  # Show first 8 weeks
+                        week = weeks_data[week_key]
+                        week_start = week['start']
+                        week_end = week_start + timedelta(days=6)
+                        week_label = f"{week_start.strftime('%d-%b')} / {week_end.strftime('%d-%b')}"
+                        
+                        # Calculate weekly capacity from shifts
+                        total_molding_capacity = 0
+                        total_pour_capacity = 0.0
+                        
+                        for d in week['workdays']:
+                            day_idx = d.weekday()
+                            day_name = day_names[day_idx]
+                            molding_shifts_day = int(molding_shifts.get(day_name, 0))
+                            pour_shifts_day = int(pour_shifts.get(day_name, 0))
+                            
+                            total_molding_capacity += molding_per_shift * molding_shifts_day
+                            total_pour_capacity += pour_per_shift * pour_shifts_day
+                        
+                        # Get flask capacities
+                        flask_types = resources.get("flask_types", [])
+                        flask_capacities = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
+                        
+                        table_rows.append({
+                            'semana': week_label,
+                            'dias_lab': week['workday_count'],
+                            'moldes': int(total_molding_capacity),
+                            'toneladas': round(total_pour_capacity, 1),
+                            'flasks_s': flask_capacities.get('S', 0),
+                            'flasks_m': flask_capacities.get('M', 0),
+                            'flasks_l': flask_capacities.get('L', 0),
+                            'flasks_jumbo': flask_capacities.get('JUMBO', 0),
+                        })
+                    
+                    with resources_container:
+                        ui.label("Recursos y Capacidades Semanales").classes("text-lg font-semibold mb-2")
+                        
+                        ui.table(
+                            columns=[
+                                {'name': 'semana', 'label': 'Semana', 'field': 'semana', 'align': 'left', 'sortable': True},
+                                {'name': 'dias_lab', 'label': 'Días Lab.', 'field': 'dias_lab', 'align': 'center'},
+                                {'name': 'moldes', 'label': 'Cap. Moldeo', 'field': 'moldes', 'align': 'right'},
+                                {'name': 'toneladas', 'label': 'Cap. Fusión (t)', 'field': 'toneladas', 'align': 'right'},
+                                {'name': 'flasks_s', 'label': 'Flasks S', 'field': 'flasks_s', 'align': 'center'},
+                                {'name': 'flasks_m', 'label': 'Flasks M', 'field': 'flasks_m', 'align': 'center'},
+                                {'name': 'flasks_l', 'label': 'Flasks L', 'field': 'flasks_l', 'align': 'center'},
+                                {'name': 'flasks_jumbo', 'label': 'Flasks XL', 'field': 'flasks_jumbo', 'align': 'center'},
+                            ],
+                            rows=table_rows,
+                            row_key='semana',
+                        ).classes('w-full').props('dense flat')
+                        
+                        ui.label("💡 Capacidades calculadas desde configuración de turnos y días laborables").classes("text-xs text-slate-500 mt-1")
+                        
+                except Exception as ex:
+                    with resources_container:
+                        ui.label(f"Error cargando recursos: {ex}").classes("text-red-600")
+            
             def _render_plan_summary(scenario_name: str, plan_res: dict | None = None) -> None:
                 """Render or update the plan summary table."""
                 plan_summary_container.clear()
@@ -974,6 +1076,7 @@ def register_pages(repo: Repository) -> None:
                 scenario = ui.input("Scenario", value="default")
                 
                 # Initial render with empty/placeholder after scenario is defined
+                _render_resources_table(str(scenario.value or "default").strip() or "default")
                 _render_plan_summary(str(scenario.value or "default").strip() or "default")
                 
                 # Container for suggested horizon
@@ -1042,6 +1145,9 @@ def register_pages(repo: Repository) -> None:
                             
                         # Update suggested horizon after sync
                         _update_suggested_horizon()
+                        
+                        # Update resources table
+                        _render_resources_table(str(scenario.value or "default").strip() or "default")
                     except Exception as ex:
                         ui.notify(f"Error preparando planner: {ex}", color="negative")
 
@@ -1074,6 +1180,7 @@ def register_pages(repo: Repository) -> None:
                         
                         # Update both plan summary (top) and detailed results (below)
                         scenario_name = str(scenario.value or "default").strip() or "default"
+                        _render_resources_table(scenario_name)
                         _render_plan_summary(scenario_name, res)
                         _render_planner_results(res)
                     except Exception as ex:
