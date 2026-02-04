@@ -67,9 +67,9 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
             planta = val or planta
     except Exception:
         pass
-    sections: list[tuple[str, str, str]] = [
-        ("dashboard", "Pedidos", "/"),
-        ("plan", "Plan de Producción", "/plan"),
+    sections: list[tuple[str, str, str, str]] = [
+        ("dashboard", "Pedidos", "/", "inventory_2"),
+        ("plan", "Plan de Producción", "/plan", "view_timeline"),
     ]
     production_program_active = active_key in {
         "programa_toma_dureza",
@@ -101,10 +101,10 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                 )
                 ui.label(planta).classes("text-xl md:text-2xl font-semibold leading-none")
             with ui.row().classes("items-center gap-1"):
-                for key, label, path in sections:
+                for key, label, path, icon in sections:
                     is_active = key == active_key
                     props = "dense no-caps" + (" unelevated" if is_active else " flat")
-                    btn = ui.button(label, on_click=lambda p=path: ui.navigate.to(p)).props(props)
+                    btn = ui.button(label, icon=icon, on_click=lambda p=path: ui.navigate.to(p)).props(props)
                     btn.style("color: rgb(0, 120, 190);")
 
                 prog_props = "dense no-caps" + (" unelevated" if production_program_active else " flat")
