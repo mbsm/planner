@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import date
 
-from foundryplan.data.repository import Repository
+from foundryplan.data.repository_views import PlannerRepository
 
 
 def prepare_planner_inputs(
-    repo: Repository,
+    repo: PlannerRepository,
     *,
     scenario_name: str = "default",
     asof_date: date,

@@ -42,7 +42,7 @@ def main() -> None:
     db.ensure_schema()
 
     repo = Repository(db)
-    planta = repo.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua"
+    planta = repo.data.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua"
     register_pages(repo)
 
     assets_dir = Path(__file__).resolve().parents[2] / "assets"

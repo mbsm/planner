@@ -23,7 +23,7 @@ def temp_db():
     # Configure to accept all materials (not just 436*)
     from foundryplan.data.repository import Repository
     repo = Repository(db)
-    repo.set_config(key="sap_material_prefixes", value="*")
+    repo.data.set_config(key="sap_material_prefixes", value="*")
     
     yield db, db_path
     
@@ -107,7 +107,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
     
     # Import MB52
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     # Verify job was created
     with db.connect() as con:
@@ -170,7 +170,7 @@ def test_create_jobs_test_priority(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     with db.connect() as con:
         jobs = con.execute(
@@ -212,7 +212,7 @@ def test_create_jobs_auto_split_test_and_normal_lotes(temp_db):
     ]
 
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
 
     with db.connect() as con:
         jobs = con.execute(
@@ -277,7 +277,7 @@ def test_create_jobs_multiple_processes(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     with db.connect() as con:
         jobs = con.execute(
@@ -323,7 +323,7 @@ def test_update_jobs_from_vision(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     # Create Vision Excel
     vision_wb = openpyxl.Workbook()
@@ -352,7 +352,7 @@ def test_update_jobs_from_vision(temp_db):
     vision_bytes = vision_buffer.read()
     
     # Import Vision
-    repo.import_sap_vision_bytes(content=vision_bytes)
+    repo.data.import_sap_vision_bytes(content=vision_bytes)
     
     # Verify job was updated with fecha_de_pedido only
     with db.connect() as con:
@@ -392,7 +392,7 @@ def test_split_job_basic(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     # Get the created job
     with db.connect() as con:
@@ -411,7 +411,7 @@ def test_split_job_basic(temp_db):
     original_job_id = original_job["job_id"]
     
     # Split: 4 lotes in first job, 6 in second
-    job1_id, job2_id = repo.split_job(job_id=original_job_id, qty_split=4)
+    job1_id, job2_id = repo.dispatcher.split_job(job_id=original_job_id, qty_split=4)
     
     assert job1_id == original_job_id, "Original job ID should be preserved"
     assert job2_id != job1_id, "New job should have different ID"
@@ -493,7 +493,7 @@ def test_split_job_validation_errors(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     with db.connect() as con:
         job = con.execute(
@@ -504,21 +504,21 @@ def test_split_job_validation_errors(temp_db):
     
     # Test: qty_split must be positive
     with pytest.raises(ValueError, match="qty_split must be positive"):
-        repo.split_job(job_id=job_id, qty_split=0)
+        repo.dispatcher.split_job(job_id=job_id, qty_split=0)
     
     with pytest.raises(ValueError, match="qty_split must be positive"):
-        repo.split_job(job_id=job_id, qty_split=-1)
+        repo.dispatcher.split_job(job_id=job_id, qty_split=-1)
     
     # Test: qty_split must be less than qty
     with pytest.raises(ValueError, match="must be less than job qty"):
-        repo.split_job(job_id=job_id, qty_split=5)
+        repo.dispatcher.split_job(job_id=job_id, qty_split=5)
     
     with pytest.raises(ValueError, match="must be less than job qty"):
-        repo.split_job(job_id=job_id, qty_split=10)
+        repo.dispatcher.split_job(job_id=job_id, qty_split=10)
     
     # Test: job not found
     with pytest.raises(ValueError, match="Job .* not found"):
-        repo.split_job(job_id="nonexistent_job_id", qty_split=2)
+        repo.dispatcher.split_job(job_id="nonexistent_job_id", qty_split=2)
 
 
 def test_split_distribution_new_stock(temp_db):
@@ -542,7 +542,7 @@ def test_split_distribution_new_stock(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows_initial)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     # Step 2: Get job and split it (4 + 6)
     with db.connect() as con:
@@ -550,7 +550,7 @@ def test_split_distribution_new_stock(temp_db):
             "SELECT job_id FROM job WHERE pedido = '30517821'"
         ).fetchone()
     
-    job1_id, job2_id = repo.split_job(job_id=original["job_id"], qty_split=4)
+    job1_id, job2_id = repo.dispatcher.split_job(job_id=original["job_id"], qty_split=4)
     
     # Step 3: Simulate MB52 update with new stock (5 new lotes)
     # This should go to job1 since it has qty=4 (less than job2's qty=6)
@@ -569,7 +569,7 @@ def test_split_distribution_new_stock(temp_db):
     ]
     
     mb52_bytes_new = create_mock_mb52_excel(mb52_rows_new)
-    repo.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
     
     # Step 4: Verify new stock went to job1 (had lowest qty)
     # Job 2 received no stock (0), so it should be deleted by cleanup logic.
@@ -609,7 +609,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     ]
     
     mb52_bytes = create_mock_mb52_excel(mb52_rows_initial)
-    repo.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
     # Step 2: Split job (3 + 5)
     with db.connect() as con:
@@ -617,11 +617,11 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
             "SELECT job_id FROM job WHERE pedido = '30517821'"
         ).fetchone()
     
-    job1_id, job2_id = repo.split_job(job_id=original["job_id"], qty_split=3)
+    job1_id, job2_id = repo.dispatcher.split_job(job_id=original["job_id"], qty_split=3)
     
     # Step 3: Simulate MB52 update with NO stock (all lotes disappear)
     mb52_bytes_empty = create_mock_mb52_excel([])
-    repo.import_sap_mb52_bytes(content=mb52_bytes_empty, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes_empty, mode="replace")
     
     # Verify both splits were deleted because qty dropped to 0
     with db.connect() as con:
@@ -654,7 +654,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     ]
     
     mb52_bytes_new = create_mock_mb52_excel(mb52_rows_new)
-    repo.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
+    repo.data.import_sap_mb52_bytes(content=mb52_bytes_new, mode="replace")
     
     # Step 5: Verify a NEW job was created (1 total job now)
     with db.connect() as con:
@@ -674,3 +674,4 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     # Only 1 job
     assert jobs[0]["qty"] == 3, "New job should have the 3 new lotes"
     assert jobs[0]["job_id"] not in [job1_id, job2_id], "Should be a different job_id"
+

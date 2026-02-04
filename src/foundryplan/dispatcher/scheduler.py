@@ -18,6 +18,17 @@ def check_constraints(line: Line, part: Part) -> bool:
                 return False
             continue
 
+        # Boolean constraint (special capability): if part REQUIRES the capability (True), 
+        # line MUST have it. If part doesn't require it (False), any line works.
+        # This allows lines with special capabilities to process both special AND normal parts.
+        if isinstance(rule_value, bool):
+            part_value = getattr(part, attr, False)
+            # If part requires the capability but line doesn't have it, reject
+            if part_value is True and rule_value is not True:
+                return False
+            # If part doesn't require capability, accept (line can process normal parts)
+            continue
+
         # Generic attribute check on Part
         if not hasattr(part, attr):
             return False

@@ -88,13 +88,17 @@ Tabla gestionada por el usuario (CRUD) para completar datos faltantes en SAP.
 | `aleacion` | TEXT | Aleación (Metalurgia) |
 | `flask_size` | TEXT | Tamaño Caja (S/M/L) |
 | `piezas_por_molde` | REAL | Rendimiento de caja |
-| `tiempo_enfriamiento_molde_dias` | INT | Días de enfriamiento moldes |
+| `tiempo_enfriamiento_molde_dias` | REAL | **Horas** de enfriamiento moldes (planner convierte a días) |
+| `finish_days` | INT | **Días** de terminaciones (planner convierte a horas) |
+| `min_finish_days` | INT | **Días** mínimos de terminaciones (planner convierte a horas) |
 | `vulcanizado_dias` | INT | Lead time Vulcanizado |
 | `mecanizado_dias` | INT | Lead time Mecanizado |
 | `inspeccion_externa_dias` | INT | Lead time Insp. Externa |
 | `peso_unitario_ton` | REAL | Peso por pieza (Neto) |
-| `mec_perf_inclinada` | BOOL | Restricción técnica |
-| `sobre_medida_mecanizado` | BOOL | Restricción técnica |
+| `mec_perf_inclinada` | BOOL | Material requiere capacidad especial: mecanizado de perforación inclinada |
+| `sobre_medida_mecanizado` | BOOL | Material requiere capacidad especial: sobre medida en mecanizado |
+
+**Nota sobre restricciones:** Las restricciones booleanas (`mec_perf_inclinada`, `sobre_medida_mecanizado`) indican **capacidades especiales requeridas por el material**. En el dispatcher, solo líneas marcadas con estas capacidades pueden procesar materiales que las requieren. Las líneas con capacidades especiales pueden procesar tanto materiales especiales como normales.
 
 ### 2.2 Configuración (`app_config`, `process`, `resource`)
 
@@ -112,23 +116,27 @@ Definiciones de la planta.
 
 ## 3. Tablas Transaccionales (Planificación)
 
-Estas tablas son generadas por la aplicación.
+Estas tablas son generadas o derivadas por la aplicación.
 
-### 3.1 Jobs (`job`, `job_unit`)
-La unidad fundamental de trabajo.
-- `job`: Representa una orden de trabajo para una cantidad de piezas (`qty`) de un `material` para un `pedido`.
-- `job_unit`: Representa cada unidad física (serializada por `lote` y `correlativo`).
+### 3.1 SAP Staging
+- `sap_mb52_snapshot`: Último MB52 cargado (stock por lote/almacén).
+- `sap_vision_snapshot` + vista `sap_vision`: Pedidos Visión Planta (demanda).
 
-### 3.2 Dispatch Output (`dispatch_queue_*`)
-Salida del algoritmo de despacho (Scheduler V2).
-- `dispatch_queue_run`: Cabecera de una ejecución de dispatch.
-- `dispatch_queue_item`: Lista secuenciada de trabajos asignados a recursos.
-    - `seq`: Número de secuencia (1 = Primero).
-    - `pinned`: Si el trabajo fue fijado manualmente por el usuario.
+### 3.2 Pedidos derivados
+- `orders`: Copia derivada de MB52+Visión, por (pedido,posicion,material), usada para prioridades y creación de jobs.
+- Prioridades: `orderpos_priority` (pedido+posición) y compatibilidad `order_priority` (solo pedido).
 
-### 3.3 Planner Output (Moldeo)
-Salida del optimizador OR-Tools.
-- `planner_scenarios`: Escenarios de simulación.
-- `planner_parts`: Copia local de atributos de parte para el solver.
-- `planner_orders`: Copia local de demanda para el solver.
-- `plan_daily_order`: Resultado (Cantidad a moldear por día/orden).
+### 3.3 Jobs
+- `job`: Orden de trabajo interna (qty, prioridad, cliente, correlativos).
+- `job_unit`: Unidades físicas (lote, correlativo) asociadas al job.
+
+### 3.4 Planner (Moldeo)
+- Escenario/datos: `planner_scenarios`, `planner_parts`, `planner_orders`, `planner_resources`, `planner_flask_types`, `planner_calendar_workdays`.
+- Condiciones iniciales: `planner_initial_order_progress`, `planner_initial_patterns_loaded`, `planner_initial_flask_inuse`, `planner_initial_pour_load`.
+
+### 3.5 Locks / progreso
+- `program_in_progress`, `program_in_progress_item`: Bloqueos/pinning de secuencias en curso.
+- `last_program`: Último programa generado (por proceso).
+
+### 3.6 Métricas
+- `vision_kpi_daily`: KPI diarios reconstruidos desde Visión.

@@ -12,9 +12,19 @@ Foundry Plan es una aplicación web (NiceGUI) con backend Python y persistencia 
 El sistema sigue una arquitectura modular en torno a un núcleo funcional:
 - **UI (Frontend/Backend)**: `src/foundryplan/ui/` (NiceGUI). Renderizado servidor.
 - **Dispatcher**: `src/foundryplan/dispatcher/` (Scheduler heurístico por proceso/recursos, genera colas ejecutables).
-- **Planner Module**: `src/foundryplan/planner/` (Scheduler optimizado con OR-Tools).
+- **Planner Module**: `src/foundryplan/planner/` (Scheduler heurístico por capacidad, sin solver CP-SAT).
 - **Data Access**: `src/foundryplan/data/` (Repositorio, DB Schema, Excel I/O).
+- **DB Schema split**: `src/foundryplan/data/schema/` (`data_schema.py`, `dispatcher_schema.py`, `planner_schema.py`).
 - **Persistencia**: SQLite local (`foundryplan.db`).
+
+**Repositorios por módulo:**
+- `Repository` es un *facade* que expone solo `repo.data`, `repo.dispatcher`, `repo.planner`.
+- `repo.data`: snapshots SAP + maestro de materiales + config general.
+- `repo.dispatcher`: colas/programas, locks “en proceso” y configuración de líneas.
+- `repo.planner`: tablas y configuración del planner.
+
+Dispatcher/Planner consultan órdenes/materiales vía `repo.data` y mantienen sus propias tablas internas.
+En UI, cualquier lectura de órdenes, stock, desmoldeo o maestro debe ir por `repo.data`.
 
 ### 1.2 Tecnologías
 - **Lenguaje**: Python 3.11+.
@@ -39,12 +49,20 @@ Representa stock físico por lote.
 - **Tabla DB**: `sap_mb52_snapshot`
 - **Mapeo Clave**:
     - `material` (Número de parte)
+    - `material_base` (Material base mapeado desde Vision via pedido/posición, usado para mapear moldes a piezas)
     - `centro`, `almacen` (Ubicación)
     - `lote` (Identificador único físico, usado para trazabilidad)
     - `documento_comercial`, `posicion_sd` (Enlace a pedido)
-- **Reglas**:
-    - Se importan todos los registros pertinentes al centro/almacén.
-    - El filtrado por estado (`libre_utilizacion`, `en_control_calidad`) se aplica dinámicamente según reglas de proceso (ver 2.2 Configuración).
+- **Filtros de Importación**:
+    - **Centro**: Solo registros con `centro` = config `sap_centro` (default: "4000")
+    - **Material**: NO se filtra por prefijos (se importa todo)
+    - **Mapeo material_base**: Durante importación, se mapea pedido/posición desde Vision para obtener material de pieza cuando el almacén tiene código de molde
+- **Filtros de Disponibilidad por Proceso**:
+    - El filtrado por estado (`libre_utilizacion`, `en_control_calidad`) se aplica **dinámicamente** según configuración de cada proceso (ver 2.2.C)
+    - Cada proceso define su propio predicado de disponibilidad vía `process.availability_predicate_json`
+    - Ejemplos:
+        - Terminaciones: `{"libre_utilizacion": 1, "en_control_calidad": 0}` (stock disponible)
+        - Toma de dureza: `{"libre_utilizacion": 0, "en_control_calidad": 1}` (stock bloqueado/QC)
     - Lotes alfanuméricos se marcan como `is_test=1`.
 
 #### B. Visión Planta (Demand)
@@ -54,16 +72,24 @@ Representa la cartera de pedidos y fechas.
     - `pedido`, `posicion` (PK compuesta de la demanda)
     - `fecha_de_pedido` (Fecha comprometida con cliente, driver principal del plan)
     - `solicitado` (Cantidad original)
-    - `peso_neto_ton` (Peso total del pedido) => Usado para calcular peso unitario.
+    - `peso_neto_ton` (Peso total del pedido) => Usado para calcular peso unitario
+- **Filtros de Importación**:
+    - **Prefijos Material**: Solo materiales que empiecen con prefijos configurados en `sap_vision_material_prefixes` (default: "401,402,403,404")
+    - Excepción: `tipo_posicion = 'ZTLH'` se importa sin filtro de prefijo
+    - **Fecha**: `fecha_de_pedido > 2023-12-31`
+    - **Status**: `status_comercial = 'activo'` (case-insensitive)
+- **Actualización de Maestro**:
+    - Durante importación, actualiza `material_master.peso_unitario_ton` = (peso_neto_kg/1000)/solicitado
+    - Backfill de MB52: actualiza `material_base` en MB52 usando pedido/posición
 
-#### C. Reporte Desmoldeo (WIP Enfriamiento) - *Por Implementar*
+#### C. Reporte Desmoldeo (WIP Enfriamiento)
 Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento y cuándo se liberarán las cajas.
-- **Tabla DB**: `sap_demolding_snapshot` (Propuesta)
+- **Tabla DB**: `sap_demolding_snapshot`
 - **Mapeo Clave**:
-    - `material` <= `Pieza`
+    - `material` <= `Pieza` (aliases: "material", "pieza", "cod_material")
     - `texto_breve` <= `Tipo pieza`
     - `lote` <= `Lote`
-    - `flask_id` <= `Caja` (ID de la caja)
+    - `flask_id` <= **Primeros 3 caracteres** de columna `Caja` (extracción left-to-right)
     - `demolding_date` <= `Fecha Desmoldeo` (Dato real a usar)
     - `demolding_time` <= `Hora Desm.`
     - `mold_type` <= `Tipo molde` (Identifica pruebas/muestras)
@@ -71,6 +97,10 @@ Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento
     - `poured_time` <= `Hora Fundida`
     - `cooling_hours` <= `Hs. Enfria`
     - `mold_quantity` <= `Cant. Moldes` (0 a 1)
+- **Filtros de Importación**:
+    - **Ninguno** - Se importa todo el archivo sin filtros
+- **Actualización de Maestro**:
+    - Durante importación, actualiza `material_master.flask_size` (S/M/L) comparando los primeros 3 caracteres de `flask_id` contra códigos configurados en `planner_resources`
 - **Campos a guardar (Futuro)**: `pieces_per_tray` (Piezas x bandeja), `manufacturing_order` (OF), `tt_curve_high` (Curva TT Alta), `tt_curve_low` (Curva TT Baja), `yard_location` (Cancha).
 - **Campos a ignorar**: `Enfriamiento`, `Fecha a desmoldear` (estimado), `Colada`, `UA de Molde`, `Días para entregar`.
 
@@ -91,9 +121,55 @@ Tabla local editada por el usuario.
 - `family_catalog`: Familias de productos.
 - `process`, `resource`: Definición de líneas productivas y sus capacidades.
 - `resource_constraint`: Reglas que vinculan atributos de `material_master` con `resource` (ej: Línea X solo acepta Familia Y).
-- **Reglas de Stock por Proceso** (*Por Implementar*): Definición configurable de qué lotes se consideran disponibles para cada proceso.
-    - Ej: *Terminaciones* requiere `almacen=X AND libre_utilizacion=1 AND en_control_calidad=0`.
-    - Ej: *Toma de Dureza* requiere `almacen=X AND en_control_calidad=1`.
+
+#### C. Configuración de Filtros de Disponibilidad por Proceso
+Cada proceso puede tener filtros independientes para determinar qué stock del MB52 se considera "disponible" para ese proceso.
+
+**Tabla**: `process`
+**Campo**: `availability_predicate_json` (TEXT, JSON)
+
+**Formato JSON**:
+```json
+{
+  "libre_utilizacion": <0|1|null>,
+  "en_control_calidad": <0|1|null>
+}
+```
+
+**Comportamiento**:
+- Si un campo está presente con valor 0 o 1, se filtra por ese valor exacto
+- Si un campo es `null` o no está presente, NO se filtra por ese campo
+- Los campos especificados se combinan con AND lógico
+
+**Ejemplos de Configuración**:
+
+| Proceso | `libre_utilizacion` | `en_control_calidad` | Significado |
+|---------|---------------------|----------------------|-------------|
+| Terminaciones | 1 | 0 | Solo stock libre y sin QC (disponible) |
+| Toma de dureza | 0 | 1 | Solo stock bloqueado O en QC |
+| Mecanizado | 1 | null | Solo libre, ignora QC |
+| Custom | null | 0 | Ignora libre, solo sin QC |
+
+**Implementación**:
+- `Repository._mb52_availability_predicate_sql(process)` lee la configuración y genera el SQL WHERE dinámicamente
+- La UI en `/config` permite editar estos filtros por proceso mediante dropdowns (Cualquiera/Sí(1)/No(0))
+- Default si no hay config: `{"libre_utilizacion": 1, "en_control_calidad": 0}` (solo stock disponible)
+
+**Configuración en DB** (seeding automático):
+```sql
+INSERT INTO process(process_id, label, sap_almacen, availability_predicate_json) 
+VALUES
+  ('terminaciones', 'Terminaciones', '4035', '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+  ('toma_de_dureza', 'Toma de dureza', '4035', '{"libre_utilizacion": 0, "en_control_calidad": 1}'),
+  ('mecanizado', 'Mecanizado', '4049', '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+  ...
+```
+
+**Gestión desde UI**:
+- Página: `/config` → Sección "Filtros de Disponibilidad por Proceso"
+- Para cada proceso: editar Almacén, Libre utilización (dropdown), En control de calidad (dropdown)
+- Botón "Guardar Filtros de Proceso" actualiza `process.sap_almacen` y `process.availability_predicate_json`
+- Después de guardar, se ejecuta `kick_refresh_from_sap_all()` para regenerar jobs/programas
 
 ---
 
@@ -115,8 +191,9 @@ El sistema construye el universo de trabajo *a partir del stock disponible del p
 - **Momento de construcción**: al importar MB52, `Repository.import_sap_mb52_bytes()` ejecuta `Repository._create_jobs_from_mb52()`.
 - **Filtro por proceso**:
     - Para cada proceso activo (`process.is_active=1`) se toma su `process.sap_almacen`.
-    - Se filtra `sap_mb52_snapshot` por `centro` (config `sap_centro`), `almacen = process.sap_almacen` y un predicado de disponibilidad (`process.availability_predicate_json`).
-    - Esto permite que cada proceso tenga su propia regla (ej.: Terminaciones vs Toma de Dureza).
+    - Se filtra `sap_mb52_snapshot` por `centro` (config `sap_centro`), `almacen = process.sap_almacen` y un predicado de disponibilidad configurable.
+    - El predicado se lee desde `process.availability_predicate_json` (JSON con campos `libre_utilizacion` y/o `en_control_calidad`).
+    - Esto permite que cada proceso tenga su propia regla (ej.: Terminaciones requiere stock disponible; Toma de Dureza requiere stock bloqueado).
 - **Job (cabecera)**: el **job es la unidad de trabajo que el Dispatcher despacha**.
     - Representa un **conjunto de lotes** pertenecientes a un **pedido/posición** para un material, dentro de un proceso.
     - Se crea/actualiza **1 job por (process_id, pedido, posición, material, is_test)**.
@@ -229,6 +306,84 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
     - Reducible hasta `min_finish_hours[o]` (también desde `material_master`).
 - **Bodega**: al día siguiente de terminar, las piezas llegan a bodega de producto terminado.
 - **On-Time Delivery**: orden $o$ es **on-time** si todas sus piezas llegan a bodega en o antes de `due_date[o]`.
+
+#### 3.2.2b Implementación del Calendario (Días Hábiles vs Calendario)
+
+**Indexación de Tiempo:**
+El planner usa un sistema de **índices de días hábiles** (workdays). La lista `workdays: list[date]` contiene solo fechas de lunes a viernes (excluyendo feriados configurados). Todos los cálculos y decisiones usan el índice en esta lista, no fechas calendario.
+
+**Ejemplo:**
+```
+workdays[0] = 2026-02-02 (Lunes)
+workdays[1] = 2026-02-03 (Martes)
+workdays[2] = 2026-02-04 (Miércoles)
+workdays[3] = 2026-02-05 (Jueves)
+workdays[4] = 2026-02-06 (Viernes)
+(Sábado y domingo omitidos)
+workdays[5] = 2026-02-09 (Lunes siguiente)
+```
+
+**Ciclo de Vida del Molde (Workday-based):**
+
+Para un molde moldado en `workdays[d]`:
+- **Día d (Moldeo)**: Moldear en una línea
+- **Día d+1 (Fundición)**: Verter metal, empezar enfriamiento
+- **Días d+2 a d+1+cool_days (Enfriamiento)**: Flask bloqueada (ocupada)
+  - Nota: `cool_days = ceil(cool_hours / 24)` tratado como **días hábiles** por simplificación
+  - En la práctica, esto es conservador: el enfriamiento ocurre 24/7, pero asumimos como working days por simplicidad
+- **Día d+2+cool_days (Desmoldeo)**: Sacar molde, liberar flask
+- **Días d+3+cool_days a d+3+cool_days+finish_days (Terminación)**: Máquinas de acabado procesan piezas
+
+**Duración total de lock de flask:**
+$$\text{lock\_duration\_wd} = 2 + \text{cool\_days}$$
+
+donde 2 = (moldeo + fundición) y `cool_days = ceil(cool_hours/24)`.
+
+**Supuesto Simplificador (Decisión de Diseño):**
+- **Moldeo, Fundición, Desmoldeo**: restricción de que ocurran en **días hábiles**
+  - Se ModeloEstructura: no se schedula moldes para fin de semana
+  - Fundición automáticamente salta al siguiente día hábil
+- **Enfriamiento**: tratado como **días hábiles** (no como días calendario)
+  - Ej: molde fundido viernes → enfriamiento viernes/lunes (salta fin de semana)
+  - Esto es **conservador** (supone enfriamiento más lento de lo que realmente es)
+  - Justificación: simplifica lógica CP-SAT y heurística; la precisión adicional de contabilizar fin de semana no compensa la complejidad
+
+**Por Qué No Usar Calendario Completo para Enfriamiento:**
+
+Usar calendario completo (24/7) requeriría:
+1. Agregar lista de **todas las fechas calendario** (no solo hábiles) al solver
+2. Crear función `get_next_workday_after_calendar_date()` para mapear cuándo termina el enfriamiento y cuándo desmoldear
+3. Modificar constraint de flask: iterar sobre índices mixtos (hábil/calendario)
+4. Complejidad O(n²) en lugar de O(n)
+
+El trade-off: **Simplicidad vs Precisión**. Elegimos simplicidad porque:
+- La planificación es semanal (horizonte ~8 semanas): el buffer es bajo
+- La capacidad de flask raramente es bottleneck crítico
+- El enfriamiento es 24/7 de todas formas (la máquina no se apaga), así que overestimar 1-2 días por fin de semana es tolerable
+
+**Gestión de Feriados:**
+- Config: `app_config.key='planner_holidays'` contiene lista JSON de fechas (ISO format: "2026-02-13", etc.)
+- Función: `repository._planner_holidays() -> set[date]` carga la lista
+- Aplicación: al construir `workdays` en `prepare_and_sync()`, se itera calendario y solo agrega días `d.weekday() < 5 and d not in holidays`
+
+**Mapeo Demolding → Workday Index:**
+Cuando se cargan moldes en proceso (Reporte Desmoldeo) con `demolding_date` (fecha real de desmoldeo):
+```python
+# En repository.get_planner_initial_flask_inuse_from_demolding()
+release_date = demolding_date  # SAP ya da la fecha real de desmoldeo
+workday_idx = 0
+for d in date_range(asof_date, release_date):
+    if d.weekday() < 5 and d not in holidays:
+        workday_idx += 1
+release_workday_index = workday_idx  # Índice hábil mapeado desde fecha calendario
+```
+
+**Archivos Relevantes:**
+- `src/foundryplan/planner/solve.py`: Lógica de constraint (CP-SAT y heurística) usando índices workday
+- `src/foundryplan/data/repository.py`: 
+  - `prepare_and_sync()` línea ~1888: construye lista `workdays` filtrando weekdays + holidays
+  - `get_planner_initial_flask_inuse_from_demolding()` línea ~1378: mapea demolding_date → workday_index
+  - `_planner_holidays()`: carga feriados desde config
 
 #### 3.2.3 Formulación matemática del Solver
 
@@ -391,6 +546,39 @@ Este enfoque es rápido (greedy O(n log n)) y explicable, aunque no garantiza op
 - Pasa hints a CP-SAT para refinamiento/optimización
 - Permite convergencia más rápida del solver con mejor punto inicial factible
 
+#### 3.2.7 Modelos/Patrones Cargados (Opcional)
+
+La sección **"Modelos Cargados"** en la UI (`/plan` → card "Modelos cargados") permite marcar órdenes que tienen un modelo activo en la línea de moldeo hoy. Esta entrada es **completamente opcional** y **graceful degradation** está asegurada.
+
+**Comportamiento:**
+
+1. **Cuando se cargan patrones** (`initial_patterns_loaded = {order_id_1, order_id_2, ...}`):
+   - **Heurístico**: Las órdenes en `initial_patterns_loaded` reciben `is_loaded = 0` en la función de ordenamiento (prioridad mayor).
+     - Efecto: esas órdenes se procesan antes, minimizando cambios de modelo innecesarios.
+   - **CP-SAT**: Las órdenes en `initial_patterns_loaded` no incurren en costo de "switch" el día 0 (si se activan ese día).
+     - Efecto: el objetivo penaliza menos los cambios para órdenes nuevas vs órdenes que continúan.
+
+2. **Cuando está vacío** (`initial_patterns_loaded = {}`):
+   - **Heurístico**: Todas las órdenes reciben `is_loaded = 1` (iguales respecto a carga de patrón).
+     - Efecto: la prioridad se define por `(overdue_status, priority, start_by)` solamente.
+   - **CP-SAT**: Todas las órdenes incurren en costo de switch el día 0 si se activan.
+     - Efecto: no hay reducción de costo para órdenes "anteriores"; todas compiten en igualdad de condiciones.
+   - **Resultado**: El planner procede sin preferencia de patrones. No hay error ni excepción.
+
+**UI:**
+- Card marcada como "Opcional" (badge visible).
+- Si el usuario no carga nada, mostrar lista vacía es válido.
+- Al guardar, guardar un conjunto vacío es permitido.
+- Próxima carga sin patrones sigue siendo graceful.
+
+**Ubicación en código:**
+- **Load/Save**: `src/foundryplan/ui/pages.py` línea ~906-1000
+- **Repository fetch**: `src/foundryplan/data/repository.py` línea ~1630 (`get_planner_initial_patterns_loaded`)
+- **Conversion to solver input**: `src/foundryplan/planner/api.py` línea ~157 (construye `initial_patterns_loaded` set)
+- **Usage in solvers**:
+  - Heurístico: `src/foundryplan/planner/solve.py` línea ~430 (función `_sort_key`)
+  - CP-SAT: `src/foundryplan/planner/solve.py` línea ~255-256 (conteo de switches día 0)
+
 ---
 
 ## 4. Implementación y Estructura de Código
@@ -416,7 +604,129 @@ src/
 
 ---
 
-## 5. Especificaciones Detalladas (Planner Module)
+## 5. Configuración del Sistema
+
+### 5.1 Claves de Configuración Global (`app_config`)
+
+Todas las configuraciones globales se almacenan en la tabla `app_config` con pares `(config_key, config_value)`.
+
+#### Configuraciones SAP
+
+| Clave | Descripción | Default | Notas |
+|-------|-------------|---------|-------|
+| `sap_centro` | Centro SAP para filtrar MB52 | `"4000"` | Solo se importa stock de este centro |
+| `sap_vision_material_prefixes` | Prefijos de material para filtrar Vision Planta | `"401,402,403,404"` | Separados por comas. Solo Vision se filtra por prefijo |
+| `sap_almacen_moldeo` | Almacén para proceso Moldeo | `"4032"` | Usado por el Planner |
+| `sap_almacen_terminaciones` | Almacén para proceso Terminaciones | `"4035"` | Usado por el Dispatcher |
+| `sap_almacen_toma_dureza` | Almacén para Toma de Dureza | `"4035"` | Mismo almacén que Terminaciones, diferente filtro de disponibilidad |
+| `sap_almacen_mecanizado` | Almacén para Mecanizado | `"4049"` | |
+| `sap_almacen_mecanizado_externo` | Almacén para Mecanizado Externo | `"4050"` | |
+| `sap_almacen_inspeccion_externa` | Almacén para Inspección Externa | `"4046"` | |
+| `sap_almacen_por_vulcanizar` | Almacén para Por Vulcanizar | `"4047"` | |
+| `sap_almacen_en_vulcanizado` | Almacén para En Vulcanizado | `"4048"` | |
+
+**Nota**: Los almacenes también se pueden configurar directamente en la tabla `process.sap_almacen`. Las claves `sap_almacen_*` en `app_config` sirven como fallback legacy.
+
+#### Configuraciones de Prioridad
+
+| Clave | Descripción | Default |
+|-------|-------------|---------|
+| `job_priority_map` | Mapeo de categorías a valores numéricos | `{"prueba": 1, "urgente": 2, "normal": 3}` |
+
+#### Configuraciones del Planner
+
+| Clave | Descripción | Default |
+|-------|-------------|---------|
+| `planner_weight_late_days` | Penalidad por día de retraso | `1000` |
+| `planner_weight_finish_reduction` | Penalidad por reducir tiempo de finish | `50` |
+| `planner_weight_pattern_changes` | Penalidad por cambio de modelo/patrón | `100` |
+| `planner_solver_time_limit` | Tiempo máximo de solver (segundos) | `30` |
+| `planner_solver_num_workers` | Número de workers para solver (0=auto) | `0` |
+| `planner_solver_relative_gap` | Gap relativo de optimalidad | `0.01` |
+| `planner_solver_log_progress` | Mostrar log de solver (0/1) | `0` |
+| `planner_horizon_days` | Horizonte de planificación (días hábiles) | `30` |
+| `planner_horizon_buffer_days` | Buffer adicional al horizonte | `10` |
+| `planner_holidays` | Fechas de feriados (JSON array) | `[]` |
+
+#### Configuraciones de UI
+
+| Clave | Descripción | Default |
+|-------|-------------|---------|
+| `planta` | Nombre de la planta | `"Planta Rancagua"` |
+| `ui_allow_move_in_progress_line` | Permitir mover items en proceso entre líneas | `"0"` |
+
+### 5.2 Configuración de Procesos (`process`)
+
+Cada proceso se configura en la tabla `process` con los siguientes campos:
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `process_id` | TEXT (PK) | Identificador único del proceso |
+| `label` | TEXT | Nombre descriptivo para la UI |
+| `sap_almacen` | TEXT | Código de almacén SAP asociado |
+| `is_active` | INTEGER | 1=activo, 0=inactivo |
+| `is_special_moldeo` | INTEGER | 1=proceso de moldeo (usa Planner), 0=proceso normal (usa Dispatcher) |
+| `availability_predicate_json` | TEXT | JSON con filtros de disponibilidad (ver 5.2.1) |
+
+#### 5.2.1 Filtros de Disponibilidad (`availability_predicate_json`)
+
+Formato JSON para definir qué stock del MB52 se considera disponible para cada proceso:
+
+```json
+{
+  "libre_utilizacion": <0|1|null>,
+  "en_control_calidad": <0|1|null>
+}
+```
+
+**Reglas**:
+- Si un campo tiene valor 0 o 1: se filtra por ese valor exacto (`WHERE campo = valor`)
+- Si un campo es `null` o no está presente: NO se filtra por ese campo
+- Los campos presentes se combinan con AND lógico
+
+**Ejemplos**:
+
+| Configuración | SQL Generado | Uso Típico |
+|---------------|--------------|------------|
+| `{"libre_utilizacion": 1, "en_control_calidad": 0}` | `WHERE libre_utilizacion=1 AND en_control_calidad=0` | Terminaciones (stock disponible) |
+| `{"libre_utilizacion": 0, "en_control_calidad": 1}` | `WHERE libre_utilizacion=0 AND en_control_calidad=1` | Toma de dureza (stock bloqueado) |
+| `{"libre_utilizacion": 1}` | `WHERE libre_utilizacion=1` | Solo verificar libre, ignorar QC |
+| `{}` o `null` | `WHERE 1=1` | No filtrar (tomar todo) |
+
+**Gestión desde UI**:
+- Página: `/config` → Sección "Filtros de Disponibilidad por Proceso"
+- Dropdowns por proceso: "Libre utilización" (Cualquiera/Sí(1)/No(0)), "En control de calidad" (Cualquiera/Sí(1)/No(0))
+- Botón "Guardar Filtros de Proceso" actualiza la configuración y regenera jobs
+
+### 5.3 Edición de Configuración desde la UI
+
+#### Configuración Global (`/config`)
+
+**Sección: Parámetros Generales**
+- Nombre Planta
+- Centro SAP
+- Prefijos Material (Visión Planta)
+- UI: Mover filas 'en proceso'
+
+**Sección: Mapeo de Almacenes SAP**
+- Grid con inputs para cada proceso (Terminaciones, Mecanizado, Moldeo, etc.)
+- Botón "Guardar Cambios Globales"
+
+**Sección: Filtros de Disponibilidad por Proceso**
+- Grid con 4 columnas: Proceso, Almacén, Libre utilización, En control de calidad
+- Dropdowns para seleccionar filtros (Cualquiera/Sí/No)
+- Botón "Guardar Filtros de Proceso"
+
+#### Configuración del Planner (`/config/planner`)
+
+- Pesos de optimización (Late days, Finish reduction, Pattern changes)
+- Parámetros del solver (Time limit, Workers, Gap, Log)
+- Horizonte de planificación
+- Feriados (lista editable de fechas)
+
+---
+
+## 6. Especificaciones Detalladas (Planner Module)
 
 ### Definición del Problema
 Planificar la producción de moldes semanalmente (Lunes a Domingo).

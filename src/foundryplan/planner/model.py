@@ -15,7 +15,7 @@ class PlannerOrder:
 @dataclass(frozen=True)
 class PlannerPart:
     part_id: str
-    flask_size: str  # S/M/L
+    flask_type: str  # dynamic flask type code
     cool_hours: float
     finish_hours: float
     min_finish_hours: float
@@ -26,9 +26,8 @@ class PlannerPart:
 
 @dataclass(frozen=True)
 class PlannerResource:
-    flasks_S: int
-    flasks_M: int
-    flasks_L: int
+    flask_capacity: dict[str, int]
+    flask_codes: dict[str, list[str]]
     molding_max_per_day: int
     molding_max_same_part_per_day: int
     pour_max_ton_per_day: float

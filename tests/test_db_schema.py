@@ -56,17 +56,17 @@ def test_ensure_schema_creates_all_tables(temp_db):
     assert "job" in tables
     assert "job_unit" in tables
 
-    # FASE 1.4: Dispatch tables
-    assert "dispatch_queue_run" in tables
-    assert "dispatch_queue_item" in tables
-    assert "last_dispatch" in tables
-    assert "dispatch_in_progress" in tables
-    assert "dispatch_in_progress_item" in tables
-
     # FASE 1.5-1.6: State & KPI tables
     assert "vision_kpi_daily" in tables
     assert "program_in_progress" in tables
     assert "program_in_progress_item" in tables
+
+    # Obsolete dispatch tables should be absent
+    assert "dispatch_queue_run" not in tables
+    assert "dispatch_queue_item" not in tables
+    assert "last_dispatch" not in tables
+    assert "dispatch_in_progress" not in tables
+    assert "dispatch_in_progress_item" not in tables
 
 
 def test_material_master_structure(temp_db):

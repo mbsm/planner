@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from nicegui import ui
 
 from foundryplan.data.repository import Repository
+from foundryplan.dispatcher.scheduler import check_constraints, generate_dispatch_program
 
 
 _THEME_APPLIED = False
@@ -62,14 +63,13 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
     planta = "Planta Rancagua"
     try:
         if repo is not None:
-            val = repo.get_config(key="planta", default="Planta Rancagua")
+            val = repo.data.get_config(key="planta", default="Planta Rancagua")
             planta = val or planta
     except Exception:
         pass
     sections: list[tuple[str, str, str]] = [
         ("dashboard", "Pedidos", "/"),
-        ("actualizar", "Actualizar", "/actualizar"),
-        ("plan", "Plan", "/plan"),
+        ("plan", "Plan de Producción", "/plan"),
     ]
     production_program_active = active_key in {
         "programa_toma_dureza",
@@ -88,6 +88,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
         "config_materiales",
         "config_pedidos",
         "config_planner",
+        "db_browser",
     }
 
     with ui.header().classes("pt-header bg-white text-slate-900"):
@@ -107,7 +108,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                     btn.style("color: rgb(0, 120, 190);")
 
                 prog_props = "dense no-caps" + (" unelevated" if production_program_active else " flat")
-                with ui.button("Programas Producción", icon="factory").props(prog_props) as _prog_btn:
+                with ui.button("Dispatch Producción", icon="factory").props(prog_props) as _prog_btn:
                     _prog_btn.style("color: rgb(0, 120, 190);")
                     with ui.menu().props("auto-close"):
                         ui.menu_item(
@@ -133,6 +134,9 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             on_click=lambda: ui.navigate.to("/programa/en-vulcanizado"),
                         )
 
+                actualizar_props = "dense no-caps" + (" unelevated" if active_key == "actualizar" else " flat")
+                ui.button("Actualizar", icon="cloud_upload", on_click=lambda: ui.navigate.to("/actualizar")).props(actualizar_props).style("color: rgb(0, 120, 190);")
+
                 cfg_props = "dense no-caps" + (" unelevated" if config_active else " flat")
                 with ui.button("Config", icon="settings").props(cfg_props) as _cfg_btn:
                     _cfg_btn.style("color: rgb(0, 120, 190);")
@@ -141,6 +145,11 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             "✓ Parámetros"
                             if active_key in {"config", "config_lineas"}
                             else "Parámetros"
+                        )
+                        label_dispatcher = (
+                            "✓ Dispatcher"
+                            if active_key == "config_dispatcher"
+                            else "Dispatcher"
                         )
                         label_familias = (
                             "✓ Familias"
@@ -162,6 +171,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             if active_key == "config_planner"
                             else "Planner"
                         )
+                        label_db = "✓ Base de datos" if active_key == "db_browser" else "Base de datos"
                         # label_pedidos = (
                         #     "✓ Pedidos"
                         #     if active_key == "config_pedidos"
@@ -169,9 +179,12 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                         # )
 
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
+                        ui.menu_item(label_dispatcher, on_click=lambda: ui.navigate.to("/config/dispatcher"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
                         ui.menu_item(label_planner, on_click=lambda: ui.navigate.to("/config/planner"))
+                        ui.separator()
+                        ui.menu_item(label_db, on_click=lambda: ui.navigate.to("/db"))
                         ui.separator()
                         ui.menu_item(label_audit, on_click=lambda: ui.navigate.to("/audit"))
                         # ui.menu_item(label_pedidos, on_click=lambda: ui.navigate.to("/config/pedidos"))
@@ -347,7 +360,7 @@ def render_line_tables(
                     allow_move_line = False
                     try:
                         allow_move_line = (
-                            str(repo.get_config(key="ui_allow_move_in_progress_line", default="0") or "0").strip() == "1"
+                            str(repo.data.get_config(key="ui_allow_move_in_progress_line", default="0") or "0").strip() == "1"
                         )
                     except Exception:
                         allow_move_line = False
@@ -523,7 +536,7 @@ def render_line_tables(
                                 chosen_line = line_select.value
                             line_id_effective = int(chosen_line or selected.get("_pt_line_id") or line_id)
                             if mark:
-                                repo.mark_in_progress(
+                                repo.dispatcher.mark_in_progress(
                                     process=process,
                                     pedido=pedido,
                                     posicion=posicion,
@@ -531,12 +544,28 @@ def render_line_tables(
                                     line_id=line_id_effective,
                                 )
                             else:
-                                repo.unmark_in_progress(
+                                repo.dispatcher.unmark_in_progress(
                                     process=process,
                                     pedido=pedido,
                                     posicion=posicion,
                                     is_test=is_test,
                                 )
+                                # Regenerate program after unmarking
+                                try:
+                                    lines = repo.dispatcher.get_dispatch_lines_model(process=process)
+                                    jobs = repo.dispatcher.get_jobs_model(process=process)
+                                    parts = repo.dispatcher.get_parts_model()
+                                    pinned_program, remaining_jobs = repo.dispatcher.build_pinned_program_seed(process=process, jobs=jobs, parts=parts)
+                                    program, errors = generate_dispatch_program(
+                                        lines=lines,
+                                        jobs=remaining_jobs,
+                                        parts=parts,
+                                        pinned_program=pinned_program,
+                                    )
+                                    repo.dispatcher.save_last_program(process=process, program=program, errors=errors)
+                                except Exception:
+                                    pass  # Silent fail on regeneration
+                            
                             dialog.close()
                             ui.navigate.reload()
                         except Exception as ex:
@@ -551,6 +580,7 @@ def render_line_tables(
                             return
                         pedido = str(selected.get("pedido") or "").strip()
                         posicion = str(selected.get("posicion") or "").strip()
+                        material = str(selected.get("material") or "").strip()
                         is_test = int(
                             selected.get("is_test")
                             or (1 if str(selected.get("prio_kind") or "").strip().lower() == "test" else 0)
@@ -563,11 +593,42 @@ def render_line_tables(
                         if not pedido or not posicion:
                             ui.notify("Fila inválida (sin pedido/posición)", color="negative")
                             return
+                        
+                        dest = int((line_select.value if line_select is not None else None) or line_id_for_table)
+                        
+                        # Validate that destination line supports this material
                         try:
-                            dest = int((line_select.value if line_select is not None else None) or line_id_for_table)
+                            # Get Part info for this material
+                            parts = repo.dispatcher.get_parts_model()
+                            part = next((p for p in parts if p.material == material), None)
+                            if part is None:
+                                ui.notify(f"Material {material} no encontrado en maestro de materiales", color="negative")
+                                return
+                            
+                            # Get Line info for destination
+                            lines = repo.dispatcher.get_dispatch_lines_model(process=process)
+                            dest_line = next((ln for ln in lines if ln.line_id == str(dest)), None)
+                            if dest_line is None:
+                                ui.notify(f"Línea destino {dest} no encontrada", color="negative")
+                                return
+                            
+                            # Check constraints
+                            if not check_constraints(dest_line, part):
+                                line_name = line_names.get(dest, f"Línea {dest}") if line_names else f"Línea {dest}"
+                                ui.notify(
+                                    f"Material {material} no es compatible con {line_name}. Verifica familia y restricciones.",
+                                    color="negative",
+                                    timeout=5000
+                                )
+                                return
+                        except Exception as ex:
+                            ui.notify(f"Error validando compatibilidad: {ex}", color="negative")
+                            return
+                        
+                        try:
                             # Move only the selected split part.
-                            if hasattr(repo, "move_in_progress"):
-                                repo.move_in_progress(
+                            if hasattr(repo.dispatcher, "move_in_progress"):
+                                repo.dispatcher.move_in_progress(
                                     process=process,
                                     pedido=pedido,
                                     posicion=posicion,
@@ -577,13 +638,30 @@ def render_line_tables(
                                 )
                             else:
                                 # Backward-compatible: move the whole row.
-                                repo.mark_in_progress(
+                                repo.dispatcher.mark_in_progress(
                                     process=process,
                                     pedido=pedido,
                                     posicion=posicion,
                                     is_test=is_test,
                                     line_id=dest,
                                 )
+                            
+                            # Regenerate program with pinned items
+                            try:
+                                lines = repo.dispatcher.get_dispatch_lines_model(process=process)
+                                jobs = repo.dispatcher.get_jobs_model(process=process)
+                                parts = repo.dispatcher.get_parts_model()
+                                pinned_program, remaining_jobs = repo.dispatcher.build_pinned_program_seed(process=process, jobs=jobs, parts=parts)
+                                program, errors = generate_dispatch_program(
+                                    lines=lines,
+                                    jobs=remaining_jobs,
+                                    parts=parts,
+                                    pinned_program=pinned_program,
+                                )
+                                repo.dispatcher.save_last_program(process=process, program=program, errors=errors)
+                            except Exception:
+                                pass  # Silent fail on regeneration
+                            
                             dialog.close()
                             ui.navigate.reload()
                         except Exception as ex:
@@ -603,9 +681,9 @@ def render_line_tables(
                             ui.notify("Fila inválida (sin pedido/posición)", color="negative")
                             return
                         try:
-                            if not hasattr(repo, "create_balanced_split"):
+                            if not hasattr(repo.dispatcher, "create_balanced_split"):
                                 raise ValueError("Versión de la app sin soporte de split")
-                            repo.create_balanced_split(
+                            repo.dispatcher.create_balanced_split(
                                 process=process,
                                 pedido=pedido,
                                 posicion=posicion,
