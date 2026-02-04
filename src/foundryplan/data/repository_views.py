@@ -393,9 +393,13 @@ class PlannerRepository:
         self,
         *,
         scenario_id: int,
-        molding_max_per_day: int,
-        molding_max_same_part_per_day: int,
-        pour_max_ton_per_day: float,
+        molding_max_per_day: int | None = None,
+        molding_max_same_part_per_day: int | None = None,
+        pour_max_ton_per_day: float | None = None,
+        molding_max_per_shift: int | None = None,
+        molding_shifts: dict | None = None,
+        pour_max_ton_per_shift: float | None = None,
+        pour_shifts: dict | None = None,
         notes: str | None = None,
     ) -> None:
         return self._repo.upsert_planner_resources(
@@ -403,6 +407,10 @@ class PlannerRepository:
             molding_max_per_day=molding_max_per_day,
             molding_max_same_part_per_day=molding_max_same_part_per_day,
             pour_max_ton_per_day=pour_max_ton_per_day,
+            molding_max_per_shift=molding_max_per_shift,
+            molding_shifts=molding_shifts,
+            pour_max_ton_per_shift=pour_max_ton_per_shift,
+            pour_shifts=pour_shifts,
             notes=notes,
         )
 
