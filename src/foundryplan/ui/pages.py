@@ -849,6 +849,11 @@ def register_pages(repo: Repository) -> None:
                     molding_per_shift = int(resources.get("molding_max_per_shift") or 0)
                     pour_per_shift = float(resources.get("pour_max_ton_per_shift") or 0.0)
                     
+                    # Get configured flask types (dynamic)
+                    flask_types = resources.get("flask_types", [])
+                    flask_codes = [ft['flask_type'] for ft in flask_types]
+                    flask_capacities_config = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
+                    
                     day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
                     
                     # Build table rows
@@ -872,35 +877,42 @@ def register_pages(repo: Repository) -> None:
                             total_molding_capacity += molding_per_shift * molding_shifts_day
                             total_pour_capacity += pour_per_shift * pour_shifts_day
                         
-                        # Get flask capacities
-                        flask_types = resources.get("flask_types", [])
-                        flask_capacities = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
-                        
-                        table_rows.append({
+                        # Build row with dynamic flask columns
+                        row_data = {
                             'semana': week_label,
                             'dias_lab': week['workday_count'],
                             'moldes': int(total_molding_capacity),
                             'toneladas': round(total_pour_capacity, 1),
-                            'flasks_s': flask_capacities.get('S', 0),
-                            'flasks_m': flask_capacities.get('M', 0),
-                            'flasks_l': flask_capacities.get('L', 0),
-                            'flasks_jumbo': flask_capacities.get('JUMBO', 0),
+                        }
+                        
+                        # Add flask capacities dynamically
+                        for flask_code in flask_codes:
+                            row_data[f'flask_{flask_code}'] = flask_capacities_config.get(flask_code, 0)
+                        
+                        table_rows.append(row_data)
+                    
+                    # Build dynamic columns
+                    columns = [
+                        {'name': 'semana', 'label': 'Semana', 'field': 'semana', 'align': 'left', 'sortable': True},
+                        {'name': 'dias_lab', 'label': 'Días Lab.', 'field': 'dias_lab', 'align': 'center'},
+                        {'name': 'moldes', 'label': 'Cap. Moldeo', 'field': 'moldes', 'align': 'right'},
+                        {'name': 'toneladas', 'label': 'Cap. Fusión (t)', 'field': 'toneladas', 'align': 'right'},
+                    ]
+                    
+                    # Add flask columns dynamically
+                    for flask_code in flask_codes:
+                        columns.append({
+                            'name': f'flask_{flask_code}',
+                            'label': f'Flask {flask_code}',
+                            'field': f'flask_{flask_code}',
+                            'align': 'center',
                         })
                     
                     with resources_container:
                         ui.label("Recursos y Capacidades Semanales").classes("text-lg font-semibold mb-2")
                         
                         ui.table(
-                            columns=[
-                                {'name': 'semana', 'label': 'Semana', 'field': 'semana', 'align': 'left', 'sortable': True},
-                                {'name': 'dias_lab', 'label': 'Días Lab.', 'field': 'dias_lab', 'align': 'center'},
-                                {'name': 'moldes', 'label': 'Cap. Moldeo', 'field': 'moldes', 'align': 'right'},
-                                {'name': 'toneladas', 'label': 'Cap. Fusión (t)', 'field': 'toneladas', 'align': 'right'},
-                                {'name': 'flasks_s', 'label': 'Flasks S', 'field': 'flasks_s', 'align': 'center'},
-                                {'name': 'flasks_m', 'label': 'Flasks M', 'field': 'flasks_m', 'align': 'center'},
-                                {'name': 'flasks_l', 'label': 'Flasks L', 'field': 'flasks_l', 'align': 'center'},
-                                {'name': 'flasks_jumbo', 'label': 'Flasks XL', 'field': 'flasks_jumbo', 'align': 'center'},
-                            ],
+                            columns=columns,
                             rows=table_rows,
                             row_key='semana',
                         ).classes('w-full').props('dense flat')
