@@ -143,12 +143,37 @@ def run_planner(
         codes = [c.strip() for c in codes_csv.split(",") if c.strip()] if codes_csv else []
         flask_codes_map[ftype] = codes
 
+    # Calculate daily capacities from shift configuration
+    molding_max_per_day = int(res.get("molding_max_per_day") or 0)
+    pour_max_ton_per_day = float(res.get("pour_max_ton_per_day") or 0.0)
+    
+    # If shift configuration exists, calculate from shifts
+    molding_max_per_shift = int(res.get("molding_max_per_shift") or 0)
+    molding_shifts = res.get("molding_shifts") or {}
+    pour_max_ton_per_shift = float(res.get("pour_max_ton_per_shift") or 0.0)
+    pour_shifts = res.get("pour_shifts") or {}
+    
+    # Calculate average daily capacity from shifts (weighted by days configured)
+    if molding_max_per_shift > 0 and molding_shifts:
+        total_molding_shifts = sum(molding_shifts.values())
+        days_with_shifts = sum(1 for v in molding_shifts.values() if v > 0)
+        if days_with_shifts > 0:
+            avg_shifts_per_day = total_molding_shifts / days_with_shifts
+            molding_max_per_day = int(molding_max_per_shift * avg_shifts_per_day)
+    
+    if pour_max_ton_per_shift > 0 and pour_shifts:
+        total_pour_shifts = sum(pour_shifts.values())
+        days_with_shifts = sum(1 for v in pour_shifts.values() if v > 0)
+        if days_with_shifts > 0:
+            avg_shifts_per_day = total_pour_shifts / days_with_shifts
+            pour_max_ton_per_day = float(pour_max_ton_per_shift * avg_shifts_per_day)
+
     resources = PlannerResource(
         flask_capacity=flask_capacity,
         flask_codes=flask_codes_map,
-        molding_max_per_day=int(res.get("molding_max_per_day") or 0),
+        molding_max_per_day=molding_max_per_day,
         molding_max_same_part_per_day=int(res.get("molding_max_same_part_per_day") or 0),
-        pour_max_ton_per_day=float(res.get("pour_max_ton_per_day") or 0.0),
+        pour_max_ton_per_day=pour_max_ton_per_day,
     )
 
     initial_pour_load = {int(r["workday_index"]): float(r["tons_committed"] or 0.0) for r in pour_rows}

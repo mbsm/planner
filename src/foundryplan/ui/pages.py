@@ -2303,6 +2303,10 @@ def register_pages(repo: Repository) -> None:
                 resources = repo.planner.get_planner_resources(scenario_id=scenario_id) or {}
                 return scenario_id, resources
 
+            # Define day_names at module level for use in callbacks
+            day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+            day_labels = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
             with ui.row().classes("items-end w-full gap-3"):
                 scenario_in = ui.input("Scenario", value="default").classes("w-56")
 
@@ -2311,6 +2315,16 @@ def register_pages(repo: Repository) -> None:
                     molding_max.value = int(res.get("molding_max_per_day") or 0)
                     molding_same.value = int(res.get("molding_max_same_part_per_day") or 0)
                     pour_max.value = float(res.get("pour_max_ton_per_day") or 0.0)
+                    molding_shift.value = int(res.get("molding_max_per_shift") or 0)
+                    pour_shift.value = float(res.get("pour_max_ton_per_shift") or 0.0)
+                    
+                    # Load shifts
+                    molding_shifts_dict = res.get("molding_shifts") or {}
+                    pour_shifts_dict = res.get("pour_shifts") or {}
+                    for day_name in day_names:
+                        molding_shifts_inputs[day_name].value = int(molding_shifts_dict.get(day_name, 0))
+                        pour_shifts_inputs[day_name].value = int(pour_shifts_dict.get(day_name, 0))
+                    
                     notes.value = str(res.get("notes") or "")
                     flask_rows = res.get("flask_types", []) or []
                     flask_table.rows = flask_rows
@@ -2318,10 +2332,14 @@ def register_pages(repo: Repository) -> None:
                     holidays.value = str(repo.data.get_config(key="planner_holidays", default="") or "")
                     horizon_days.value = int(repo.data.get_config(key="planner_horizon_days", default="30") or 30)
                     horizon_buffer.value = int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10)
-                    for w in (molding_max, molding_same, pour_max, notes, holidays):
+                    for w in (molding_max, molding_same, pour_max, molding_shift, pour_shift, notes, holidays):
                         w.update()
                     for w in (horizon_days, horizon_buffer):
                         w.update()
+                    for inp in molding_shifts_inputs.values():
+                        inp.update()
+                    for inp in pour_shifts_inputs.values():
+                        inp.update()
 
                 ui.button("Cargar", on_click=_load_click).props("outline")
 
@@ -2349,6 +2367,44 @@ def register_pages(repo: Repository) -> None:
                         pour_max.props("outlined dense")
 
                 with ui.card().classes("flex-1 min-w-[420px] p-4"):
+                    ui.label("Turnos (configuración por día)").classes("text-lg font-medium text-slate-700 mb-2")
+                    ui.label("Define capacidades por turno y turnos por día de la semana.").classes("text-xs text-slate-500 mb-3")
+                    
+                    molding_shift = ui.number("Moldes por turno", value=int(res.get("molding_max_per_shift") or 0), min=0, step=1).classes("w-full")
+                    pour_shift = ui.number("Toneladas por turno", value=float(res.get("pour_max_ton_per_shift") or 0.0), min=0, step=0.1).classes("w-full")
+                    molding_shift.props("outlined dense")
+                    pour_shift.props("outlined dense")
+                    
+                    ui.label("Turnos por día de la semana").classes("text-sm font-medium text-slate-600 mt-3 mb-1")
+                    
+                    molding_shifts_dict = res.get("molding_shifts") or {}
+                    pour_shifts_dict = res.get("pour_shifts") or {}
+                    
+                    molding_shifts_inputs = {}
+                    pour_shifts_inputs = {}
+                    
+                    with ui.column().classes("w-full gap-1"):
+                        for day_name, day_label in zip(day_names, day_labels):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(day_label).classes("w-20 text-sm")
+                                molding_shifts_inputs[day_name] = ui.number(
+                                    "M",
+                                    value=int(molding_shifts_dict.get(day_name, 0)),
+                                    min=0,
+                                    max=3,
+                                    step=1,
+                                ).classes("w-16").props("outlined dense")
+                                molding_shifts_inputs[day_name].tooltip("Turnos de moldeo")
+                                pour_shifts_inputs[day_name] = ui.number(
+                                    "F",
+                                    value=int(pour_shifts_dict.get(day_name, 0)),
+                                    min=0,
+                                    max=3,
+                                    step=1,
+                                ).classes("w-16").props("outlined dense")
+                                pour_shifts_inputs[day_name].tooltip("Turnos de fusión")
+            
+            with ui.row().classes("w-full gap-6 items-start pt-3"):
                     ui.label("Flasks (tipos configurables)").classes("text-lg font-medium text-slate-700 mb-2")
                     flask_table = ui.table(
                         columns=[
@@ -2462,11 +2518,20 @@ def register_pages(repo: Repository) -> None:
                 def save_planner_cfg() -> None:
                     scenario_name = str(scenario_in.value or "default").strip() or "default"
                     scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
+                    
+                    # Build shifts dictionaries
+                    molding_shifts = {day_name: int(molding_shifts_inputs[day_name].value or 0) for day_name in day_names}
+                    pour_shifts = {day_name: int(pour_shifts_inputs[day_name].value or 0) for day_name in day_names}
+                    
                     repo.planner.upsert_planner_resources(
                         scenario_id=scenario_id,
                         molding_max_per_day=int(molding_max.value or 0),
                         molding_max_same_part_per_day=int(molding_same.value or 0),
                         pour_max_ton_per_day=float(pour_max.value or 0.0),
+                        molding_max_per_shift=int(molding_shift.value or 0),
+                        molding_shifts=molding_shifts,
+                        pour_max_ton_per_shift=float(pour_shift.value or 0.0),
+                        pour_shifts=pour_shifts,
                         notes=str(notes.value or "").strip() or None,
                     )
                     repo.data.set_config(

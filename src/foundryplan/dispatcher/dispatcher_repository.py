@@ -175,11 +175,9 @@ class DispatcherRepositoryImpl:
         lines = []
         for r in self.get_dispatch_lines_rows(process=process):
             constraints = {"family_id": set(r["families"])}
-            # Add boolean constraints if enabled
-            if r.get("mec_perf_inclinada"):
-                constraints["mec_perf_inclinada"] = True
-            if r.get("sobre_medida_mecanizado"):
-                constraints["sobre_medida_mecanizado"] = True
+            # Add boolean constraints explicitly (both True and False)
+            constraints["mec_perf_inclinada"] = r.get("mec_perf_inclinada", False)
+            constraints["sobre_medida_mecanizado"] = r.get("sobre_medida_mecanizado", False)
             lines.append(Line(line_id=str(r["line_id"]), constraints=constraints))
         return lines
 

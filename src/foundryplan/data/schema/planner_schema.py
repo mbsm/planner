@@ -40,6 +40,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             molding_max_per_day INTEGER,
             molding_max_same_part_per_day INTEGER,
             pour_max_ton_per_day REAL,
+            molding_max_per_shift INTEGER,
+            molding_shifts_json TEXT,
+            pour_max_ton_per_shift REAL,
+            pour_shifts_json TEXT,
             notes TEXT
         );
 
@@ -91,5 +95,25 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             tons_committed REAL NOT NULL,
             PRIMARY KEY (scenario_id, asof_date, workday_index)
         );
+
+        -- Migrations for shift configuration
         """
     )
+    
+    # Add shift columns if they don't exist
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN molding_max_per_shift INTEGER")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN molding_shifts_json TEXT")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN pour_max_ton_per_shift REAL")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN pour_shifts_json TEXT")
+    except Exception:
+        pass

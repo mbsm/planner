@@ -38,6 +38,31 @@ class PlannerRepositoryImpl:
                 continue
         return out
 
+    def _get_working_days_from_shifts(self, molding_shifts: dict, pour_shifts: dict) -> set[int]:
+        """Extract working weekdays from shift configuration.
+        
+        Returns set of weekday integers (0=Mon, 6=Sun) that have ANY shifts configured.
+        Defaults to Mon-Fri (0-4) if no configuration found.
+        """
+        working_days = set()
+        
+        # Days of week mapping
+        day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+        
+        for idx, day_name in enumerate(day_names):
+            molding_shifts_count = molding_shifts.get(day_name, 0)
+            pour_shifts_count = pour_shifts.get(day_name, 0)
+            
+            # Day is working if it has at least one shift (molding OR pour)
+            if molding_shifts_count > 0 or pour_shifts_count > 0:
+                working_days.add(idx)
+        
+        # Default to Mon-Fri if nothing configured
+        if not working_days:
+            working_days = {0, 1, 2, 3, 4}
+        
+        return working_days
+
     def get_planner_initial_order_progress(self, *, asof_date: date) -> list[dict]:
         """Compute remaining_molds per order from Vision x_fundir and MB52 moldeo stock.
 
@@ -489,7 +514,8 @@ class PlannerRepositoryImpl:
         with self.db.connect() as con:
             row = con.execute(
                 """
-                SELECT molding_max_per_day, molding_max_same_part_per_day, pour_max_ton_per_day, notes
+                SELECT molding_max_per_day, molding_max_same_part_per_day, pour_max_ton_per_day, notes,
+                       molding_max_per_shift, molding_shifts_json, pour_max_ton_per_shift, pour_shifts_json
                 FROM planner_resources
                 WHERE scenario_id = ?
                 """,
@@ -506,10 +532,33 @@ class PlannerRepositoryImpl:
             ).fetchall()
         if not row:
             return None
+        
+        # Parse shift configuration
+        import json
+        molding_shifts_json = str(row["molding_shifts_json"] or "")
+        pour_shifts_json = str(row["pour_shifts_json"] or "")
+        
+        molding_shifts = {}
+        pour_shifts = {}
+        try:
+            if molding_shifts_json:
+                molding_shifts = json.loads(molding_shifts_json)
+        except Exception:
+            pass
+        try:
+            if pour_shifts_json:
+                pour_shifts = json.loads(pour_shifts_json)
+        except Exception:
+            pass
+        
         return {
             "molding_max_per_day": int(row["molding_max_per_day"] or 0),
             "molding_max_same_part_per_day": int(row["molding_max_same_part_per_day"] or 0),
             "pour_max_ton_per_day": float(row["pour_max_ton_per_day"] or 0.0),
+            "molding_max_per_shift": int(row["molding_max_per_shift"] or 0),
+            "molding_shifts": molding_shifts,
+            "pour_max_ton_per_shift": float(row["pour_max_ton_per_shift"] or 0.0),
+            "pour_shifts": pour_shifts,
             "notes": str(row["notes"] or ""),
             "flask_types": [
                 {
@@ -549,11 +598,21 @@ class PlannerRepositoryImpl:
         self,
         *,
         scenario_id: int,
-        molding_max_per_day: int,
-        molding_max_same_part_per_day: int,
-        pour_max_ton_per_day: float,
+        molding_max_per_day: int | None = None,
+        molding_max_same_part_per_day: int | None = None,
+        pour_max_ton_per_day: float | None = None,
+        molding_max_per_shift: int | None = None,
+        molding_shifts: dict | None = None,
+        pour_max_ton_per_shift: float | None = None,
+        pour_shifts: dict | None = None,
         notes: str | None = None,
     ) -> None:
+        import json
+        
+        # Convert shift dicts to JSON
+        molding_shifts_json = json.dumps(molding_shifts) if molding_shifts is not None else None
+        pour_shifts_json = json.dumps(pour_shifts) if pour_shifts is not None else None
+        
         with self.db.connect() as con:
             con.execute(
                 """
@@ -562,19 +621,31 @@ class PlannerRepositoryImpl:
                     molding_max_per_day,
                     molding_max_same_part_per_day,
                     pour_max_ton_per_day,
+                    molding_max_per_shift,
+                    molding_shifts_json,
+                    pour_max_ton_per_shift,
+                    pour_shifts_json,
                     notes
-                ) VALUES(?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scenario_id) DO UPDATE SET
-                    molding_max_per_day=excluded.molding_max_per_day,
-                    molding_max_same_part_per_day=excluded.molding_max_same_part_per_day,
-                    pour_max_ton_per_day=excluded.pour_max_ton_per_day,
+                    molding_max_per_day=COALESCE(excluded.molding_max_per_day, molding_max_per_day),
+                    molding_max_same_part_per_day=COALESCE(excluded.molding_max_same_part_per_day, molding_max_same_part_per_day),
+                    pour_max_ton_per_day=COALESCE(excluded.pour_max_ton_per_day, pour_max_ton_per_day),
+                    molding_max_per_shift=COALESCE(excluded.molding_max_per_shift, molding_max_per_shift),
+                    molding_shifts_json=COALESCE(excluded.molding_shifts_json, molding_shifts_json),
+                    pour_max_ton_per_shift=COALESCE(excluded.pour_max_ton_per_shift, pour_max_ton_per_shift),
+                    pour_shifts_json=COALESCE(excluded.pour_shifts_json, pour_shifts_json),
                     notes=excluded.notes
                 """,
                 (
                     int(scenario_id),
-                    int(molding_max_per_day),
-                    int(molding_max_same_part_per_day),
-                    float(pour_max_ton_per_day),
+                    int(molding_max_per_day) if molding_max_per_day is not None else None,
+                    int(molding_max_same_part_per_day) if molding_max_same_part_per_day is not None else None,
+                    float(pour_max_ton_per_day) if pour_max_ton_per_day is not None else None,
+                    int(molding_max_per_shift) if molding_max_per_shift is not None else None,
+                    molding_shifts_json,
+                    float(pour_max_ton_per_shift) if pour_max_ton_per_shift is not None else None,
+                    pour_shifts_json,
                     str(notes).strip() if notes else None,
                 ),
             )
@@ -829,8 +900,14 @@ class PlannerRepositoryImpl:
 
         missing_parts_list = sorted(set(missing_parts))
 
-        # Build calendar_workdays (Mon-Fri, excluding holidays)
+        # Build calendar_workdays based on shift configuration
         holidays = self._planner_holidays()
+        
+        # Get working days from shift configuration
+        molding_shifts = planner_res.get("molding_shifts", {}) if planner_res else {}
+        pour_shifts = planner_res.get("pour_shifts", {}) if planner_res else {}
+        working_weekdays = self._get_working_days_from_shifts(molding_shifts, pour_shifts)
+        
         if max_due is None:
             max_due = asof_date
         target_end = max_due.toordinal() + max_lag_days + int(horizon_buffer_days)
@@ -838,8 +915,9 @@ class PlannerRepositoryImpl:
         d = asof_date
         idx = 0
         while d.toordinal() <= target_end:
-            if d.weekday() < 5 and d not in holidays:
-                week_index = idx // 5
+            # Check if day is working (configured weekday and not a holiday)
+            if d.weekday() in working_weekdays and d not in holidays:
+                week_index = idx // 5  # Keep week_index for compatibility
                 workdays.append((scenario_id, idx, d.isoformat(), week_index))
                 idx += 1
             d = date.fromordinal(d.toordinal() + 1)
