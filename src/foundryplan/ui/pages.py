@@ -8,7 +8,6 @@ from nicegui import ui
 
 from foundryplan.dispatcher.scheduler import generate_dispatch_program
 from foundryplan.data.repository import Repository
-from foundryplan.planner.api import prepare_and_sync, run_planner, build_weekly_view, build_orders_plan_summary
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
 
 
@@ -804,57 +803,70 @@ def register_pages(repo: Repository) -> None:
         render_nav(active="plan", repo=repo)
         with page_container():
             ui.label("Planificador de Producción").classes("text-2xl font-semibold")
-            ui.label("Preparación de inputs y ejecución del Planner.").classes("text-sm text-slate-600")
+            ui.label("Visualización de capacidades y condiciones iniciales.").classes("text-sm text-slate-600")
             
-            # Container for weekly plan summary table (always visible)
-            plan_summary_container = ui.column().classes("w-full mt-4")
+            # Container for initial conditions (occupied resources) - PRIMERO
+            initial_conditions_container = ui.column().classes("w-full mt-4")
             
-            # Container for resources/capacity table
+            # Container for resources/capacity table - SEGUNDO
             resources_container = ui.column().classes("w-full mt-4")
             
             def _render_resources_table(scenario_name: str) -> None:
-                """Render weekly resources and capacity availability."""
+                """Render weekly resources and capacity availability FROM planner_daily_resources table."""
                 resources_container.clear()
                 
                 try:
                     scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
-                    resources = repo.planner.get_planner_resources(scenario_id=scenario_id)
-                    calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
                     
-                    if not resources or not calendar_rows:
+                    # Read daily resources from database (already accounts for demolding)
+                    daily_rows = repo.planner.get_daily_resources_rows(scenario_id=scenario_id)
+                    
+                    if not daily_rows:
                         with resources_container:
-                            ui.label("Recursos y Capacidades").classes("text-lg font-semibold mb-2")
-                            ui.label("Sin configuración de recursos. Configure en Config > Planner.").classes("text-sm text-slate-500")
+                            ui.label("Recursos y Capacidades Disponibles").classes("text-lg font-semibold mb-2")
+                            ui.label("Sin datos de recursos diarios. Cargue desmoldeo para generar.").classes("text-sm text-slate-500")
                         return
                     
-                    workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
+                    # Get flask types from config for column headers
+                    resources = repo.planner.get_planner_resources(scenario_id=scenario_id)
+                    flask_types = resources.get("flask_types", [])
+                    flask_codes = [ft['flask_type'] for ft in flask_types]
                     
-                    # Group workdays by week
+                    # Group by week
                     weeks_data = {}
-                    for idx, d in enumerate(workdays):
-                        week_start = d - timedelta(days=d.weekday())
+                    counted_days_per_week = {}  # Track which days we've counted for molding/pouring
+                    
+                    for r in daily_rows:
+                        day_date = date.fromisoformat(r["day"])
+                        week_start = day_date - timedelta(days=day_date.weekday())
                         week_key = week_start.isoformat()
+                        
                         if week_key not in weeks_data:
                             weeks_data[week_key] = {
                                 'start': week_start,
-                                'workdays': [],
-                                'workday_count': 0,
+                                'days': [],
+                                'flask_min': {},  # Minimum available for each flask type this week
+                                'molding_total': 0,
+                                'same_mold_total': 0,
+                                'pour_total': 0.0,
                             }
-                        weeks_data[week_key]['workdays'].append(d)
-                        weeks_data[week_key]['workday_count'] += 1
-                    
-                    # Get shift configuration
-                    molding_shifts = resources.get("molding_shifts") or {}
-                    pour_shifts = resources.get("pour_shifts") or {}
-                    molding_per_shift = int(resources.get("molding_max_per_shift") or 0)
-                    pour_per_shift = float(resources.get("pour_max_ton_per_shift") or 0.0)
-                    
-                    # Get configured flask types (dynamic)
-                    flask_types = resources.get("flask_types", [])
-                    flask_codes = [ft['flask_type'] for ft in flask_types]
-                    flask_capacities_config = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
-                    
-                    day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+                            counted_days_per_week[week_key] = set()
+                        
+                        weeks_data[week_key]['days'].append(day_date)
+                        
+                        # Track minimum flask availability for the week (bottleneck)
+                        flask_type = r["flask_type"]
+                        avail_qty = int(r["available_qty"])
+                        current_min = weeks_data[week_key]['flask_min'].get(flask_type, float('inf'))
+                        weeks_data[week_key]['flask_min'][flask_type] = min(current_min, avail_qty)
+                        
+                        # Sum molding/pouring capacities (only count once per day, not per flask type)
+                        day_str = r["day"]
+                        if day_str not in counted_days_per_week[week_key]:
+                            weeks_data[week_key]['molding_total'] += int(r["molding_capacity_per_day"] or 0)
+                            weeks_data[week_key]['same_mold_total'] += int(r["same_mold_capacity_per_day"] or 0)
+                            weeks_data[week_key]['pour_total'] += float(r["pouring_tons_available"] or 0.0)
+                            counted_days_per_week[week_key].add(day_str)
                     
                     # Build table rows
                     table_rows = []
@@ -864,30 +876,18 @@ def register_pages(repo: Repository) -> None:
                         week_end = week_start + timedelta(days=6)
                         week_label = f"{week_start.strftime('%d-%b')} / {week_end.strftime('%d-%b')}"
                         
-                        # Calculate weekly capacity from shifts
-                        total_molding_capacity = 0
-                        total_pour_capacity = 0.0
-                        
-                        for d in week['workdays']:
-                            day_idx = d.weekday()
-                            day_name = day_names[day_idx]
-                            molding_shifts_day = int(molding_shifts.get(day_name, 0))
-                            pour_shifts_day = int(pour_shifts.get(day_name, 0))
-                            
-                            total_molding_capacity += molding_per_shift * molding_shifts_day
-                            total_pour_capacity += pour_per_shift * pour_shifts_day
-                        
-                        # Build row with dynamic flask columns
                         row_data = {
                             'semana': week_label,
-                            'dias_lab': week['workday_count'],
-                            'moldes': int(total_molding_capacity),
-                            'toneladas': round(total_pour_capacity, 1),
+                            'dias_lab': len(set(week['days'])),  # Unique working days
+                            'moldes': week['molding_total'],
+                            'mismo_molde': week['same_mold_total'],
+                            'toneladas': round(week['pour_total'], 1),
                         }
                         
-                        # Add flask capacities dynamically
+                        # Add minimum flask availability for each type (bottleneck for week)
                         for flask_code in flask_codes:
-                            row_data[f'flask_{flask_code}'] = flask_capacities_config.get(flask_code, 0)
+                            min_avail = week['flask_min'].get(flask_code, 0)
+                            row_data[f'flask_{flask_code}'] = min_avail if min_avail != float('inf') else 0
                         
                         table_rows.append(row_data)
                     
@@ -896,6 +896,7 @@ def register_pages(repo: Repository) -> None:
                         {'name': 'semana', 'label': 'Semana', 'field': 'semana', 'align': 'left', 'sortable': True},
                         {'name': 'dias_lab', 'label': 'Días Lab.', 'field': 'dias_lab', 'align': 'center'},
                         {'name': 'moldes', 'label': 'Cap. Moldeo', 'field': 'moldes', 'align': 'right'},
+                        {'name': 'mismo_molde', 'label': 'Cap. Mismo Molde', 'field': 'mismo_molde', 'align': 'right'},
                         {'name': 'toneladas', 'label': 'Cap. Fusión (t)', 'field': 'toneladas', 'align': 'right'},
                     ]
                     
@@ -909,7 +910,7 @@ def register_pages(repo: Repository) -> None:
                         })
                     
                     with resources_container:
-                        ui.label("Recursos y Capacidades Semanales").classes("text-lg font-semibold mb-2")
+                        ui.label("Recursos y Capacidades Disponibles").classes("text-lg font-semibold mb-2")
                         
                         ui.table(
                             columns=columns,
@@ -917,475 +918,100 @@ def register_pages(repo: Repository) -> None:
                             row_key='semana',
                         ).classes('w-full').props('dense flat')
                         
-                        ui.label("💡 Capacidades calculadas desde configuración de turnos y días laborables").classes("text-xs text-slate-500 mt-1")
+                        ui.label("💡 Recursos calculados desde tabla diaria (turnos/feriados/config - cajas ocupadas desmoldeo)").classes("text-xs text-slate-500 mt-1")
                         
                 except Exception as ex:
                     with resources_container:
                         ui.label(f"Error cargando recursos: {ex}").classes("text-red-600")
             
-            def _render_plan_summary(scenario_name: str, plan_res: dict | None = None) -> None:
-                """Render or update the plan summary table."""
-                plan_summary_container.clear()
+            def _render_initial_conditions_table(scenario_name: str) -> None:
+                """Render initial conditions (occupied resources from planner_daily_resources)."""
+                initial_conditions_container.clear()
                 
                 try:
                     scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
+                    resources = repo.planner.get_planner_resources(scenario_id=scenario_id)
                     
-                    # Get orders and parts for context
-                    orders_rows = repo.planner.get_planner_orders_rows(scenario_id=scenario_id)
-                    parts_rows = repo.planner.get_planner_parts_rows(scenario_id=scenario_id)
-                    calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
-                    
-                    # Build parts dict
-                    parts_dict = {
-                        str(r["part_id"]): type('obj', (), {
-                            'net_weight_ton': float(r.get("net_weight_ton") or 0),
-                            'pieces_per_mold': float(r.get("pieces_per_mold") or 0),
-                            'flask_size': str(r.get("flask_size") or "S"),
-                        })()
-                        for r in parts_rows
-                    }
-                    
-                    workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
-                    
-                    # If no plan result provided, verify if we can show initial state from existing plan
-                    # If fetching from DB directly is preferred when plan_res is None:
-                    molds_schedule = None
-                    if plan_res and plan_res.get("molds_schedule"):
-                        molds_schedule = plan_res["molds_schedule"]
-                    else:
-                        # Try to load existing plan from DB for this scenario
-                        # This avoids "Ejecutar 'Generar plan'" message if a plan already exists in DB
-                        # Or at least show a structure.
-                        # For "Initial Condition", we ideally want to show pending specific to initial WIP.
-                        # However, build_weekly_view works on a schedule. 
-                        # If we just want to show the table populated, we'd need to fetch planner_plan_daily_order
-                        # But that is not exposed in Repo efficiently as a dictionary yet.
-                        # Let's see if we can just skip the "return" and let build_weekly_view handle empty schedule
-                        # This would show an empty table with headers (weeks) if calendar exists.
-                        molds_schedule = {}
-
-                    # Build weekly view (even with empty schedule, to show calendar structure)
-                    if not workdays:
-                        with plan_summary_container:
-                            ui.label("Resumen Semanal del Plan").classes("text-lg font-semibold mb-2")
-                            ui.label("Sin calendario configurado. Ejecute 'Preparar Inputs'.").classes("text-sm text-slate-500")
+                    if not resources:
+                        with initial_conditions_container:
+                            ui.label("Condiciones Iniciales (Recursos Ocupados)").classes("text-lg font-semibold mb-2")
+                            ui.label("Configure recursos primero.").classes("text-sm text-slate-500")
                         return
                     
-                    # Fetch initial conditions for visualization
-                    # We use today's date as default, assuming scenario matches current preparation
-                    initial_flask_inuse = repo.planner.get_planner_initial_flask_inuse_rows(scenario_id=scenario_id, asof_date=date.today())
-                    initial_pour_load = repo.planner.get_planner_initial_pour_load_rows(scenario_id=scenario_id, asof_date=date.today())
-
-                    weekly_view = build_weekly_view(
-                        molds_schedule,
-                        workdays,
-                        orders_rows,
-                        parts_dict,
-                        initial_flask_inuse=initial_flask_inuse,
-                        initial_pour_load=initial_pour_load,
-                    )
+                    # Get configured flask types (dynamic)
+                    flask_types = resources.get("flask_types", [])
+                    flask_codes = [ft['flask_type'] for ft in flask_types]
+                    flask_totals = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
                     
-                    with plan_summary_container:
-                        ui.label("Resumen Semanal del Plan").classes("text-lg font-semibold mb-2")
+                    if not flask_codes:
+                        with initial_conditions_container:
+                            ui.label("Condiciones Iniciales (Recursos Ocupados)").classes("text-lg font-semibold mb-2")
+                            ui.label("Configure tipos de cajas en Config > Planner primero.").classes("text-sm text-slate-500")
+                        return
+                    
+                    # Read daily resources from database to calculate occupied
+                    daily_rows = repo.planner.get_daily_resources_for_today(scenario_id=scenario_id)
+                    
+                    # Calculate occupied as (total - available) for TODAY
+                    flask_occupied = {}
+                    today_str = date.today().isoformat()
+                    
+                    for r in daily_rows:
+                        if r["day"] == today_str:
+                            flask_type = r["flask_type"]
+                            available = int(r["available_qty"])
+                            total = flask_totals.get(flask_type, 0)
+                            occupied = max(0, total - available)
+                            flask_occupied[flask_type] = occupied
+                    
+                    # Build single row with flask counts
+                    row_data = {'concepto': 'Cajas Ocupadas (Enfriamiento)'}
+                    
+                    for flask_code in flask_codes:
+                        row_data[f'flask_{flask_code}'] = flask_occupied.get(flask_code, 0)
+                    
+                    # Build dynamic columns
+                    columns = [
+                        {'name': 'concepto', 'label': 'Concepto', 'field': 'concepto', 'align': 'left'},
+                    ]
+                    
+                    # Add flask columns dynamically
+                    for flask_code in flask_codes:
+                        columns.append({
+                            'name': f'flask_{flask_code}',
+                            'label': f'Cajas {flask_code}',
+                            'field': f'flask_{flask_code}',
+                            'align': 'center',
+                        })
+                    
+                    with initial_conditions_container:
+                        ui.label("Condiciones Iniciales (Recursos Ocupados)").classes("text-lg font-semibold mb-2")
                         
-                        # Build HTML table
-                        weeks = weekly_view["weeks"]
-                        weekly_molds = weekly_view["weekly_molds"]
-                        weekly_totals = weekly_view["weekly_totals"]
-                        order_completion = weekly_view["order_completion"]
-                        order_due_week = weekly_view["order_due_week"]
+                        ui.table(
+                            columns=columns,
+                            rows=[row_data],
+                            row_key='concepto',
+                        ).classes('w-full').props('dense flat')
                         
-                        if not weeks:
-                            ui.label("Sin datos de semanas").classes("text-slate-600")
-                            return
+                        ui.label(f"📦 Cajas ocupadas hoy ({date.today().strftime('%d-%m-%Y')}) = Total config - Disponible en tabla diaria").classes("text-xs text-slate-500 mt-1")
                         
-                        # Build rows for table: header + totals + orders
-                        rows = []
-                        
-                        # Header row (weeks)
-                        header_row = {"ped_pos": "Semana", "weeks": [w["label"] for w in weeks]}
-                        
-                        # Totals row
-                        molds_row = {"ped_pos": "Moldes", "weeks": [str(weekly_totals.get(w["index"], {}).get("molds", 0)) for w in weeks]}
-                        tons_row = {"ped_pos": "Toneladas", "weeks": [str(round(weekly_totals.get(w["index"], {}).get("tons", 0), 1)) for w in weeks]}
-                        
-                        # Flask utilization rows
-                        flask_sizes = ["S", "M", "L", "JUMBO"]
-                        flask_rows_dict = {}
-                        for size in flask_sizes:
-                            flask_rows_dict[f"Cajas {size}"] = [
-                                str(weekly_totals.get(w["index"], {}).get("flask_util", {}).get(size, 0)) 
-                                for w in weeks
-                            ]
-                        
-                        # Order rows (with completion and due markers)
-                        order_rows_dict = {}
-                        for order_id in sorted(weekly_molds.keys()):
-                            week_map = weekly_molds[order_id]
-                            week_cells = []
-                            for w in weeks:
-                                w_idx = w["index"]
-                                qty = week_map.get(w_idx, 0)
-                                cell_text = str(qty) if qty > 0 else ""
-                                
-                                # Add markers
-                                if w_idx == order_completion.get(order_id):
-                                    cell_text += " E"  # Completion marker
-                                if w_idx == order_due_week.get(order_id):
-                                    cell_text += " *"  # Due date marker
-                                
-                                week_cells.append(cell_text)
-                            
-                            order_rows_dict[f"Ped {order_id}"] = week_cells
-                        
-                        # Render HTML table
-                        html_rows = []
-                        
-                        # Header
-                        html_rows.append(f"<tr><th style='min-width: 60px'>{'Concepto'}</th>" + "".join(f"<th style='min-width: 60px'>{w}</th>" for w in header_row["weeks"]) + "</tr>")
-                        
-                        # Totals section
-                        html_rows.append(f"<tr><td class='font-semibold' style='min-width: 60px'>{molds_row['ped_pos']}</td>" + "".join(f"<td class='text-center' style='min-width: 60px'>{v}</td>" for v in molds_row["weeks"]) + "</tr>")
-                        html_rows.append(f"<tr><td class='font-semibold' style='min-width: 60px'>{tons_row['ped_pos']}</td>" + "".join(f"<td class='text-center' style='min-width: 60px'>{v}</td>" for v in tons_row["weeks"]) + "</tr>")
-                        
-                        # Flask rows
-                        for flask_label, flask_cells in flask_rows_dict.items():
-                            html_rows.append(f"<tr><td class='text-sm text-slate-600' style='min-width: 60px'>{flask_label}</td>" + "".join(f"<td class='text-center text-sm' style='min-width: 60px'>{v}</td>" for v in flask_cells) + "</tr>")
-                        
-                        # Order rows
-                        html_rows.append("<tr><td colspan='100%'><hr class='my-2'></td></tr>")
-                        for order_label, order_cells in order_rows_dict.items():
-                            html_rows.append(f"<tr><td class='font-mono text-sm' style='min-width: 60px'>{order_label}</td>" + "".join(f"<td class='text-center text-sm' style='min-width: 60px'>{v}</td>" for v in order_cells) + "</tr>")
-                        
-                        html_content = f"""
-                        <table class='w-full border-collapse text-sm'>
-                            <thead class='bg-slate-100'>
-                                {html_rows[0]}
-                            </thead>
-                            <tbody>
-                                {''.join(html_rows[1:])}
-                            </tbody>
-                        </table>
-                        <div class='mt-2 text-xs text-slate-600'>
-                            <p><strong>E</strong> = Semana de terminación (último molde)</p>
-                            <p><strong>*</strong> = Semana de fecha de pedido</p>
-                        </div>
-                        """
-                        
-                        try:
-                            ui.html(html_content).classes("overflow-x-auto")
-                        except TypeError:
-                            # Fallback for versions requiring sanitize
-                            from nicegui.elements.html import Html
-                            Html(html_content, sanitize=False).classes("overflow-x-auto")
-                
                 except Exception as ex:
-                    with plan_summary_container:
-                        ui.label(f"Error renderizando tabla: {ex}").classes("text-red-600 text-sm")
+                    with initial_conditions_container:
+                        ui.label(f"Error calculando condiciones iniciales: {ex}").classes("text-red-600")
             
             with ui.row().classes("items-center gap-2"):
-                asof = ui.input("Asof (dd-mm-yyyy)", value=date.today().strftime("%d-%m-%Y"))
                 scenario = ui.input("Scenario", value="default")
                 
-                # Initial render with empty/placeholder after scenario is defined
+                # Initial render - PRIMERO condiciones iniciales, LUEGO recursos
+                _render_initial_conditions_table(str(scenario.value or "default").strip() or "default")
                 _render_resources_table(str(scenario.value or "default").strip() or "default")
-                _render_plan_summary(str(scenario.value or "default").strip() or "default")
                 
-                # Container for suggested horizon
-                suggested_horizon_label = ui.label("")
+                def _refresh_tables() -> None:
+                    scenario_name = str(scenario.value or "default").strip() or "default"
+                    _render_initial_conditions_table(scenario_name)
+                    _render_resources_table(scenario_name)
                 
-                horizon_days = ui.number(
-                    "Horizonte (días hábiles)",
-                    value=int(repo.data.get_config(key="planner_horizon_days", default="30") or 30),
-                    min=1,
-                    step=1,
-                ).classes("w-48")
-                horizon_buffer = ui.number(
-                    "Buffer horizonte (días)",
-                    value=int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10),
-                    min=0,
-                    step=1,
-                ).classes("w-48")
-                method = ui.select(
-                    ["heuristico"],
-                    value="heuristico",
-                    label="Método",
-                ).classes("w-40")
-
-                def _update_suggested_horizon() -> None:
-                    """Calculate and display suggested horizon based on orders."""
-                    try:
-                        scenario_name = str(scenario.value or "default").strip() or "default"
-                        scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
-                        orders_rows = repo.planner.get_planner_orders_rows(scenario_id=scenario_id)
-                        calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
-                        workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
-                        
-                        from foundryplan.planner.api import calculate_suggested_horizon
-                        suggested = calculate_suggested_horizon(orders_rows, workdays)
-                        
-                        if suggested is not None:
-                            suggested_horizon_label.set_text(
-                                f"📅 Horizonte sugerido: {suggested} días"
-                            )
-                            horizon_days.set_value(suggested)
-                        else:
-                            suggested_horizon_label.set_text("📅 Horizonte sugerido: (todos los días)")
-                    except Exception as ex:
-                        suggested_horizon_label.set_text(f"⚠️ Error: {ex}")
-
-                def _run_sync() -> None:
-                    try:
-                        d = datetime.strptime(str(asof.value or "").strip(), "%d-%m-%Y").date()
-                        res = prepare_and_sync(
-                            repo.planner,
-                            asof_date=d,
-                            scenario_name=str(scenario.value or "default"),
-                            horizon_buffer_days=int(horizon_buffer.value or 0),
-                        )
-                        
-                        msg = f"Inputs listos. Órdenes: {res.get('orders')}, Partes: {res.get('parts')}"
-                        missing_parts = res.get("missing_parts", [])
-                        skipped = res.get("skipped_orders", 0)
-                        
-                        if missing_parts:
-                            msg += f" | Omitidos: {skipped} órdenes por {len(missing_parts)} partes sin data."
-                            ui.notify(msg, type="warning", multi_line=True, timeout=10000)
-                            # Could optionally show dialog with missing parts
-                        else:
-                            ui.notify(msg, type="positive")
-                            
-                        # Update suggested horizon after sync
-                        _update_suggested_horizon()
-                        
-                        # Update resources table
-                        _render_resources_table(str(scenario.value or "default").strip() or "default")
-                    except Exception as ex:
-                        ui.notify(f"Error preparando planner: {ex}", color="negative")
-
-                # Auto-run sync on page load
-                ui.timer(0.1, lambda: _run_sync(), once=True)
-
-                ui.button(on_click=_run_sync).props("icon=refresh flat round dense").tooltip("Actualizar Inputs")
-
-                def _run_planner() -> None:
-                    try:
-                        d = datetime.strptime(str(asof.value or "").strip(), "%d-%m-%Y").date()
-                        res = run_planner(
-                            repo.planner,
-                            asof_date=d,
-                            scenario_name=str(scenario.value or "default"),
-                            horizon_days=int(horizon_days.value or 0),
-                            horizon_buffer_days=int(horizon_buffer.value or 0),
-                        )
-                        status = str(res.get("status") or "OK")
-                        obj = res.get("objective")
-                        suggested = res.get("suggested_horizon_days", "N/A")
-                        actual = res.get("actual_horizon_days", "N/A")
-                        errors = res.get("errors", [])
-                        
-                        msg = f"Planner {method.value}: {status} obj={obj} (sugerido={suggested}, usado={actual})"
-                        if errors:
-                            msg += f" | Errores: {len(errors)}"
-                        
-                        ui.notify(msg, type="positive")
-                        
-                        # Update both plan summary (top) and detailed results (below)
-                        scenario_name = str(scenario.value or "default").strip() or "default"
-                        _render_resources_table(scenario_name)
-                        _render_plan_summary(scenario_name, res)
-                        _render_planner_results(res)
-                    except Exception as ex:
-                        ui.notify(f"Error ejecutando planner: {ex}", color="negative")
-
-                # Container for planner results
-                planner_results_container = ui.column().classes("w-full mt-4")
-                
-                def _render_planner_results(plan_res: dict) -> None:
-                    """Render weekly plan visualization."""
-                    planner_results_container.clear()
-                    
-                    if not plan_res or not plan_res.get("molds_schedule"):
-                        return
-                    
-                    try:
-                        scenario_name = str(scenario.value or "default").strip() or "default"
-                        scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
-                        
-                        # Get orders and parts for context
-                        orders_rows = repo.planner.get_planner_orders_rows(scenario_id=scenario_id)
-                        parts_rows = repo.planner.get_planner_parts_rows(scenario_id=scenario_id)
-                        calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
-                        
-                        # Build parts dict
-                        parts_dict = {
-                            str(r["part_id"]): type('obj', (), {
-                                'net_weight_ton': float(r.get("net_weight_ton") or 0),
-                                'pieces_per_mold': float(r.get("pieces_per_mold") or 0),
-                                'flask_size': str(r.get("flask_size") or "S"),
-                            })()
-                            for r in parts_rows
-                        }
-                        
-                        workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
-                        
-                        # Fetch initial conditions (for consistent view)
-                        initial_flask_inuse = repo.planner.get_planner_initial_flask_inuse_rows(scenario_id=scenario_id, asof_date=date.today())
-                        initial_pour_load = repo.planner.get_planner_initial_pour_load_rows(scenario_id=scenario_id, asof_date=date.today())
-
-                        # Build weekly view
-                        weekly_view = build_weekly_view(
-                            plan_res["molds_schedule"],
-                            workdays,
-                            orders_rows,
-                            parts_dict,
-                            initial_flask_inuse=initial_flask_inuse,
-                            initial_pour_load=initial_pour_load,
-                        )
-                        
-                        with planner_results_container:
-                            # Add orders summary table
-                            ui.separator().classes("my-4")
-                            ui.label("Resumen de Pedidos Planificados").classes("text-lg font-semibold mt-4 mb-2")
-                            
-                            orders_summary = build_orders_plan_summary(
-                                plan_res,
-                                workdays,
-                                orders_rows,
-                                parts_dict,
-                            )
-                            
-                            if orders_summary:
-                                # Build table rows
-                                table_rows = []
-                                for order in orders_summary:
-                                    due_date_str = order["due_date"].strftime("%Y-%m-%d") if order["due_date"] else ""
-                                    delivery_date_str = order["planned_delivery_date"].strftime("%Y-%m-%d") if order["planned_delivery_date"] else "N/A"
-                                    status_color = "bg-green-100" if order["status"] == "A tiempo" else "bg-red-100"
-                                    late_days_text = f"+{order['late_days']} días" if order["late_days"] > 0 else "0 días"
-                                    
-                                    table_rows.append({
-                                        "order_id": order["order_id"],
-                                        "due_date": due_date_str,
-                                        "planned_delivery": delivery_date_str,
-                                        "finish_reduction_hours": f"{order['finish_reduction']}h",
-                                        "status": order["status"],
-                                        "late_days": late_days_text,
-                                        "status_class": status_color,
-                                    })
-                                
-                                # Render table
-                                ui.table(
-                                    columns=[
-                                        {"name": "order_id", "label": "Ped-Pos", "field": "order_id", "sortable": True, "align": "left"},
-                                        {"name": "due_date", "label": "Fecha de Pedido", "field": "due_date", "sortable": True, "align": "center"},
-                                        {"name": "planned_delivery", "label": "Fecha Planificada de Entrega", "field": "planned_delivery", "sortable": True, "align": "center"},
-                                        {"name": "finish_reduction_hours", "label": "Reducción de Terminación (h)", "field": "finish_reduction_hours", "sortable": True, "align": "center"},
-                                        {"name": "status", "label": "Estado", "field": "status", "sortable": True, "align": "center"},
-                                        {"name": "late_days", "label": "Atraso (días)", "field": "late_days", "sortable": True, "align": "center"},
-                                    ],
-                                    rows=table_rows,
-                                    pagination=20,
-                                ).classes("w-full").props("dense")
-                            else:
-                                ui.label("Sin datos de pedidos").classes("text-slate-600")
-                    
-                    except Exception as ex:
-                        with planner_results_container:
-                            ui.label(f"Error renderizando resultados: {ex}").classes("text-red-600 text-sm")
-
-                ui.button("Generar plan", on_click=_run_planner).props("outline")
-
-            ui.separator().classes("my-4")
-
-            with ui.row().classes("w-full gap-6 items-start"):
-                with ui.card().classes("w-full p-4"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.label("Modelos cargados").classes("text-lg font-medium text-slate-700")
-                        ui.badge("Opcional").classes("text-xs bg-slate-200 text-slate-700")
-                    ui.label("Marca órdenes con modelo activo hoy. Esto afecta el costo de cambios de modelo. Si está vacío, el planner optimizará sin preferencia de patrones.").classes(
-                        "text-xs text-slate-500 mb-3"
-                    )
-
-                    with ui.row().classes("items-end gap-3 mb-3"):
-                        asof_in = ui.input("Asof (dd-mm-yyyy)", value=date.today().strftime("%d-%m-%Y")).classes("w-48")
-
-                        def _load_patterns() -> None:
-                            """Load current patterns from DB. If none are saved, shows empty list (graceful degradation)."""
-                            scenario_name = str(scenario.value or "default").strip() or "default"
-                            scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
-                            try:
-                                asof_date = datetime.strptime(str(asof_in.value or "").strip(), "%d-%m-%Y").date()
-                            except Exception:
-                                ui.notify("Fecha Asof inválida", color="negative")
-                                return
-
-                            orders_rows = repo.planner.get_planner_orders_rows(scenario_id=scenario_id)
-                            loaded_rows = repo.planner.get_planner_initial_patterns_loaded(
-                                scenario_id=scenario_id,
-                                asof_date=asof_date,
-                            )
-                            loaded_set = {str(r["order_id"]) for r in loaded_rows if int(r.get("is_loaded") or 0) == 1}
-
-                            patterns_container.clear()
-                            pattern_inputs.clear()
-
-                            if not orders_rows:
-                                with patterns_container:
-                                    ui.label("No hay órdenes del planner para este escenario.").classes("text-slate-600")
-                                return
-
-                            with patterns_container:
-                                for r in orders_rows:
-                                    order_id = str(r.get("order_id") or "")
-                                    part_id = str(r.get("part_id") or "")
-                                    qty = int(r.get("qty") or 0)
-                                    due_date = str(r.get("due_date") or "")
-                                    prio = int(r.get("priority") or 0)
-
-                                    with ui.row().classes("w-full items-center gap-3 p-2 border-b border-slate-100"):
-                                        chk = ui.checkbox(
-                                            value=order_id in loaded_set,
-                                        ).props("dense")
-                                        ui.label(order_id).classes("font-mono text-sm w-40")
-                                        ui.label(part_id).classes("text-sm w-32 text-slate-600")
-                                        ui.label(f"qty={qty}").classes("text-sm w-24 text-slate-600")
-                                        ui.label(f"prio={prio}").classes("text-sm w-24 text-slate-600")
-                                        ui.label(due_date).classes("text-sm text-slate-500")
-
-                                    pattern_inputs[order_id] = chk
-
-                        def _save_patterns() -> None:
-                            """Save checked patterns to DB. Empty selection is allowed (graceful degradation)."""
-                            scenario_name = str(scenario.value or "default").strip() or "default"
-                            scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
-                            try:
-                                asof_date = datetime.strptime(str(asof_in.value or "").strip(), "%d-%m-%Y").date()
-                            except Exception:
-                                ui.notify("Fecha Asof inválida", color="negative")
-                                return
-
-                            if not pattern_inputs:
-                                ui.notify("No hay modelos cargados para guardar.", color="warning")
-                                return
-
-                            rows = [
-                                (
-                                    int(scenario_id),
-                                    asof_date.isoformat(),
-                                    str(order_id),
-                                    1 if bool(chk.value) else 0,
-                                )
-                                for order_id, chk in pattern_inputs.items()
-                            ]
-                            repo.planner.replace_planner_initial_patterns_loaded(scenario_id=scenario_id, rows=rows)
-                            ui.notify("Modelos cargados guardados", type="positive")
-
-                        ui.button("Cargar", on_click=_load_patterns).props("outline")
-                        ui.button("Guardar", on_click=_save_patterns).props("outline")
-
-                    patterns_container = ui.column().classes("w-full max-h-[420px] overflow-y-auto border rounded")
-                    pattern_inputs: dict[str, ui.checkbox] = {}
+                ui.button(on_click=_refresh_tables).props("icon=refresh flat round dense").tooltip("Actualizar Vistas")
 
     @ui.page("/audit")
     def audit_log() -> None:
@@ -2451,9 +2077,10 @@ def register_pages(repo: Repository) -> None:
                     holidays.value = str(repo.data.get_config(key="planner_holidays", default="") or "")
                     horizon_days.value = int(repo.data.get_config(key="planner_horizon_days", default="30") or 30)
                     horizon_buffer.value = int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10)
+                    demolding_cancha.value = str(repo.data.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400")
                     for w in (molding_max, molding_same, pour_max, molding_shift, pour_shift, notes, holidays):
                         w.update()
-                    for w in (horizon_days, horizon_buffer):
+                    for w in (horizon_days, horizon_buffer, demolding_cancha):
                         w.update()
                     for inp in molding_shifts_inputs.values():
                         inp.update()
@@ -2599,22 +2226,28 @@ def register_pages(repo: Repository) -> None:
 
             with ui.row().classes("w-full gap-6 items-start pt-3"):
                 with ui.card().classes("flex-1 min-w-[320px] p-4"):
-                    ui.label("Horizonte de planificación").classes("text-lg font-medium text-slate-700 mb-2")
-                    with ui.column().classes("w-full gap-2"):
-                        horizon_days = ui.number(
-                            "Horizonte (días hábiles)",
-                            value=int(repo.data.get_config(key="planner_horizon_days", default="30") or 30),
-                            min=1,
-                            step=1,
-                        )
-                        horizon_buffer = ui.number(
-                            "Buffer horizonte (días)",
-                            value=int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10),
-                            min=0,
-                            step=1,
-                        )
-                        horizon_days.props("outlined dense")
-                        horizon_buffer.props("outlined dense")
+                    ui.label("Condiciones Iniciales (Desmoldeo)").classes("text-lg font-medium text-slate-700 mb-2")
+                    ui.label("Configuración para lectura de flasks en enfriamiento.").classes("text-xs text-slate-500 mb-2")
+                    demolding_cancha = ui.input(
+                        "Cancha (filtro)",
+                        value=str(repo.data.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"),
+                        placeholder="Ej: TCF-L1400"
+                    ).classes("w-full")
+                    demolding_cancha.props("outlined dense")
+                    ui.label("Solo se consideran piezas en esta cancha para calcular flasks ocupadas.").classes("text-xs text-slate-500 mt-1")
+                
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Horizonte de Planificación").classes("text-lg font-medium text-slate-700 mb-2")
+                    ui.label("Días hacia adelante para generar disponibilidad.").classes("text-xs text-slate-500 mb-2")
+                    horizon_days_input = ui.number(
+                        "Horizonte (días)",
+                        value=int(repo.data.get_config(key="planner_horizon_days", default="180") or 180),
+                        min=30,
+                        max=365,
+                        step=1,
+                    ).classes("w-full")
+                    horizon_days_input.props("outlined dense")
+                    ui.label("Se usa el mínimo entre este valor y los días para cubrir todos los pedidos Vision.").classes("text-xs text-slate-500 mt-1")
 
             ui.separator().classes("my-4")
 
@@ -2659,13 +2292,17 @@ def register_pages(repo: Repository) -> None:
                     )
                     repo.data.set_config(
                         key="planner_horizon_days",
-                        value=str(horizon_days.value or "0").strip(),
+                        value=str(int(horizon_days_input.value or 180)),
                     )
                     repo.data.set_config(
-                        key="planner_horizon_buffer_days",
-                        value=str(horizon_buffer.value or "0").strip(),
+                        key="planner_demolding_cancha",
+                        value=str(demolding_cancha.value or "TCF-L1400").strip(),
                     )
-                    ui.notify("Configuración del planner guardada", type="positive")
+                    
+                    # Regenerar tabla de recursos diarios al guardar config
+                    repo.planner.rebuild_daily_resources_from_config(scenario_id=scenario_id)
+                    
+                    ui.notify("✅ Configuración guardada y recursos diarios regenerados", type="positive")
 
                 ui.button("Guardar Configuración", icon="save", on_click=save_planner_cfg).props("unelevated color=primary")
                 ui.button("Ir a Plan", on_click=lambda: ui.navigate.to("/plan")).props("flat color=primary")

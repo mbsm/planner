@@ -438,3 +438,18 @@ class PlannerRepository:
             scenario_id=scenario_id,
             flask_type=flask_type,
         )
+
+    def get_flasks_in_use_from_demolding(self, *, asof_date) -> dict[str, int]:
+        return self._repo.get_flasks_in_use_from_demolding(asof_date=asof_date)
+
+    def rebuild_daily_resources_from_config(self, *, scenario_id: int = 1) -> None:
+        return self._repo.rebuild_daily_resources_from_config(scenario_id=scenario_id)
+
+    def update_daily_resources_from_demolding(self, *, scenario_id: int = 1) -> None:
+        return self._repo.update_daily_resources_from_demolding(scenario_id=scenario_id)
+
+    def get_daily_resources_rows(self, *, scenario_id: int) -> list[dict]:
+        return self._repo.get_daily_resources_rows(scenario_id=scenario_id)
+
+    def get_daily_resources_for_today(self, *, scenario_id: int) -> list[dict]:
+        return self._repo.get_daily_resources_for_today(scenario_id=scenario_id)

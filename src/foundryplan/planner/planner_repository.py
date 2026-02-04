@@ -63,224 +63,370 @@ class PlannerRepositoryImpl:
         
         return working_days
 
-    def get_planner_initial_order_progress(self, *, asof_date: date) -> list[dict]:
-        """Compute remaining_molds per order from Vision x_fundir and MB52 moldeo stock.
-
-        remaining_molds = max(0, ceil(x_fundir / piezas_por_molde) - moldes_en_almacen_moldeo)
-        Blocks if any part is missing piezas_por_molde.
-        """
-        centro = (self.data_repo.get_config(key="sap_centro", default="4000") or "").strip()
-        almacen = self._planner_moldeo_almacen()
-        if not centro or not almacen:
-            raise ValueError("Config faltante: sap_centro o sap_almacen_moldeo")
-
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT
-                    v.pedido,
-                    v.posicion,
-                    MAX(COALESCE(v.cod_material, '')) AS material,
-                    MAX(COALESCE(v.x_fundir, 0)) AS x_fundir,
-                    MAX(COALESCE(p.piezas_por_molde, 0)) AS piezas_por_molde
-                FROM sap_vision_snapshot v
-                LEFT JOIN material_master p
-                  ON p.material = v.cod_material
-                GROUP BY v.pedido, v.posicion
-                """,
-            ).fetchall()
-
-            mb_counts = con.execute(
-                f"""
-                SELECT documento_comercial AS pedido, posicion_sd AS posicion, COUNT(*) AS cnt
-                FROM sap_mb52_snapshot
-                WHERE centro = ?
-                  AND almacen = ?
-                  AND {self.data_repo._mb52_availability_predicate_sql(process='moldeo')}
-                  AND documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
-                  AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
-                GROUP BY documento_comercial, posicion_sd
-                """,
-                (str(self.data_repo._normalize_sap_key(centro) or centro), str(almacen)),
-            ).fetchall()
-
-        mb_map = {(str(r["pedido"]).strip(), str(r["posicion"]).strip()): int(r["cnt"] or 0) for r in mb_counts}
-        missing_ppm: list[str] = []
-        out: list[dict] = []
-
-        for r in rows:
-            pedido = str(r["pedido"]).strip()
-            posicion = str(r["posicion"]).strip()
-            material = str(r["material"]).strip()
-            if not pedido or not posicion:
-                continue
-            ppm = float(r["piezas_por_molde"] or 0)
-            if ppm <= 0:
-                # WARN/FIX: Assume 1 to avoid blocking, if master data is missing.
-                # These orders will likely be skipped later if other data is missing, or processed with ppm=1.
-                ppm = 1.0
-
-            x_fundir = float(r["x_fundir"] or 0)
-            molds_remaining = int(math.ceil(x_fundir / ppm)) if x_fundir > 0 else 0
-            molds_in_stock = int(mb_map.get((pedido, posicion), 0))
-            credit = max(0, molds_remaining - molds_in_stock)
-            if credit > 0:
-                out.append(
-                    {
-                        "order_id": f"{pedido}/{posicion}",
-                        "remaining_molds": int(credit),
-                        "asof_date": asof_date.isoformat(),
-                    }
-                )
-
-        return out
-
-    def get_planner_initial_flask_inuse_from_demolding(
-        self,
-        *,
-        asof_date: date,
-        flask_codes_map: dict[str, str] | None = None,
-    ) -> list[dict]:
-        """Derive initial flask usage from Reporte Desmoldeo (authoritative source).
-
-        demolding_date is the actual shakeout date when flasks are released (SAP tracks this).
-        Flasks are busy until demolding_date.
-        Blocks if flask_size or demolding_date are missing.
-        """
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT
-                    d.material AS material,
-                    d.lote AS lote,
-                    d.flask_id AS flask_id,
-                    d.demolding_date AS demolding_date,
-                    MAX(COALESCE(p.flask_size, '')) AS flask_size
-                FROM sap_demolding_snapshot d
-                LEFT JOIN material_master p
-                  ON p.material = d.material
-                GROUP BY d.material, d.lote, d.flask_id, d.demolding_date
-                """,
-            ).fetchall()
-
-        missing: list[str] = []
-        agg: dict[tuple[str, int], int] = {}
-        holidays = self._planner_holidays()
+    def get_flasks_in_use_from_demolding(self, *, asof_date: date) -> dict[str, int]:
+        """Read flasks currently occupied from desmoldeo snapshot.
         
-        # Sort codes by length descending to match longest prefix first
-        sorted_codes = []
-        if flask_codes_map:
-            sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
-
+        Returns dict of {flask_type: qty_occupied} for flasks still cooling.
+        
+        Logic:
+        - Filter by cancha (configured in planner settings)
+        - Read first 3 characters of flask_id (Caja) to determine flask_type
+        - Use Fecha Desmoldeo (NOT Fecha a desmoldear)
+        - Flask is occupied from today until demolding_date + 1 day
+        - Quantity is mold_quantity (Cant. Moldes)
+        """
+        # Get cancha filter from config
+        cancha_filter = self.data_repo.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"
+        
+        # Get flask type configuration (codes for prefix matching)
+        with self.db.connect() as con:
+            flask_config = con.execute(
+                """
+                SELECT flask_type, codes_csv
+                FROM planner_flask_types
+                WHERE scenario_id = 1
+                """,
+            ).fetchall()
+        
+        flask_codes_map: dict[str, str] = {}
+        for row in flask_config:
+            flask_type = str(row["flask_type"] or "").strip().upper()
+            codes_csv = str(row["codes_csv"] or "").strip()
+            if codes_csv:
+                for code in codes_csv.split(","):
+                    code = code.strip()
+                    if code:
+                        flask_codes_map[code] = flask_type
+        
+        # Sort codes by length descending (match longest prefix first)
+        sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
+        
+        # Read demolding snapshot filtered by cancha
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT
+                    d.material,
+                    d.flask_id,
+                    d.demolding_date,
+                    d.mold_quantity,
+                    d.cooling_hours
+                FROM sap_demolding_snapshot d
+                WHERE d.cancha = ?
+                """,
+                (cancha_filter,),
+            ).fetchall()
+        
+        flask_counts: dict[str, int] = {}
+        
         for r in rows:
-            material = str(r["material"]).strip()
-            # Default to master data, but override if flask_id matches configured codes
-            flask_size = str(r["flask_size"] or "").strip().upper()
+            material = str(r["material"] or "").strip()
             flask_id = str(r["flask_id"] or "").strip()
-            
-            if sorted_codes and flask_id:
-                for prefix, size in sorted_codes:
-                    if flask_id.startswith(prefix):
-                        flask_size = size
-                        break
-            
             demolding_date_str = str(r["demolding_date"] or "").strip()
-
-            if not flask_size or not demolding_date_str:
-                missing.append(material or "<unknown>")
+            mold_qty = int(r["mold_quantity"] or 1)
+            
+            # Skip if missing critical data
+            if not flask_id or not demolding_date_str:
                 continue
-
+            
             try:
                 demolding_date = date.fromisoformat(demolding_date_str)
             except Exception:
-                missing.append(material)
                 continue
+            
+            # IMPORTANTE: Si fecha de desmoldeo está en el pasado, asumir que es hoy
+            if demolding_date < asof_date:
+                demolding_date = asof_date
+            
+            # Flask is occupied until demolding_date + 1 day
+            release_date = date.fromordinal(demolding_date.toordinal() + 1)
+            
+            # Only count flasks still occupied (release_date > asof_date)
+            if release_date <= asof_date:
+                continue
+            
+            # Extract first 3 characters as flask type code
+            flask_code = flask_id[:3] if len(flask_id) >= 3 else flask_id
+            
+            # Determine flask type: first try prefix match, then use code directly
+            flask_type = None
+            if sorted_codes:
+                for prefix, ftype in sorted_codes:
+                    if flask_code.startswith(prefix):
+                        flask_type = ftype
+                        break
+            
+            if not flask_type:
+                flask_type = flask_code.upper()
+            
+            flask_counts[flask_type] = flask_counts.get(flask_type, 0) + mold_qty
+        
+        return flask_counts
 
-            # Flask is released on demolding_date (shakeout day)
-            # Map demolding_date to workday_index from asof_date
-            d = asof_date
-            idx = 0
-            while d < demolding_date:
-                if d.weekday() < 5 and d not in holidays:
-                    idx += 1
-                d = date.fromordinal(d.toordinal() + 1)
-
-            key = (flask_size, idx)
-            agg[key] = agg.get(key, 0) + 1
-
-        if missing:
-            uniq = sorted({m for m in missing if m})
-            raise ValueError(f"Faltan flask_size/demolding_date para: {', '.join(uniq[:50])}")
-
-        return [
-            {
-                "flask_type": size,
-                "release_workday_index": idx,
-                "qty_inuse": qty,
-                "asof_date": asof_date.isoformat(),
-            }
-            for (size, idx), qty in sorted(agg.items(), key=lambda x: (x[0][0], x[0][1]))
-        ]
-
-    def get_planner_initial_pour_load(self, *, asof_date: date) -> list[dict]:
-        """Compute initial pour load from MB52 moldeo stock (WIP not yet poured).
-
-        Metal per mold = net_weight_ton × pieces_per_mold.
-        Forward-fill capacity (ASAP pouring policy).
+    def rebuild_daily_resources_from_config(self, *, scenario_id: int = 1) -> None:
+        """Regenerate planner_daily_resources table from configuration.
+        
+        Creates daily availability baseline for:
+        - Flask types (from planner_flask_types config)
+        - Molding capacities (from molding_per_shift × turnos_día)
+        - Same mold capacities (from same_mold_per_shift × turnos_día)
+        - Pouring capacity (from pour_per_shift × turnos_día)
+        
+        Uses shift configuration and holidays to determine working days.
+        Horizon is min(config_horizon, days_to_cover_all_vision_orders).
+        
+        Called automatically when saving planner config or importing desmoldeo.
+        
+        Args:
+            scenario_id: Planner scenario (default 1)
         """
-        centro = (self.data_repo.get_config(key="sap_centro", default="4000") or "").strip()
-        almacen = self._planner_moldeo_almacen()
-        if not centro or not almacen:
-            raise ValueError("Config faltante: sap_centro o sap_almacen_moldeo")
+        # Get horizon configuration
+        horizon_config = int(self.data_repo.get_config(key="planner_horizon_days", default="180") or 180)
+        
+        # Calculate max due date from Vision orders to determine minimum required horizon
+        with self.db.connect() as con:
+            max_date_row = con.execute(
+                """
+                SELECT MAX(fecha_de_pedido) as max_fecha
+                FROM sap_vision_snapshot
+                WHERE fecha_de_pedido IS NOT NULL
+                """
+            ).fetchone()
+        
+        today = date.today()
+        horizon_days = horizon_config  # Default to config
+        
+        if max_date_row and max_date_row["max_fecha"]:
+            try:
+                max_vision_date = date.fromisoformat(str(max_date_row["max_fecha"]))
+                days_to_max_vision = (max_vision_date.toordinal() - today.toordinal()) + 1
+                # Use minimum between config and required to cover all orders
+                horizon_days = min(horizon_config, max(days_to_max_vision, 30))  # At least 30 days
+            except Exception:
+                pass
+        
+        logger.info(f"Using horizon_days={horizon_days} (config={horizon_config})")
+        
+        # Get flask configuration
+        with self.db.connect() as con:
+            flask_config = con.execute(
+                """
+                SELECT flask_type, qty_total
+                FROM planner_flask_types
+                WHERE scenario_id = ?
+                ORDER BY flask_type
+                """,
+                (scenario_id,),
+            ).fetchall()
+        
+        # Get resource/shift configuration
+        with self.db.connect() as con:
+            resource_row = con.execute(
+                """
+                SELECT 
+                    molding_max_per_shift,
+                    molding_max_same_part_per_day,
+                    molding_shifts_json,
+                    pour_max_ton_per_shift,
+                    pour_shifts_json
+                FROM planner_resources
+                WHERE scenario_id = ?
+                """,
+                (scenario_id,),
+            ).fetchone()
+        
+        if not resource_row:
+            logger.warning(f"No resource configuration found for scenario {scenario_id}")
+            return
+        
+        # Parse shift configurations
+        molding_shifts_json = resource_row["molding_shifts_json"] or "{}"
+        pour_shifts_json = resource_row["pour_shifts_json"] or "{}"
+        
+        try:
+            molding_shifts = json.loads(molding_shifts_json)
+        except Exception:
+            molding_shifts = {}
+        
+        try:
+            pour_shifts = json.loads(pour_shifts_json)
+        except Exception:
+            pour_shifts = {}
+        
+        # Get working days from shifts
+        working_days = self._get_working_days_from_shifts(molding_shifts, pour_shifts)
+        
+        # Get holidays
+        holidays = self._planner_holidays()
+        
+        # Get molding/pouring capacities per shift
+        molding_per_shift = int(resource_row["molding_max_per_shift"] or 0)
+        same_mold_per_shift = int(resource_row["molding_max_same_part_per_day"] or 0)
+        pour_max_per_shift = float(resource_row["pour_max_ton_per_shift"] or 0.0)
+        
+        # Generate daily records for horizon
+        rows_to_insert = []
+        
+        for day_offset in range(horizon_days):
+            current_date = date.fromordinal(today.toordinal() + day_offset)
+            weekday = current_date.weekday()
+            
+            # Skip non-working days (weekends/holidays)
+            if weekday not in working_days or current_date in holidays:
+                continue
+            
+            day_str = current_date.isoformat()
+            
+            # Get shift count for this day
+            day_names = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+            day_name = day_names[weekday]
+            molding_shifts_count = molding_shifts.get(day_name, 0)
+            pour_shifts_count = pour_shifts.get(day_name, 0)
+            
+            # Calculate daily capacities (capacity_per_shift × number_of_shifts)
+            daily_molding_capacity = molding_per_shift * molding_shifts_count
+            daily_same_mold_capacity = same_mold_per_shift * molding_shifts_count
+            daily_pour_tons = pour_max_per_shift * pour_shifts_count
+            
+            # Insert flask availability (all types have full capacity initially)
+            for flask_row in flask_config:
+                flask_type = str(flask_row["flask_type"])
+                qty_total = int(flask_row["qty_total"] or 0)
+                
+                rows_to_insert.append((
+                    scenario_id,
+                    day_str,
+                    flask_type,
+                    qty_total,  # available_qty
+                    daily_molding_capacity,  # molding_capacity_per_day
+                    daily_same_mold_capacity,  # same_mold_capacity_per_day
+                    daily_pour_tons,  # pouring_tons_available
+                ))
+        
+        # Replace entire table (fresh rebuild)
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_daily_resources WHERE scenario_id = ?", (scenario_id,))
+            con.executemany(
+                """
+                INSERT INTO planner_daily_resources 
+                (scenario_id, day, flask_type, available_qty, molding_capacity_per_day, same_mold_capacity_per_day, pouring_tons_available)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_to_insert,
+            )
+            con.commit()
+        
+        logger.info(f"Rebuilt {len(rows_to_insert)} daily resource records for scenario {scenario_id} (horizon={horizon_days})")
 
+    def update_daily_resources_from_demolding(self, *, scenario_id: int = 1) -> None:
+        """Update planner_daily_resources by subtracting occupied flasks from demolding.
+        
+        For each flask in desmoldeo snapshot (filtered by cancha):
+        - Decrement available_qty from today until demolding_date + 1
+        - Handles past dates by treating them as today
+        - Applies cancha filter from configuration
+        
+        Call this after importing desmoldeo data.
+        """
+        # Get cancha filter from config
+        cancha_filter = self.data_repo.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"
+        
+        # Get flask type configuration (codes for prefix matching)
+        with self.db.connect() as con:
+            flask_config = con.execute(
+                """
+                SELECT flask_type, codes_csv
+                FROM planner_flask_types
+                WHERE scenario_id = ?
+                """,
+                (scenario_id,),
+            ).fetchall()
+        
+        flask_codes_map: dict[str, str] = {}
+        for row in flask_config:
+            flask_type = str(row["flask_type"] or "").strip().upper()
+            codes_csv = str(row["codes_csv"] or "").strip()
+            if codes_csv:
+                for code in codes_csv.split(","):
+                    code = code.strip()
+                    if code:
+                        flask_codes_map[code] = flask_type
+        
+        # Sort codes by length descending (match longest prefix first)
+        sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
+        
+        # Read demolding snapshot filtered by cancha
         with self.db.connect() as con:
             rows = con.execute(
-                f"""
-                                SELECT
-                                        COALESCE(m.material_base, v.cod_material, m.material) AS material,
-                                        COUNT(*) AS cnt,
-                                        MAX(COALESCE(p.peso_unitario_ton, 0)) AS net_weight_ton,
-                                        MAX(COALESCE(p.piezas_por_molde, 0)) AS pieces_per_mold
-                                FROM sap_mb52_snapshot m
-                                LEFT JOIN sap_vision_snapshot v
-                                    ON v.pedido = m.documento_comercial
-                                 AND v.posicion = m.posicion_sd
-                                LEFT JOIN material_master p
-                                    ON p.material = COALESCE(m.material_base, v.cod_material, m.material)
-                                WHERE m.centro = ?
-                                    AND m.almacen = ?
-                                    AND {self.data_repo._mb52_availability_predicate_sql(process='moldeo')}
-                                GROUP BY COALESCE(m.material_base, v.cod_material, m.material)
+                """
+                SELECT
+                    d.flask_id,
+                    d.demolding_date,
+                    d.mold_quantity
+                FROM sap_demolding_snapshot d
+                WHERE d.cancha = ?
                 """,
-                (str(self.data_repo._normalize_sap_key(centro) or centro), str(almacen)),
+                (cancha_filter,),
             ).fetchall()
-
-        missing: list[str] = []
-        wip_molds: list[dict] = []
+        
+        today = date.today()
+        updates: list[tuple[int, str, str]] = []  # [(decrement_qty, day, flask_type), ...]
+        
         for r in rows:
-            material = str(r["material"]).strip()
-            cnt = int(r["cnt"] or 0)
-            net_weight = float(r["net_weight_ton"] or 0.0)
-            pieces_per_mold = float(r["pieces_per_mold"] or 0.0)
-            if net_weight <= 0 or pieces_per_mold <= 0:
-                missing.append(material)
+            flask_id = str(r["flask_id"] or "").strip()
+            demolding_date_str = str(r["demolding_date"] or "").strip()
+            mold_qty = int(r["mold_quantity"] or 1)
+            
+            # Skip if missing critical data
+            if not flask_id or not demolding_date_str:
                 continue
-            metal_per_mold = net_weight * pieces_per_mold
-            wip_molds.append({"material": material, "cnt": cnt, "metal_per_mold": metal_per_mold})
-
-        if missing:
-            uniq = sorted(set(missing))
-            # Log warning but don't fail - these materials will be excluded from WIP calculation
-            logger.warning(
-                "PLANNER WARNING: %d materiales sin peso/piezas (excluidos del WIP): %s%s",
-                len(uniq),
-                ", ".join(uniq[:20]),
-                "..." if len(uniq) > 20 else "",
+            
+            try:
+                demolding_date = date.fromisoformat(demolding_date_str)
+            except Exception:
+                continue
+            
+            # IMPORTANTE: Si fecha de desmoldeo está en el pasado, usar hoy
+            if demolding_date < today:
+                demolding_date = today
+            
+            # Flask is occupied until demolding_date + 1 day
+            release_date = date.fromordinal(demolding_date.toordinal() + 1)
+            
+            # Extract first 3 characters as flask type code
+            flask_code = flask_id[:3] if len(flask_id) >= 3 else flask_id
+            
+            # Determine flask type: first try prefix match, then use code directly
+            flask_type = None
+            if sorted_codes:
+                for prefix, ftype in sorted_codes:
+                    if flask_code.startswith(prefix):
+                        flask_type = ftype
+                        break
+            
+            if not flask_type:
+                flask_type = flask_code.upper()
+            
+            # Decrement available_qty for each day from today until release_date (exclusive)
+            current_day = today
+            while current_day < release_date:
+                day_str = current_day.isoformat()
+                updates.append((mold_qty, day_str, flask_type, scenario_id))
+                current_day = date.fromordinal(current_day.toordinal() + 1)
+        
+        # Apply decrements to database
+        with self.db.connect() as con:
+            con.executemany(
+                """
+                UPDATE planner_daily_resources
+                SET available_qty = MAX(0, available_qty - ?)
+                WHERE day = ? AND flask_type = ? AND scenario_id = ?
+                """,
+                updates,
             )
-
-        # Forward-fill: pour ASAP from day 0
-        # We'll return aggregated tons per relative day offset (caller maps to workday_index)
-        return wip_molds
+            con.commit()
+        
+        logger.info(f"Updated {len(updates)} daily resource records from demolding for scenario {scenario_id}")
 
     # ---------- Planner DB helpers ----------
     def ensure_planner_scenario(self, *, name: str | None = None) -> int:
@@ -384,55 +530,6 @@ class PlannerRepositoryImpl:
             for r in rows
         ]
 
-    def get_planner_initial_order_progress_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT order_id, remaining_molds
-                FROM planner_initial_order_progress
-                WHERE scenario_id = ? AND asof_date = ?
-                """,
-                (int(scenario_id), asof_date.isoformat()),
-            ).fetchall()
-        return [
-            {"order_id": str(r[0]), "remaining_molds": int(r[1] or 0)}
-            for r in rows
-        ]
-
-    def get_planner_initial_flask_inuse_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT flask_size, release_workday_index, qty_inuse
-                FROM planner_initial_flask_inuse
-                WHERE scenario_id = ? AND asof_date = ?
-                """,
-                (int(scenario_id), asof_date.isoformat()),
-            ).fetchall()
-        return [
-            {
-                "flask_type": str(r[0] or ""),
-                "release_workday_index": int(r[1] or 0),
-                "qty_inuse": int(r[2] or 0),
-            }
-            for r in rows
-        ]
-
-    def get_planner_initial_pour_load_rows(self, *, scenario_id: int, asof_date: date) -> list[dict]:
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT workday_index, tons_committed
-                FROM planner_initial_pour_load
-                WHERE scenario_id = ? AND asof_date = ?
-                """,
-                (int(scenario_id), asof_date.isoformat()),
-            ).fetchall()
-        return [
-            {"workday_index": int(r[0]), "tons_committed": float(r[1] or 0.0)}
-            for r in rows
-        ]
-
     def replace_planner_calendar(self, *, scenario_id: int, rows: list[tuple]) -> None:
         with self.db.connect() as con:
             con.execute("DELETE FROM planner_calendar_workdays WHERE scenario_id = ?", (int(scenario_id),))
@@ -444,71 +541,6 @@ class PlannerRepositoryImpl:
                 """,
                 rows,
             )
-
-    def replace_planner_initial_order_progress(self, *, scenario_id: int, rows: list[tuple]) -> None:
-        with self.db.connect() as con:
-            con.execute("DELETE FROM planner_initial_order_progress WHERE scenario_id = ?", (int(scenario_id),))
-            con.executemany(
-                """
-                INSERT INTO planner_initial_order_progress(
-                    scenario_id, asof_date, order_id, remaining_molds
-                ) VALUES(?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def replace_planner_initial_flask_inuse(self, *, scenario_id: int, rows: list[tuple]) -> None:
-        with self.db.connect() as con:
-            con.execute("DELETE FROM planner_initial_flask_inuse WHERE scenario_id = ?", (int(scenario_id),))
-            con.executemany(
-                """
-                INSERT INTO planner_initial_flask_inuse(
-                    scenario_id, asof_date, flask_size, release_workday_index, qty_inuse
-                ) VALUES(?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def replace_planner_initial_pour_load(self, *, scenario_id: int, rows: list[tuple]) -> None:
-        with self.db.connect() as con:
-            con.execute("DELETE FROM planner_initial_pour_load WHERE scenario_id = ?", (int(scenario_id),))
-            con.executemany(
-                """
-                INSERT INTO planner_initial_pour_load(
-                    scenario_id, asof_date, workday_index, tons_committed
-                ) VALUES(?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def replace_planner_initial_patterns_loaded(self, *, scenario_id: int, rows: list[tuple]) -> None:
-        """Set which orders have patterns currently loaded on the molding line.
-
-        rows: [(scenario_id, asof_date, order_id, is_loaded), ...]
-        """
-        with self.db.connect() as con:
-            con.execute("DELETE FROM planner_initial_patterns_loaded WHERE scenario_id = ?", (int(scenario_id),))
-            con.executemany(
-                """
-                INSERT INTO planner_initial_patterns_loaded(
-                    scenario_id, asof_date, order_id, is_loaded
-                ) VALUES(?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def get_planner_initial_patterns_loaded(self, *, scenario_id: int, asof_date: date) -> list[dict]:
-        """Retrieve orders with patterns currently loaded."""
-        with self.db.connect() as con:
-            rows = con.execute(
-                """
-                SELECT order_id, is_loaded
-                FROM planner_initial_patterns_loaded
-                WHERE scenario_id = ? AND asof_date = ?
-                """,
-                (int(scenario_id), asof_date.isoformat()),
-            ).fetchall()
-        return [{"order_id": r["order_id"], "is_loaded": int(r["is_loaded"] or 0)} for r in rows]
 
     def get_planner_resources(self, *, scenario_id: int) -> dict | None:
         with self.db.connect() as con:
@@ -982,3 +1014,32 @@ class PlannerRepositoryImpl:
             "missing_parts": missing_parts_list,
             "skipped_orders": skipped_orders_count,
         }
+
+    def get_daily_resources_rows(self, *, scenario_id: int) -> list[dict]:
+        """Get all daily resources for a scenario (for UI display)."""
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT day, flask_type, available_qty, molding_capacity_per_day, 
+                       same_mold_capacity_per_day, pouring_tons_available
+                FROM planner_daily_resources
+                WHERE scenario_id = ?
+                ORDER BY day ASC
+                """,
+                (scenario_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_daily_resources_for_today(self, *, scenario_id: int) -> list[dict]:
+        """Get daily resources for today only (for initial conditions calculation)."""
+        today_str = date.today().isoformat()
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT day, flask_type, available_qty
+                FROM planner_daily_resources
+                WHERE scenario_id = ? AND day = ?
+                """,
+                (scenario_id, today_str),
+            ).fetchall()
+        return [dict(r) for r in rows]

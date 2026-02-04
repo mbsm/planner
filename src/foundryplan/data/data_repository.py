@@ -2717,37 +2717,32 @@ class DataRepositoryImpl:
         df_raw = read_excel_bytes(content)
         df = normalize_columns(df_raw)
 
-        # Handle Spanish column aliases
-        if "material" not in df.columns:
-            for c in df.columns:
-                if c in ["pieza", "cod_material", "codigo_material"]:
-                    df = df.rename(columns={c: "material"})
-                    break
+        # Map exact column names from Excel to database schema
+        column_mapping = {
+            "pieza": "material",
+            "caja": "flask_id",
+            "cancha": "cancha",
+            "fecha_desmoldeo": "demolding_date",
+            "hora_desm": "demolding_time",
+            "tipo_molde": "mold_type",
+            "fecha_fundida": "poured_date",
+            "hora_fundida": "poured_time",
+            "hs_enfria": "cooling_hours",
+            "cant_moldes": "mold_quantity",
+            "lote": "lote",
+        }
         
-        if "flask_id" not in df.columns:
-            for c in df.columns:
-                if c in ["caja", "id_caja", "cod_caja", "flask", "molde", "id_molde"]:
-                    df = df.rename(columns={c: "flask_id"})
-                    break
-        
-        if "demolding_date" not in df.columns:
-            for c in df.columns:
-                if "desmoldeo" in c and "fecha" in c:
-                    df = df.rename(columns={c: "demolding_date"})
-                    break
-        
-        if "poured_date" not in df.columns:
-            for c in df.columns:
-                if "colada" in c and "fecha" in c:
-                    df = df.rename(columns={c: "poured_date"})
-                    break
+        # Apply mapping
+        for old_col, new_col in column_mapping.items():
+            if old_col in df.columns and new_col not in df.columns:
+                df = df.rename(columns={old_col: new_col})
 
         rows: list[tuple] = []
         for _, r in df.iterrows():
             material = str(r.get("material", "")).strip()
             lote = str(r.get("lote", "")).strip()
             flask_id_raw = str(r.get("flask_id", "")).strip()
-            flask_id = flask_id_raw[:3] if flask_id_raw and len(flask_id_raw) >= 3 else flask_id_raw
+            cancha = str(r.get("cancha", "")).strip()
             demolding_date_raw = r.get("demolding_date")
             demolding_time = str(r.get("demolding_time", "")).strip() or None
             cooling_hours = coerce_float(r.get("cooling_hours")) or None
@@ -2756,7 +2751,7 @@ class DataRepositoryImpl:
             poured_time = str(r.get("poured_time", "")).strip() or None
             mold_qty = coerce_float(r.get("mold_quantity")) or 1
 
-            if not material or not flask_id:
+            if not material or not flask_id_raw:
                 continue
 
             try:
@@ -2774,7 +2769,8 @@ class DataRepositoryImpl:
                 (
                     material,
                     lote or None,
-                    flask_id,
+                    flask_id_raw,  # Guardamos el ID completo
+                    cancha or None,
                     demolding_date,
                     demolding_time,
                     cooling_hours,
@@ -2790,37 +2786,58 @@ class DataRepositoryImpl:
             con.executemany(
                 """
                 INSERT INTO sap_demolding_snapshot(
-                    material, lote, flask_id, demolding_date, demolding_time,
+                    material, lote, flask_id, cancha, demolding_date, demolding_time,
                     cooling_hours, mold_type, poured_date, poured_time, mold_quantity
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
 
         self.log_audit("DATA_LOAD", "Demolding report imported", f"Rows: {len(rows)}")
 
-        # Update material_master.flask_size from demolding snapshot
+        # Update material_master.flask_size and cooling_hours from demolding snapshot
+        # flask_size = first 3 characters of flask_id
         with self.db.connect() as con:
             con.execute(
                 """
                 UPDATE material_master
                 SET flask_size = (
-                    SELECT ds.flask_id
+                    SELECT SUBSTR(ds.flask_id, 1, 3)
                     FROM sap_demolding_snapshot ds
                     WHERE ds.material = material_master.material
                       AND ds.flask_id IS NOT NULL AND ds.flask_id <> ''
-                    ORDER BY ds.demolding_date DESC, ds.flask_id DESC
+                    ORDER BY ds.demolding_date DESC
+                    LIMIT 1
+                ),
+                tiempo_enfriamiento_molde_dias = (
+                    SELECT CAST(ds.cooling_hours AS INTEGER)
+                    FROM sap_demolding_snapshot ds
+                    WHERE ds.material = material_master.material
+                      AND ds.cooling_hours IS NOT NULL
+                    ORDER BY ds.demolding_date DESC
                     LIMIT 1
                 )
                 WHERE EXISTS (
                     SELECT 1
                     FROM sap_demolding_snapshot ds2
                     WHERE ds2.material = material_master.material
-                      AND ds2.flask_id IS NOT NULL AND ds2.flask_id <> ''
                 )
                 """
             )
+        
+        # IMPORTANTE: Regenerar recursos diarios después de actualizar desmoldeo
+        # Este paso es crítico para que el planificador tenga disponibilidad real
+        from foundryplan.planner.planner_repository import PlannerRepositoryImpl
+        planner_repo = PlannerRepositoryImpl(db=self.db, data_repo=self)
+        
+        # 1. Rebuild baseline from configuration (turnos, feriados, capacidades)
+        planner_repo.rebuild_daily_resources_from_config(scenario_id=1)
+        
+        # 2. Update with occupied flasks from demolding
+        planner_repo.update_daily_resources_from_demolding(scenario_id=1)
+        
+        self.log_audit("PLANNER", "Daily resources updated from demolding", f"Scenario: 1")
 
     def _update_jobs_from_vision(self, *, con) -> None:
         """Update existing jobs with fecha_de_pedido from Vision snapshot."""

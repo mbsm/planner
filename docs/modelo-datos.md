@@ -50,34 +50,94 @@ Cada carga reemplaza completamente los datos anteriores.
 | `peso_neto_ton` | `peso_neto` | Peso total pedido |
 | `peso_unitario_ton` | (Derivado) | `peso_neto_ton / solicitado` |
 
-### 1.3 Reporte Desmoldeo (WIP Enfriamiento) - *Por Implementar*
+### 1.3 Reporte Desmoldeo (WIP Enfriamiento)
 
 Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento y cuándo se liberarán las cajas.
 
-**Tabla DB Propuesta:** `sap_demolding_snapshot`
+**Tabla DB:** `sap_demolding_snapshot`
 
 | Campo DB | Columna Excel | Uso |
 |---|---|---|
 | `material` | `Pieza` | Número de parte |
-| `texto_breve` | `Tipo pieza` | Descripción |
 | `lote` | `Lote` | Identificador lote |
-| `flask_id` | `Caja` | ID físico de la caja |
-| `demolding_date` | `Fecha Desmoldeo` | Fecha real liberación caja |
+| `flask_id` | `Caja` | ID físico completo de la caja |
+| `cancha` | `Cancha` | Ubicación física (filtro para planner) |
+| `demolding_date` | `Fecha Desmoldeo` | Fecha real liberación caja (NO usar "Fecha a desmoldear") |
 | `demolding_time` | `Hora Desm.` | Hora liberación |
 | `mold_type` | `Tipo molde` | Identifica tests |
 | `poured_date` | `Fecha fundida` | Fecha vaciado |
 | `poured_time` | `Hora Fundida` | Hora vaciado |
 | `cooling_hours` | `Hs. Enfria` | Tiempo estimado enfriamiento |
-| `mold_quantity` | `Cant. Moldes` | Fracción de molde (0-1) |
-| `manufacturing_order` | `OF` | Orden Fabricación (Futuro) |
+| `mold_quantity` | `Cant. Moldes` | Número de moldes (entero) |
 
-Campos a ignorar: `Enfriamiento`, `Fecha a desmoldear` (estimado), `Colada`, `UA de Molde`, `Días para entregar`.
+**Filtros de Importación:**
+- **Ninguno** - Se importa todo el archivo
+
+**Actualización Automática:**
+
+Cuando se importa desmoldeo, automáticamente:
+
+1. **Actualiza `material_master`:**
+   - `flask_size` = Primeros 3 caracteres de `flask_id`
+   - `tiempo_enfriamiento_molde_dias` = `cooling_hours` (horas)
+
+2. **Regenera `planner_daily_resources`:**
+   - Reconstruye tabla diaria desde configuración (turnos/feriados/capacidades)
+   - Descuenta flasks ocupadas desde hoy hasta `demolding_date + 1`
+   - Si `demolding_date` es pasado, usa hoy como fecha inicio
+   - Filtra por cancha configurada (default: "TCF-L1400")
+
+**Campos a ignorar:** `Enfriamiento`, `Fecha a desmoldear`, `Colada`, `UA de Molde`, `Días para entregar`.
 
 ---
 
 ## 2. Bases de Datos Maestras Internas
 
-### 2.1 Maestro de Materiales (`material_master`)
+### 2.1 Tabla de Recursos Diarios (`planner_daily_resources`)
+
+**Nueva tabla clave** que almacena disponibilidad real de recursos día a día.
+
+**Propósito:**
+- Persistir capacidades diarias calculadas desde configuración
+- Descontar recursos ocupados desde condiciones iniciales (desmoldeo, WIP)
+- Proveer restricciones al solver del planner
+
+**Tabla DB:** `planner_daily_resources`
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `scenario_id` | INTEGER (PK) | Escenario de planner |
+| `day` | TEXT (PK) | Fecha ISO (YYYY-MM-DD) |
+| `flask_type` | TEXT (PK) | Tipo de caja (S/M/L) |
+| `available_qty` | INTEGER | Cajas disponibles = Total config - Ocupadas |
+| `molding_capacity_per_day` | INTEGER | Capacidad moldeo = molding_per_shift × turnos |
+| `same_mold_capacity_per_day` | INTEGER | Capacidad mismo molde = same_mold_per_shift × turnos |
+| `pouring_tons_available` | REAL | Toneladas fusión = pour_per_shift × turnos |
+
+**Generación:**
+
+1. **Baseline (al guardar config o importar desmoldeo):**
+   ```python
+   rebuild_daily_resources_from_config(scenario_id=1)
+   ```
+   - Horizonte = `min(planner_horizon_days, días_hasta_última_fecha_vision)`
+   - Solo días laborables (excluye fines de semana según turnos + feriados)
+   - Capacidades = `per_shift × número_turnos_del_día`
+   - Flasks = qty_total (completo)
+
+2. **Actualización con ocupación (después de baseline):**
+   ```python
+   update_daily_resources_from_demolding(scenario_id=1)
+   ```
+   - Lee `sap_demolding_snapshot` filtrado por cancha
+   - Descuenta flasks: `available_qty -= mold_quantity` desde hoy hasta `demolding_date + 1`
+   - Si fecha pasada, usa hoy
+
+**Regeneración Automática:**
+- Al guardar Config > Planner → regenera baseline + aplica desmoldeo
+- Al importar desmoldeo → regenera baseline + aplica desmoldeo
+
+### 2.2 Maestro de Materiales (`material_master`)
 
 Tabla gestionada por el usuario (CRUD) para completar datos faltantes en SAP.
 

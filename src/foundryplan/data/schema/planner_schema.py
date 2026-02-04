@@ -66,37 +66,16 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             UNIQUE (scenario_id, date)
         );
 
-        CREATE TABLE IF NOT EXISTS planner_initial_order_progress (
-            scenario_id INTEGER NOT NULL,
-            asof_date TEXT NOT NULL,
-            order_id TEXT NOT NULL,
-            remaining_molds INTEGER NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS planner_daily_resources (
+            scenario_id INTEGER NOT NULL DEFAULT 1,
+            day TEXT NOT NULL,
+            flask_type TEXT NOT NULL,
+            available_qty INTEGER NOT NULL DEFAULT 0,
+            molding_capacity_per_day INTEGER NOT NULL DEFAULT 0,
+            same_mold_capacity_per_day INTEGER NOT NULL DEFAULT 0,
+            pouring_tons_available REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (scenario_id, day, flask_type)
         );
-
-        CREATE TABLE IF NOT EXISTS planner_initial_patterns_loaded (
-            scenario_id INTEGER NOT NULL,
-            asof_date TEXT NOT NULL,
-            order_id TEXT NOT NULL,
-            is_loaded INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS planner_initial_flask_inuse (
-            scenario_id INTEGER NOT NULL,
-            asof_date TEXT NOT NULL,
-            flask_size TEXT,
-            release_workday_index INTEGER NOT NULL,
-            qty_inuse INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS planner_initial_pour_load (
-            scenario_id INTEGER NOT NULL,
-            asof_date TEXT NOT NULL,
-            workday_index INTEGER NOT NULL,
-            tons_committed REAL NOT NULL,
-            PRIMARY KEY (scenario_id, asof_date, workday_index)
-        );
-
-        -- Migrations for shift configuration
         """
     )
     

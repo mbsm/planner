@@ -86,23 +86,31 @@ Representa la cartera de pedidos y fechas.
 Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento y cuándo se liberarán las cajas.
 - **Tabla DB**: `sap_demolding_snapshot`
 - **Mapeo Clave**:
-    - `material` <= `Pieza` (aliases: "material", "pieza", "cod_material")
-    - `texto_breve` <= `Tipo pieza`
+    - `material` <= `Pieza`
     - `lote` <= `Lote`
-    - `flask_id` <= **Primeros 3 caracteres** de columna `Caja` (extracción left-to-right)
-    - `demolding_date` <= `Fecha Desmoldeo` (Dato real a usar)
+    - `flask_id` <= **ID completo** de columna `Caja` (sin truncar)
+    - `cancha` <= `Cancha` (ubicación física)
+    - `demolding_date` <= `Fecha Desmoldeo` (**Dato real a usar, NO "Fecha a desmoldear"**)
     - `demolding_time` <= `Hora Desm.`
-    - `mold_type` <= `Tipo molde` (Identifica pruebas/muestras)
+    - `mold_type` <= `Tipo molde`
     - `poured_date` <= `Fecha fundida`
     - `poured_time` <= `Hora Fundida`
     - `cooling_hours` <= `Hs. Enfria`
-    - `mold_quantity` <= `Cant. Moldes` (0 a 1)
+    - `mold_quantity` <= `Cant. Moldes` (entero)
 - **Filtros de Importación**:
-    - **Ninguno** - Se importa todo el archivo sin filtros
-- **Actualización de Maestro**:
-    - Durante importación, actualiza `material_master.flask_size` (S/M/L) comparando los primeros 3 caracteres de `flask_id` contra códigos configurados en `planner_resources`
-- **Campos a guardar (Futuro)**: `pieces_per_tray` (Piezas x bandeja), `manufacturing_order` (OF), `tt_curve_high` (Curva TT Alta), `tt_curve_low` (Curva TT Baja), `yard_location` (Cancha).
-- **Campos a ignorar**: `Enfriamiento`, `Fecha a desmoldear` (estimado), `Colada`, `UA de Molde`, `Días para entregar`.
+    - **Ninguno** - Se importa todo sin filtros
+- **Filtros para Planner**:
+    - `cancha` = config `planner_demolding_cancha` (default: "TCF-L1400")
+    - Solo flasks con `demolding_date + 1 > hoy` (aún ocupadas)
+- **Actualización Automática:**
+    1. **Actualiza `material_master`:**
+       - `flask_size` = Primeros 3 caracteres de `flask_id`
+       - `tiempo_enfriamiento_molde_dias` = `cooling_hours` (horas)
+    2. **Regenera `planner_daily_resources`:**
+       - Reconstruye baseline desde config (turnos/feriados/capacidades)
+       - Descuenta flasks ocupadas día a día desde hoy hasta `demolding_date + 1`
+       - Si fecha pasada → usa hoy como inicio
+- **Campos a ignorar**: `Enfriamiento`, `Fecha a desmoldear`, `Colada`, `UA de Molde`, `Días para entregar`.
 
 ### 2.2 Datos Maestros Locales
 Datos necesarios para la planificación que no existen o no son fiables en SAP.
@@ -148,6 +156,60 @@ Cada proceso puede tener filtros independientes para determinar qué stock del M
 | Terminaciones | 1 | 0 | Solo stock libre y sin QC (disponible) |
 | Toma de dureza | 0 | 1 | Solo stock bloqueado O en QC |
 | Mecanizado | 1 | null | Solo libre, ignora QC |
+
+#### D. Tabla de Recursos Diarios del Planner
+
+**Tabla**: `planner_daily_resources`
+
+Tabla clave que almacena disponibilidad real de recursos día a día, considerando configuración base y condiciones iniciales.
+
+**Campos**:
+- `scenario_id` (PK): Escenario de planner
+- `day` (PK): Fecha ISO (YYYY-MM-DD)
+- `flask_type` (PK): Tipo de caja (ej: "S", "M", "L")
+- `available_qty`: Cajas disponibles (Total - Ocupadas)
+- `molding_capacity_per_day`: Capacidad moldeo = molding_per_shift × turnos_día
+- `same_mold_capacity_per_day`: Capacidad mismo molde = same_mold_per_shift × turnos_día
+- `pouring_tons_available`: Toneladas fusión disponibles = pour_per_shift × turnos_día
+
+**Generación Automática:**
+
+1. **Baseline (Config + Turnos + Feriados):**
+   - Ejecutado por: `rebuild_daily_resources_from_config()`
+   - Horizonte: `min(planner_horizon_days, días_hasta_última_fecha_vision)`
+   - Mínimo: 30 días, Máximo: según config (default 180)
+   - Solo días laborables (días con turnos configurados - feriados)
+   - Capacidades por día:
+     ```
+     molding = molding_per_shift × turnos_del_día
+     same_mold = same_mold_per_shift × turnos_del_día
+     pouring = pour_per_shift × turnos_del_día
+     ```
+   - Flasks: qty_total (completo)
+
+2. **Actualización con Ocupación:**
+   - Ejecutado por: `update_daily_resources_from_demolding()`
+   - Lee: `sap_demolding_snapshot` filtrado por cancha
+   - Lógica:
+     ```python
+     for cada línea desmoldeo:
+         if demolding_date < hoy:
+             demolding_date = hoy
+         
+         for día in range(hoy, demolding_date + 1):
+             UPDATE planner_daily_resources
+             SET available_qty = MAX(0, available_qty - mold_quantity)
+             WHERE day = día AND flask_type = tipo_caja
+     ```
+
+**Triggers de Regeneración:**
+- Al guardar Config > Planner → regenera baseline + aplica ocupación
+- Al importar Desmoldeo → regenera baseline + aplica ocupación
+
+**Uso:**
+- Planner solver lee restricciones desde esta tabla
+- UI muestra capacidades semanales agregando desde datos diarios
+- Ocupación visible en "Condiciones Iniciales" = Total - Disponible
 | Custom | null | 0 | Ignora libre, solo sin QC |
 
 **Implementación**:

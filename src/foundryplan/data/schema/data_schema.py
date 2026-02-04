@@ -156,10 +156,9 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             material TEXT,
-            texto_breve TEXT,
             lote TEXT,
             flask_id TEXT,
-            flask_size TEXT,
+            cancha TEXT,
             demolding_date TEXT,
             demolding_time TEXT,
             mold_type TEXT,
@@ -285,5 +284,11 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             SET min_finish_days = CAST(min_finish_hours / 24.0 AS INTEGER)
             WHERE min_finish_hours IS NOT NULL AND min_finish_days IS NULL
         """)
+    except Exception:
+        pass
+    
+    # Migration: Add cancha column to sap_demolding_snapshot
+    try:
+        con.execute("ALTER TABLE sap_demolding_snapshot ADD COLUMN cancha TEXT")
     except Exception:
         pass

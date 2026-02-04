@@ -57,10 +57,10 @@ Foundry Plan is a Windows-first production planning web app (NiceGUI + SQLite) w
 User uploads MB52 (stock snapshot) and Vision (orders) via page `/actualizar`:
 - Excel columns normalized via `src/foundryplan/data/excel_io.py` (handles format coercion).
 - SAP keys (Documento Comercial, Posición SD) normalized via `_normalize_sap_key()`.
-- Tables stored in `sap_mb52_snapshot`, `sap_vision_snapshot`.
+- Tables stored in `sap_mb52_snapshot`, `sap_vision_snapshot`, `sap_demolding_snapshot`.
 - **MB52**: No material prefix filtering (loads all materials).
 - **Vision**: Filters by `sap_vision_material_prefixes` config (default: 401,402,403,404).
-- **Desmoldeo**: No material prefix filtering (loads all materials).
+- **Desmoldeo**: No material prefix filtering (loads all materials). Auto-updates `material_master` and regenerates `planner_daily_resources`.
 
 ### 2. Reconciliation
 `Repository.try_rebuild_orders_from_sap_for(process)`:
@@ -82,12 +82,30 @@ Algorithm: Sort jobs by (is_test DESC, priority ASC, due_date ASC). Assign to el
 `start_by` is calculated in real-time from `Part.vulcanizado_dias + Part.mecanizado_dias + Part.inspeccion_externa_dias`.
 
 ### 4. Planner (Moldeo)
+
+**Daily Resources System:**
+- Core table: `planner_daily_resources` - stores available capacity day-by-day
+- Regenerated automatically when:
+  - Saving Config > Planner
+  - Importing Desmoldeo report
+- Calculation:
+  ```
+  Horizon = min(planner_horizon_days, days_to_last_vision_order)
+  molding_capacity = molding_per_shift × shifts_per_day
+  same_mold_capacity = same_mold_per_shift × shifts_per_day
+  pouring_capacity = pour_per_shift × shifts_per_day
+  flask_available = total - occupied_from_demolding
+  ```
+- Flasks occupied from demolding: filtered by cancha, counted from today until demolding_date + 1
+
+**Solver Workflow:**
 `run_planner()` in UI calls:
 1. `planner.api.prepare_and_sync(repo, asof_date, ...)` → extracts orders/parts/resources.
 2. `solve_planner_heuristic(...)` → greedy day-by-day capacity allocation.
 3. Persists schedule to `planner_schedule` table.
 
 Solver prioritizes: overdue orders → currently loaded patterns → priority → due_date. Respects flask/pouring limits and cooling times.
+Future: Will read constraints from `planner_daily_resources` table.
 
 ## Developer Workflow
 
