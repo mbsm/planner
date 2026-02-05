@@ -954,15 +954,21 @@ def register_pages(repo: Repository) -> None:
                     
                     # Calculate occupied as (total - available) for TODAY
                     flask_occupied = {}
-                    today_str = date.today().isoformat()
+                    
+                    if not daily_rows:
+                        # No data for today - might be weekend/holiday or table not generated
+                        with initial_conditions_container:
+                            ui.label("Condiciones Iniciales (Recursos Ocupados)").classes("text-lg font-semibold mb-2")
+                            today_label = date.today().strftime('%d-%m-%Y')
+                            ui.label(f"⚠️ Sin datos para hoy ({today_label}). Puede ser día no laborable o falta regenerar recursos.").classes("text-sm text-amber-600")
+                        return
                     
                     for r in daily_rows:
-                        if r["day"] == today_str:
-                            flask_type = r["flask_type"]
-                            available = int(r["available_qty"])
-                            total = flask_totals.get(flask_type, 0)
-                            occupied = max(0, total - available)
-                            flask_occupied[flask_type] = occupied
+                        flask_type = r["flask_type"]
+                        available = int(r["available_qty"])
+                        total = flask_totals.get(flask_type, 0)
+                        occupied = max(0, total - available)
+                        flask_occupied[flask_type] = occupied
                     
                     # Build single row with flask counts
                     row_data = {'concepto': 'Cajas Ocupadas (Enfriamiento)'}
@@ -993,7 +999,9 @@ def register_pages(repo: Repository) -> None:
                             row_key='concepto',
                         ).classes('w-full').props('dense flat')
                         
-                        ui.label(f"📦 Cajas ocupadas hoy ({date.today().strftime('%d-%m-%Y')}) = Total config - Disponible en tabla diaria").classes("text-xs text-slate-500 mt-1")
+                        today_label = date.today().strftime('%d-%m-%Y')
+                        ui.label(f"📦 Cajas ocupadas HOY ({today_label}) = Total config - Disponible").classes("text-xs text-slate-500 mt-1")
+                        ui.label(f"💡 Los valores en 'Recursos Disponibles' muestran el MÍNIMO de la semana (puede ser menor si hubo ocupación días anteriores)").classes("text-xs text-slate-400 mt-0.5")
                         
                 except Exception as ex:
                     with initial_conditions_container:
