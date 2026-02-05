@@ -402,23 +402,30 @@ Este diseño CP-SAT quedará para una fase futura; la implementación actual usa
 #### 3.2.2 Heurística actual (implementada)
 Ubicación: `src/foundryplan/planner/solve.py` (`solve_planner_heuristic`).
 
-- **Capacidades por día**: lee `planner_daily_resources` ya descontado por desmoldeo (`update_daily_resources_from_demolding`). Para cada día usa:
+- **Capacidades por día**: lee `planner_daily_resources` ya descontado por desmoldeo. Para cada día usa:
   - `molding_capacity`
   - `same_mold_capacity`
   - `pouring_tons_available`
   - `flask_available` por tipo de caja
-- **Orden de prioridad**: se calcula `start_by` estimando días de proceso (moldeo, fundición=1, enfriamiento=ceil(cool_hours/24), terminación=ceil(finish_hours/64), buffer de fin de semana). Se ordena:
-  1) overdue (start_by <= 0)
-  2) patrones cargados inicialmente (`initial_patterns_loaded`)
-  3) `priority` ASC
-  4) `start_by` ASC
-- **Asignación diaria (greedy)**: recorre días y asigna moldes cumpliendo simultáneamente:
-  - capacidad de moldeo del día
-  - límite `same_mold_capacity` por parte en el día
-  - límite de metal: `molds * (net_weight_ton * pieces_per_mold) <= pouring_tons_available`
-  - cajas disponibles por tipo (ya descontadas por desmoldeo; se reduce al asignar)
+- **Orden de prioridad** (estabilidad + urgencia):
+  1) patrones cargados inicialmente (`initial_patterns_loaded`) primero (para dar continuidad)
+  2) `priority` asc (1=prioritaria en GUI, 2=resto)
+  3) `start_by` asc (calculado con días de proceso: moldeo, fundición=1, enfriamiento=ceil(cool_hours/24), terminación=ceil(finish_hours/64), buffer fin de semana)
+- **Asignación (tramo contiguo)**: para cada pedido en ese orden, se busca el primer día donde exista un tramo contiguo de días con capacidad suficiente para alojar **todos** los moldes faltantes, respetando simultáneamente:
+  - capacidad de moldeo diaria
+  - límite `same_mold_capacity` diario por parte
+  - límite de metal diario: `molds * (net_weight_ton * pieces_per_mold) <= pouring_tons_available`
+  - cajas disponibles por tipo
+  Los moldes del pedido se colocan en bloque continuo desde ese día hacia adelante; no se re-fracciona si un día intermedio no tiene capacidad.
+- **Patrón fijo**: una vez que una orden se coloca, se asume que el patrón queda “cargado” hasta terminar la orden; no se rota a mitad de la asignación.
 - **Resultado**: `molds_schedule[order_id][day_idx] = qty`; marca `HEURISTIC_INCOMPLETE` si alguna orden queda con `qty_left > 0` (horizonte insuficiente).
-- **No modela**: cambios de patrón, penalidades, ni finish_hours flexible; no usa CP-SAT.
+- **No modela**: penalidad explícita por cambio de patrón (se evita al fijar el patrón por orden), finish_hours flexible, ni CP-SAT.
+
+**Salida del planner (heurística):**
+- `status`: HEURISTIC o HEURISTIC_INCOMPLETE
+- `molds_schedule`: asignación de moldes por `order_id` y `day_idx` (índice de workday)
+- `errors`: lista de órdenes que no cupieron en el horizonte
+- No retorna todavía fechas de entrega ni penalidades; es una asignación día-a-día de moldes.
 
 #### 3.2.3 Supuestos de calendario (flujo de proceso)
 - **Moldeo**: se moldean piezas el día $d$ (día hábil).
@@ -637,7 +644,7 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
   \end{array}\right)$$
   
   Donde:
-  - Semanas de moldeo = $\lceil\frac{\text{remaining\_molds}}{\text{molding\_max\_same\_part\_per\_day}}\rceil$
+  - Dias de moldeo = $\lceil\frac{\text{remaining\_molds}}{\text{molding\_max\_same\_part\_per\_day}}\rceil$
   - Pouring = 1 día hábil
   - Cooling = $\lceil\frac{\text{cool\_hours}}{24}\rceil$ días calendario
   - Finish = $\lceil\frac{\text{finish\_hours}}{8 \times 24}\rceil$ días hábiles (asumiendo 8h/día)
@@ -852,20 +859,23 @@ Formato JSON para definir qué stock del MB52 se considera disponible para cada 
 
 ## 6. Especificaciones Detalladas (Planner Module)
 
-### Definición del Problema
-Planificar la producción de moldes semanalmente (Lunes a Domingo).
-- **Unidad**: Moldes (no piezas individuales).
-- **Restricción Crítica**: Cambiar de modelo (molde) en una línea es costoso. Se prefiere agrupar la producción de un mismo pedido.
-- **Output**: Plan diario (`plan_daily_order`) indicando cantidad a moldear por `order_id` + `date`.
+La implementación vigente usa la heurística descrita en 3.2.2 (capacidades diarias + tramo contiguo). El diseño CP-SAT completo se mantiene como referencia futura en el **Anexo A**.
 
-### Entidades Planner
-- **Orders**: `(order_id, part_id, qty, due_date, priority)`
-- **Parts**: `(part_id, flask_size, cool_hours, finish_hours, net_weight_ton, alloy)`
-    - *Nota*: `finish_hours` se usa para estimar lag, `net_weight_ton` para restricción de tonelaje de vaciado.
-- **Resources**: Capacidad por tamaño de caja (S/M/L) y total moldes/día.
+Flujo actual (heurística):
+1. Extract: inputs y recursos diarios (`planner_daily_resources`).
+2. Solve: `solve_planner_heuristic` asigna moldes con las restricciones diarias ya descontadas.
+3. Persist/Output: `molds_schedule` por `order_id` y `day_idx`; estado HEURISTIC/INCOMPLETE.
 
-### Flujo de Ejecución Planner
-1. **Extract**: `repository.get_planner_inputs(scenario_id)` lee de tablas `sap_*` y `material_master`.
-2. **Transform**: Convierte registros DB a dataclasses (`PlannerOrder`, etc.).
-3. **Solve**: `planner.solve.run_solve(inputs)` ejecuta OR-Tools.
-4. **Persist**: Guarda resultados en tablas `planner_outputs_*`.
+Para el diseño CP-SAT (futuro), ver Anexo A.
+
+---
+
+## Anexo A: Diseño CP-SAT (futuro, no implementado)
+
+Se conserva como blueprint para una fase posterior. No está activo en código.
+
+- **Definición del problema**: Plan semanal de moldes; unidad = moldes; preferir continuidad de modelo; output diario `plan_daily_order`.
+- **Entidades**: Orders `(order_id, part_id, qty, due_date, priority)`; Parts `(flask_size, cool_hours, finish_hours, min_finish_hours, net_weight_ton, pieces_per_mold, alloy)`; Resources (capacidad por caja y tonelaje diario).
+- **Condiciones iniciales**: flasks ocupadas desde desmoldeo, carga de colada inicial, patrones cargados.
+- **Restricciones previstas**: capacidad de moldeo, mismo molde, metal diario, flasks por tamaño, límites `finish_hours/min_finish_hours`, penalidad/costo por cambio de patrón, horizonte y feriados.
+- **Flujo CP-SAT**: Extract → Transform → Solve (OR-Tools) → Persist (`planner_outputs_*`).
