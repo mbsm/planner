@@ -9,7 +9,7 @@ Este documento detalla el esquema de base de datos, mapeo desde fuentes SAP y ca
 Representa el inventario físico por lote en almacenes seleccionados.
 Cada carga reemplaza completamente los datos anteriores ("snapshot").
 
-**Tabla DB:** `sap_mb52_snapshot`
+**Tabla DB:** `core_sap_mb52_snapshot`
 
 | Campo DB | Columna Excel (Normalizada) | Descripción | Mapeo / Regla |
 |---|---|---|---|
@@ -31,7 +31,7 @@ Cada carga reemplaza completamente los datos anteriores ("snapshot").
 Representa la cartera de pedidos y su estado de avance.
 Cada carga reemplaza completamente los datos anteriores.
 
-**Tabla DB:** `sap_vision_snapshot`
+**Tabla DB:** `core_sap_vision_snapshot`
 
 | Campo DB | Columna Excel (Normalizada) | Descripción |
 |---|---|---|
@@ -53,39 +53,77 @@ Cada carga reemplaza completamente los datos anteriores.
 ### 1.3 Reporte Desmoldeo (WIP Enfriamiento)
 
 Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento y cuándo se liberarán las cajas.
+A partir de esta importación se generan **dos tablas separadas** según estado de avance:
 
-**Tabla DB:** `sap_demolding_snapshot`
+#### A. Moldes por Fundir (WIP)
+**Tabla DB:** `core_moldes_por_fundir`
 
-| Campo DB | Columna Excel | Uso |
+| Campo DB | Columna Excel | Descripción |
 |---|---|---|
-| `material` | `Pieza` | Número de parte |
-| `lote` | `Lote` | Identificador lote |
+| `material` | (Derivado) | **Código de pieza extraído de "MOLDE PIEZA XXXXXXXXX"** (últimos 11 dígitos) |
+| `tipo_pieza` | `Pieza` | Descripción original completa (ej: "MOLDE PIEZA 40330021624") |
 | `flask_id` | `Caja` | ID físico completo de la caja |
-| `cancha` | `Cancha` | Ubicación física (filtro para planner) |
-| `demolding_date` | `Fecha Desmoldeo` | Fecha real liberación caja (NO usar "Fecha a desmoldear") |
+| `cancha` | `Cancha` | Ubicación física (filtro configurable) |
+| `lote` | `Lote` | Identificador lote |
+| `mold_type` | `Tipo molde` | Identifica tests |
+| `poured_date` | `Fecha fundida` | Fecha vaciado |
+| `poured_time` | `Hora Fundida` | Hora vaciado |
+| `cooling_hours` | `Hs. Enfria` | Tiempo estimado enfriamiento (horas) |
+| `mold_quantity` | `Cant. Moldes` | **Fracción de caja que usa UNA pieza** (REAL, ej: 0.25, 0.5, 1.0) |
+
+**Criterio de inclusión:** Filas SIN `Fecha Desmoldeo` (moldes aún en proceso de enfriamiento)
+
+#### B. Piezas Fundidas (Completadas)
+**Tabla DB:** `core_piezas_fundidas`
+
+| Campo DB | Columna Excel | Descripción |
+|---|---|---|
+| `material` | (Derivado) | **Código de pieza extraído de "MOLDE PIEZA XXXXXXXXX"** (últimos 11 dígitos) |
+| `tipo_pieza` | `Pieza` | Descripción original completa |
+| `flask_id` | `Caja` | ID físico completo de la caja |
+| `cancha` | `Cancha` | Ubicación física |
+| `lote` | `Lote` | Identificador lote |
+| `demolding_date` | `Fecha Desmoldeo` | **Fecha real liberación caja** (NOT NULL) |
 | `demolding_time` | `Hora Desm.` | Hora liberación |
 | `mold_type` | `Tipo molde` | Identifica tests |
 | `poured_date` | `Fecha fundida` | Fecha vaciado |
 | `poured_time` | `Hora Fundida` | Hora vaciado |
-| `cooling_hours` | `Hs. Enfria` | Tiempo estimado enfriamiento |
-| `mold_quantity` | `Cant. Moldes` | Número de moldes (entero) |
+| `cooling_hours` | `Hs. Enfria` | Tiempo real enfriamiento (horas) |
+| `mold_quantity` | `Cant. Moldes` | **Fracción de caja que usa UNA pieza** (REAL) |
 
-**Filtros de Importación:**
-- **Ninguno** - Se importa todo el archivo
+**Criterio de inclusión:** Filas CON `Fecha Desmoldeo` (piezas ya desmoldadas, caja liberada)
 
-**Actualización Automática:**
+#### Filtros de Importación
+
+1. **Campos obligatorios:** `Pieza`, `Material`, `Caja`, `flask_id` (filas incompletas se descartan)
+2. **Cancha:** Solo canchas válidas según config `demolding_canchas_validas` (default: TCF-L1000 a TCF-L3000, TDE-D0001 a D0003)
+3. **Extracción de material:**
+   - Regex: `(\d{11})(?:\D|$)` extrae últimos 11 dígitos consecutivos de campo `Pieza`
+   - Ejemplo: "MOLDE PIEZA 40330021624" → `material = "40330021624"`
+   - Si no encuentra patrón, usa últimos 11 caracteres si todos son dígitos
+
+#### Actualización Automática
 
 Cuando se importa desmoldeo, automáticamente:
 
-1. **Actualiza `material_master`:**
-   - `flask_size` = Primeros 3 caracteres de `flask_id`
-   - `tiempo_enfriamiento_molde_dias` = `cooling_hours` (horas)
+1. **Actualiza `core_material_master`:**
+   - `flask_size` = Primeros 3 caracteres de `flask_id` (de ambas tablas, más reciente)
+   - `tiempo_enfriamiento_molde_dias` = `cooling_hours` **SOLO de `piezas_fundidas`** (datos reales validados)
+   - `piezas_por_molde` = `ROUND(1.0 / mold_quantity)` **SOLO de `piezas_fundidas`** (datos reales)
+     * Ejemplo: si `mold_quantity = 0.25` → `piezas_por_molde = 4`
+     * Ejemplo: si `mold_quantity = 0.5` → `piezas_por_molde = 2`
+     * Ejemplo: si `mold_quantity = 1.0` → `piezas_por_molde = 1`
 
 2. **Regenera `planner_daily_resources`:**
    - Reconstruye tabla diaria desde configuración (turnos/feriados/capacidades)
-   - Descuenta flasks ocupadas desde hoy hasta `demolding_date + 1`
+   - Descuenta flasks ocupadas **SOLO de `moldes_por_fundir`** (WIP actual)
+   - Acumula fracciones de `mold_quantity` por tipo de caja
+   - Redondea hacia arriba con `ceil()`: si 0.75 cajas ocupadas → 1 caja completa
+   - Período: desde hoy hasta `demolding_date + 1`
    - Si `demolding_date` es pasado, usa hoy como fecha inicio
    - Filtra por cancha configurada (default: "TCF-L1400")
+
+**Tabla DEPRECATED:** `core_sap_demolding_snapshot` (mantenida por compatibilidad, no usar)
 
 **Campos a ignorar:** `Enfriamiento`, `Fecha a desmoldear`, `Colada`, `UA de Molde`, `Días para entregar`.
 

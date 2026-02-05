@@ -6,7 +6,7 @@ import sqlite3
 def ensure_schema(con: sqlite3.Connection) -> None:
     con.executescript(
         """
-        CREATE TABLE IF NOT EXISTS audit_log (
+        CREATE TABLE IF NOT EXISTS core_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL DEFAULT(datetime('now', 'localtime')),
             category TEXT NOT NULL,
@@ -14,21 +14,22 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             details TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS family_catalog (
+        CREATE TABLE IF NOT EXISTS core_family_catalog (
             family_id TEXT PRIMARY KEY,
             label TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS app_config (
+        CREATE TABLE IF NOT EXISTS core_config (
             config_key TEXT PRIMARY KEY,
             config_value TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS material_master (
+        CREATE TABLE IF NOT EXISTS core_material_master (
             material TEXT PRIMARY KEY,
+            descripcion_material TEXT,
             family_id TEXT,
             aleacion TEXT,
             flask_size TEXT,
@@ -44,10 +45,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             sobre_medida_mecanizado INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(family_id) REFERENCES family_catalog(family_id)
+            FOREIGN KEY(family_id) REFERENCES core_family_catalog(family_id)
         );
 
-        CREATE TABLE IF NOT EXISTS process (
+        CREATE TABLE IF NOT EXISTS core_processes (
             process_id TEXT PRIMARY KEY,
             label TEXT NOT NULL,
             sap_almacen TEXT,
@@ -65,7 +66,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             sort_order INTEGER,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(process_id) REFERENCES process(process_id)
+            FOREIGN KEY(process_id) REFERENCES core_processes(process_id)
         );
 
         CREATE TABLE IF NOT EXISTS resource_constraint (
@@ -86,10 +87,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             max_value REAL,
             is_required INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(process_id, attr_key),
-            FOREIGN KEY(process_id) REFERENCES process(process_id)
+            FOREIGN KEY(process_id) REFERENCES core_processes(process_id)
         );
 
-        CREATE TABLE IF NOT EXISTS sap_mb52_snapshot (
+        CREATE TABLE IF NOT EXISTS core_sap_mb52_snapshot (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             material TEXT NOT NULL,
@@ -107,7 +108,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             is_test INTEGER NOT NULL DEFAULT 0
         );
 
-        CREATE TABLE IF NOT EXISTS sap_vision_snapshot (
+        CREATE TABLE IF NOT EXISTS core_sap_vision_snapshot (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             pedido TEXT NOT NULL,
@@ -150,9 +151,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             peso_unitario_ton REAL
         );
 
-        CREATE VIEW IF NOT EXISTS sap_vision AS SELECT * FROM sap_vision_snapshot;
+        CREATE VIEW IF NOT EXISTS core_sap_vision AS SELECT * FROM core_sap_vision_snapshot;
 
-        CREATE TABLE IF NOT EXISTS sap_demolding_snapshot (
+        -- DEPRECATED: Replaced by core_moldes_por_fundir and core_piezas_fundidas
+        CREATE TABLE IF NOT EXISTS core_sap_demolding_snapshot (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             material TEXT,
@@ -168,7 +170,41 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             mold_quantity REAL
         );
 
-        CREATE TABLE IF NOT EXISTS orders (
+        -- Moldes en proceso de fundición (sin fecha_desmoldeo)
+        CREATE TABLE IF NOT EXISTS core_moldes_por_fundir (
+            molde_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            material TEXT NOT NULL,
+            tipo_pieza TEXT NOT NULL,
+            lote TEXT,
+            flask_id TEXT NOT NULL,
+            cancha TEXT NOT NULL,
+            mold_type TEXT,
+            poured_date TEXT,
+            poured_time TEXT,
+            cooling_hours REAL,
+            mold_quantity REAL
+        );
+
+        -- Piezas ya fundidas (con fecha_desmoldeo)
+        CREATE TABLE IF NOT EXISTS core_piezas_fundidas (
+            pieza_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            material TEXT NOT NULL,
+            tipo_pieza TEXT NOT NULL,
+            lote TEXT,
+            flask_id TEXT NOT NULL,
+            cancha TEXT NOT NULL,
+            demolding_date TEXT NOT NULL,
+            demolding_time TEXT,
+            mold_type TEXT,
+            poured_date TEXT,
+            poured_time TEXT,
+            cooling_hours REAL,
+            mold_quantity REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS core_orders (
             process TEXT NOT NULL,
             almacen TEXT NOT NULL,
             pedido TEXT NOT NULL,
@@ -184,29 +220,17 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             PRIMARY KEY (process, pedido, posicion, primer_correlativo, ultimo_correlativo)
         );
 
-        CREATE TABLE IF NOT EXISTS vision_kpi_daily (
+        CREATE TABLE IF NOT EXISTS core_vision_kpi_daily (
             snapshot_date TEXT PRIMARY KEY,
             snapshot_at TEXT NOT NULL,
             tons_por_entregar REAL NOT NULL,
             tons_atrasadas REAL NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS mb52_progress_last (
-            process TEXT PRIMARY KEY,
-            generated_on TEXT NOT NULL,
-            report_json TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS vision_progress_last (
-            id INTEGER PRIMARY KEY,
-            generated_on TEXT NOT NULL,
-            report_json TEXT NOT NULL
-        );
         """
     )
 
     con.executemany(
-        "INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)",
+        "INSERT OR IGNORE INTO core_family_catalog(family_id, label) VALUES(?, ?)",
         [
             ("Parrillas", "Parrillas"),
             ("Lifters", "Lifters"),
@@ -216,16 +240,16 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         ],
     )
 
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_centro', '4000')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_material_prefixes', '401,402,403,404')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('sap_vision_material_prefixes', '401,402,403,404')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_horizon_days', '30')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_horizon_buffer_days', '10')")
-    con.execute("INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES('planner_holidays', '')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_centro', '4000')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_material_prefixes', '401,402,403,404')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_vision_material_prefixes', '401,402,403,404')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('planner_horizon_days', '30')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('planner_horizon_buffer_days', '10')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('planner_holidays', '')")
 
     con.executemany(
-        "INSERT OR IGNORE INTO app_config(config_key, config_value) VALUES(?, ?)",
+        "INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES(?, ?)",
         [
             ("sap_almacen_moldeo", "4032"),
             ("sap_almacen_terminaciones", "4035"),
@@ -250,7 +274,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     ]
     con.executemany(
         """
-        INSERT OR IGNORE INTO process(process_id, label, sap_almacen, is_special_moldeo, availability_predicate_json)
+        INSERT OR IGNORE INTO core_processes(process_id, label, sap_almacen, is_special_moldeo, availability_predicate_json)
         VALUES(?, ?, ?, ?, ?)
         """,
         process_defaults,
@@ -259,19 +283,19 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     # Migration: Rename finish_hours to finish_days, min_finish_hours to min_finish_days
     # SQLite doesn't support column rename directly, so we add new columns and copy data
     try:
-        con.execute("ALTER TABLE material_master ADD COLUMN finish_days INTEGER DEFAULT 15")
+        con.execute("ALTER TABLE core_material_master ADD COLUMN finish_days INTEGER DEFAULT 15")
     except Exception:
         pass
     
     try:
-        con.execute("ALTER TABLE material_master ADD COLUMN min_finish_days INTEGER DEFAULT 5")
+        con.execute("ALTER TABLE core_material_master ADD COLUMN min_finish_days INTEGER DEFAULT 5")
     except Exception:
         pass
     
     # Copy data from old columns to new (if old columns exist and new are empty)
     try:
         con.execute("""
-            UPDATE material_master 
+            UPDATE core_material_master 
             SET finish_days = CAST(finish_hours / 24.0 AS INTEGER)
             WHERE finish_hours IS NOT NULL AND finish_days IS NULL
         """)
@@ -280,16 +304,22 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     
     try:
         con.execute("""
-            UPDATE material_master 
+            UPDATE core_material_master 
             SET min_finish_days = CAST(min_finish_hours / 24.0 AS INTEGER)
             WHERE min_finish_hours IS NOT NULL AND min_finish_days IS NULL
         """)
     except Exception:
         pass
     
-    # Migration: Add cancha column to sap_demolding_snapshot
+    # Migration: Add cancha column to core_sap_demolding_snapshot
     try:
-        con.execute("ALTER TABLE sap_demolding_snapshot ADD COLUMN cancha TEXT")
+        con.execute("ALTER TABLE core_sap_demolding_snapshot ADD COLUMN cancha TEXT")
+    except Exception:
+        pass
+    
+    # Migration: Add descripcion_material column to core_material_master
+    try:
+        con.execute("ALTER TABLE core_material_master ADD COLUMN descripcion_material TEXT")
     except Exception:
         pass
     

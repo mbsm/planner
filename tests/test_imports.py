@@ -85,7 +85,7 @@ def test_import_demolding_truncates_flask_id_and_skips_invalid(repo):
 
     with repo.db.connect() as con:
         rows = con.execute(
-            "SELECT material, flask_id, demolding_date, mold_quantity FROM sap_demolding_snapshot"
+            "SELECT material, flask_id, demolding_date, mold_quantity FROM core_sap_demolding_snapshot"
         ).fetchall()
 
     assert len(rows) == 2  # both rows are kept; empty/NaN flask_id is coerced to string

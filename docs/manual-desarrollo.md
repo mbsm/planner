@@ -55,7 +55,9 @@ Representa stock físico por lote.
     - `documento_comercial`, `posicion_sd` (Enlace a pedido)
 - **Filtros de Importación**:
     - **Centro**: Solo registros con `centro` = config `sap_centro` (default: "4000")
-    - **Material**: NO se filtra por prefijos (se importa todo)
+    - **Almacén**: Solo almacenes configurados en procesos activos (`process.sap_almacen` donde `is_active=1`)
+      - Filtra materiales semi-elaborados que no son piezas finales
+      - Si no hay procesos configurados, importa todos (compatibilidad)
     - **Mapeo material_base**: Durante importación, se mapea pedido/posición desde Vision para obtener material de pieza cuando el almacén tiene código de molde
 - **Filtros de Disponibilidad por Proceso**:
     - El filtrado por estado (`libre_utilizacion`, `en_control_calidad`) se aplica **dinámicamente** según configuración de cada proceso (ver 2.2.C)
@@ -75,12 +77,37 @@ Representa la cartera de pedidos y fechas.
     - `peso_neto_ton` (Peso total del pedido) => Usado para calcular peso unitario
 - **Filtros de Importación**:
     - **Prefijos Material**: Solo materiales que empiecen con prefijos configurados en `sap_vision_material_prefixes` (default: "401,402,403,404")
-    - Excepción: `tipo_posicion = 'ZTLH'` se importa sin filtro de prefijo
     - **Fecha**: `fecha_de_pedido > 2023-12-31`
+
+#### C. Desmoldeo (WIP y Completadas)
+Representa moldes en enfriamiento y piezas desmoldadas.
+- **Tablas DB**: `core_moldes_por_fundir` (WIP), `core_piezas_fundidas` (completadas)
+- **Mapeo Clave**:
+    - `material` (Código de pieza extraído de "MOLDE PIEZA XXXXXXXXX")
+    - `tipo_pieza` (Descripción original completa)
+    - `flask_id` (ID físico de caja), `cancha` (Ubicación)
+    - `demolding_date` (NULL en moldes_por_fundir, NOT NULL en piezas_fundidas)
+    - `mold_quantity` (Fracción de caja por pieza: 0.25, 0.5, 1.0)
+- **Filtros de Importación**:
+    - **Campos obligatorios**: tipo_pieza, material, flask_id
+    - **Canchas válidas**: Config `demolding_canchas_validas` (default: TCF-L1000..L3000, TDE-D0001..D0003)
+    - **Extracción material**: Regex `(\d{11})(?:\D|$)` de campo Pieza
+- **Separación**:
+    - Sin `Fecha Desmoldeo` → `moldes_por_fundir`
+    - Con `Fecha Desmoldeo` → `piezas_fundidas`
+- **Auto-actualización core_material_master**:
+    - `flask_size`: Desde ambas tablas (más reciente)
+    - `tiempo_enfriamiento_molde_dias`, `piezas_por_molde`: **Solo desde core_piezas_fundidas**
     - **Status**: `status_comercial = 'activo'` (case-insensitive)
 - **Actualización de Maestro**:
     - Durante importación, actualiza `material_master.peso_unitario_ton` = (peso_neto_kg/1000)/solicitado
     - Backfill de MB52: actualiza `material_base` en MB52 usando pedido/posición
+
+**Condiciones iniciales (UI / planner):**
+- `get_flask_usage_breakdown` agrega ocupación por tipo de caja usando prefijos de `planner_flask_types` (cae a primeros 3 chars o regex `L\d+`).
+- **Moldes por Fundir (En Cancha)**: cada fila de `core_moldes_por_fundir` ocupa 1 caja; se agrupa por `flask_id` → tipo de caja y se muestra con `ceil`.
+- **Piezas Fundidas (Enfriando/Desmoldeo pendiente)**: usa `mold_quantity` por `flask_id`; si `demolding_date` es futura, la caja se considera ocupada hasta `demolding_date + 1`; si es pasada o vacía, se asume liberación mañana (`today + 1`); se muestra con `ceil`.
+- **Tons por Fundir**: suma de `peso_unitario_ton` desde `core_material_master` por molde en `core_moldes_por_fundir`, agrupado por tipo de caja.
 
 #### C. Reporte Desmoldeo (WIP Enfriamiento)
 Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento y cuándo se liberarán las cajas.
@@ -106,9 +133,15 @@ Fuente SAP que informa qué moldes están actualmente en proceso de enfriamiento
     1. **Actualiza `material_master`:**
        - `flask_size` = Primeros 3 caracteres de `flask_id`
        - `tiempo_enfriamiento_molde_dias` = `cooling_hours` (horas)
+       - `piezas_por_molde` = `ROUND(1.0 / mold_quantity)` (inverso redondeado)
+         * Si `mold_quantity = 0.25` → `piezas_por_molde = 4`
+         * Si `mold_quantity = 0.5` → `piezas_por_molde = 2`
+         * Solo actualiza si `mold_quantity > 0`
     2. **Regenera `planner_daily_resources`:**
        - Reconstruye baseline desde config (turnos/feriados/capacidades)
-       - Descuenta flasks ocupadas día a día desde hoy hasta `demolding_date + 1`
+       - Acumula fracciones de `mold_quantity` por día/flask_type
+       - Descuenta cajas con `ceil()`: 0.75 cajas → 1 caja ocupada
+       - Período: desde hoy hasta `demolding_date + 1`
        - Si fecha pasada → usa hoy como inicio
 - **Campos a ignorar**: `Enfriamiento`, `Fecha a desmoldear`, `Colada`, `UA de Molde`, `Días para entregar`.
 

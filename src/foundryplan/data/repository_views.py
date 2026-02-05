@@ -120,15 +120,15 @@ class DataRepository:
         self,
         *,
         process_id: str,
-        label: str | None = None,
         sap_almacen: str | None = None,
-        availability_predicate_json: str | None = None,
+        libre_utilizacion: int | None = None,
+        en_control_calidad: int | None = None,
     ) -> None:
         return self._repo.update_process_config(
             process_id=process_id,
-            label=label,
             sap_almacen=sap_almacen,
-            availability_predicate_json=availability_predicate_json,
+            libre_utilizacion=libre_utilizacion,
+            en_control_calidad=en_control_calidad,
         )
 
     def upsert_vision_kpi_daily(self, *, snapshot_date=None) -> dict:
@@ -453,3 +453,6 @@ class PlannerRepository:
 
     def get_daily_resources_for_today(self, *, scenario_id: int) -> list[dict]:
         return self._repo.get_daily_resources_for_today(scenario_id=scenario_id)
+
+    def get_flask_usage_breakdown(self, *, scenario_id: int) -> dict:
+        return self._repo.get_flask_usage_breakdown(scenario_id=scenario_id)

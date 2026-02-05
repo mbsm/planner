@@ -37,7 +37,7 @@ def test_get_orders_overdue_execution(temp_db):
     
     with db.connect() as con:
         con.execute("""
-            INSERT INTO sap_vision_snapshot(
+            INSERT INTO core_sap_vision_snapshot(
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (
@@ -70,7 +70,7 @@ def test_get_orders_due_soon_execution(temp_db):
     
     with db.connect() as con:
         con.execute("""
-            INSERT INTO sap_vision_snapshot(
+            INSERT INTO core_sap_vision_snapshot(
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (

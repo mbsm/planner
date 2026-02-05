@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from foundryplan.data.repo_utils import logger
@@ -78,8 +78,10 @@ class PlannerRepositoryImpl:
         """
         import math
         
-        # Get cancha filter from config
-        cancha_filter = self.data_repo.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"
+        # Get cancha filter from config (comma-separated list)
+        default_canchas = "TCF-L1000,TCF-L1100,TCF-L1200,TCF-L1300,TCF-L1400,TCF-L1500,TCF-L1600,TCF-L1700,TCF-L3000,TDE-D0001,TDE-D0002,TDE-D0003"
+        canchas_config = self.data_repo.get_config(key="planner_demolding_cancha", default=default_canchas) or default_canchas
+        valid_canchas = tuple(c.strip().upper() for c in canchas_config.split(",") if c.strip())
         
         # Get flask type configuration (codes for prefix matching)
         with self.db.connect() as con:
@@ -104,20 +106,19 @@ class PlannerRepositoryImpl:
         # Sort codes by length descending (match longest prefix first)
         sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
         
-        # Read demolding snapshot filtered by cancha
+        # Read core_moldes_por_fundir (WIP molds only, already filtered by valid canchas)
+        # No need to filter by cancha here since import already did it
         with self.db.connect() as con:
             rows = con.execute(
                 """
                 SELECT
-                    d.material,
-                    d.flask_id,
-                    d.demolding_date,
-                    d.mold_quantity,
-                    d.cooling_hours
-                FROM sap_demolding_snapshot d
-                WHERE d.cancha = ?
-                """,
-                (cancha_filter,),
+                    m.material,
+                    m.flask_id,
+                    m.poured_date,
+                    m.mold_quantity,
+                    m.cooling_hours
+                FROM core_moldes_por_fundir m
+                """
             ).fetchall()
         
         flask_fractions: dict[str, float] = {}
@@ -125,24 +126,29 @@ class PlannerRepositoryImpl:
         for r in rows:
             material = str(r["material"] or "").strip()
             flask_id = str(r["flask_id"] or "").strip()
-            demolding_date_str = str(r["demolding_date"] or "").strip()
+            poured_date_str = str(r["poured_date"] or "").strip()
             mold_qty = float(r["mold_quantity"] or 0.0)
+            cooling_hours = float(r["cooling_hours"] or 0.0)
             
             # Skip if mold_qty invalid or missing data
-            if mold_qty <= 0 or not flask_id or not demolding_date_str:
+            if mold_qty <= 0 or not flask_id or not poured_date_str:
                 continue
             
             try:
-                demolding_date = date.fromisoformat(demolding_date_str)
+                poured_date = date.fromisoformat(poured_date_str)
             except Exception:
                 continue
             
-            # IMPORTANTE: Si fecha de desmoldeo está en el pasado, asumir que es hoy
-            if demolding_date < asof_date:
-                demolding_date = asof_date
+            # Calculate expected demolding date from poured_date + cooling_hours
+            cooling_days = int(cooling_hours / 24) if cooling_hours > 0 else 0
+            expected_demolding = date.fromordinal(poured_date.toordinal() + cooling_days)
             
-            # Flask is occupied until demolding_date + 1 day
-            release_date = date.fromordinal(demolding_date.toordinal() + 1)
+            # IMPORTANTE: Si fecha de desmoldeo estimada está en el pasado, asumir que es hoy
+            if expected_demolding < asof_date:
+                expected_demolding = asof_date
+            
+            # Flask is occupied until expected_demolding + 1 day
+            release_date = date.fromordinal(expected_demolding.toordinal() + 1)
             
             # Only count flasks still occupied (release_date > asof_date)
             if release_date <= asof_date:
@@ -194,7 +200,7 @@ class PlannerRepositoryImpl:
             max_date_row = con.execute(
                 """
                 SELECT MAX(fecha_de_pedido) as max_fecha
-                FROM sap_vision_snapshot
+                FROM core_sap_vision_snapshot
                 WHERE fecha_de_pedido IS NOT NULL
                 """
             ).fetchone()
@@ -325,17 +331,18 @@ class PlannerRepositoryImpl:
         logger.info(f"Rebuilt {len(rows_to_insert)} daily resource records for scenario {scenario_id} (horizon={horizon_days})")
 
     def update_daily_resources_from_demolding(self, *, scenario_id: int = 1) -> None:
-        """Update planner_daily_resources by subtracting occupied flasks from demolding.
+        """Update planner_daily_resources by processing demolding data.
         
-        For each flask in desmoldeo snapshot (filtered by cancha):
-        - Decrement available_qty from today until demolding_date + 1
-        - Handles past dates by treating them as today
-        - Applies cancha filter from configuration
+        Phases:
+        1. Rebuild baseline resources (already done by rebuild_daily_resources_from_config)
+        2. Decrement flasks from core_piezas_fundidas (completed pieces with demolding_date)
+        3. Mini-program: schedule pouring for core_moldes_por_fundir and decrement flasks/pouring
         
         Call this after importing desmoldeo data.
         """
-        # Get cancha filter from config
-        cancha_filter = self.data_repo.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"
+        import math
+        
+        today = date.today()
         
         # Get flask type configuration (codes for prefix matching)
         with self.db.connect() as con:
@@ -361,36 +368,37 @@ class PlannerRepositoryImpl:
         # Sort codes by length descending (match longest prefix first)
         sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
         
-        # Read demolding snapshot filtered by cancha
+        def _get_flask_type(flask_id: str) -> str:
+            """Extract flask type from flask_id using configured codes."""
+            flask_code = flask_id[:3] if len(flask_id) >= 3 else flask_id
+            for prefix, ftype in sorted_codes:
+                if flask_code.startswith(prefix):
+                    return ftype
+            return flask_code.upper()
+        
+        # =============================================================================
+        # PHASE 2: Decrement flasks from completed pieces (core_piezas_fundidas)
+        # =============================================================================
         with self.db.connect() as con:
-            rows = con.execute(
+            piezas_rows = con.execute(
                 """
                 SELECT
-                    d.flask_id,
-                    d.demolding_date,
-                    d.mold_quantity
-                FROM sap_demolding_snapshot d
-                WHERE d.cancha = ?
-                """,
-                (cancha_filter,),
+                    flask_id,
+                    demolding_date,
+                    mold_quantity
+                FROM core_piezas_fundidas
+                WHERE flask_id IS NOT NULL AND flask_id <> ''
+                """
             ).fetchall()
         
-        today = date.today()
-        # Acumular fracciones por día/flask_type antes de actualizar
-        # mold_quantity es la fracción de caja que usa UNA pieza
-        daily_decrements: dict[tuple[str, str], float] = {}  # (day, flask_type) -> qty_to_decrement
+        daily_decrements_piezas: dict[tuple[str, str], float] = {}  # (day, flask_type) -> qty
         
-        for r in rows:
+        for r in piezas_rows:
             flask_id = str(r["flask_id"] or "").strip()
             demolding_date_str = str(r["demolding_date"] or "").strip()
             mold_qty = float(r["mold_quantity"] or 0.0)
             
-            # Skip si mold_qty es 0 o negativo (datos inválidos)
-            if mold_qty <= 0:
-                continue
-            
-            # Skip if missing critical data
-            if not flask_id or not demolding_date_str:
+            if mold_qty <= 0 or not flask_id or not demolding_date_str:
                 continue
             
             try:
@@ -398,42 +406,26 @@ class PlannerRepositoryImpl:
             except Exception:
                 continue
             
-            # IMPORTANTE: Si fecha de desmoldeo está en el pasado, usar hoy
+            # If demolding_date is in the past, treat as today
             if demolding_date < today:
                 demolding_date = today
             
-            # Flask is occupied until demolding_date + 1 day
+            # Flasks occupied from today until demolding_date + 1 (exclusive)
             release_date = date.fromordinal(demolding_date.toordinal() + 1)
+            flask_type = _get_flask_type(flask_id)
             
-            # Extract first 3 characters as flask type code
-            flask_code = flask_id[:3] if len(flask_id) >= 3 else flask_id
-            
-            # Determine flask type: first try prefix match, then use code directly
-            flask_type = None
-            if sorted_codes:
-                for prefix, ftype in sorted_codes:
-                    if flask_code.startswith(prefix):
-                        flask_type = ftype
-                        break
-            
-            if not flask_type:
-                flask_type = flask_code.upper()
-            
-            # Acumular fracciones para cada día desde hoy hasta release_date (exclusive)
             current_day = today
             while current_day < release_date:
                 day_str = current_day.isoformat()
                 key = (day_str, flask_type)
-                daily_decrements[key] = daily_decrements.get(key, 0.0) + mold_qty
+                daily_decrements_piezas[key] = daily_decrements_piezas.get(key, 0.0) + mold_qty
                 current_day = date.fromordinal(current_day.toordinal() + 1)
         
-        # Apply decrements to database (convertir fracciones acumuladas a enteros con ceil)
-        import math
-        updates = []
-        for (day_str, flask_type), total_fraction in daily_decrements.items():
-            # Redondear hacia arriba: si usamos 0.5 cajas, ocupamos 1 caja completa
+        # Apply piezas fundidas decrements (ceil fractions)
+        updates_piezas = []
+        for (day_str, flask_type), total_fraction in daily_decrements_piezas.items():
             flasks_occupied = math.ceil(total_fraction)
-            updates.append((flasks_occupied, day_str, flask_type, scenario_id))
+            updates_piezas.append((flasks_occupied, day_str, flask_type, scenario_id))
         
         with self.db.connect() as con:
             con.executemany(
@@ -442,11 +434,167 @@ class PlannerRepositoryImpl:
                 SET available_qty = MAX(0, available_qty - ?)
                 WHERE day = ? AND flask_type = ? AND scenario_id = ?
                 """,
-                updates,
+                updates_piezas,
             )
             con.commit()
         
-        logger.info(f"Updated {len(updates)} daily resource records from demolding for scenario {scenario_id} (processed {len(rows)} demolding records)")
+        logger.info(f"Phase 2: Decremented {len(updates_piezas)} daily flask records from piezas_fundidas")
+        
+        # =============================================================================
+        # PHASE 3: Mini-program for moldes_por_fundir (schedule pouring, decrement resources)
+        # =============================================================================
+        
+        # Get material master data (peso_unitario_ton, tiempo_enfriamiento)
+        with self.db.connect() as con:
+            material_master = con.execute(
+                """
+                SELECT material, peso_unitario_ton, tiempo_enfriamiento_molde_dias
+                FROM core_material_master
+                """
+            ).fetchall()
+        
+        material_data = {}
+        for row in material_master:
+            material = str(row["material"] or "").strip()
+            peso_unitario_ton = float(row["peso_unitario_ton"] or 0.0)
+            cooling_hours = float(row["tiempo_enfriamiento_molde_dias"] or 72.0)  # Default 72h
+            material_data[material] = {"peso_unitario_ton": peso_unitario_ton, "cooling_hours": cooling_hours}
+        
+        # Get moldes_por_fundir (not yet poured)
+        with self.db.connect() as con:
+            moldes_rows = con.execute(
+                """
+                SELECT
+                    material,
+                    flask_id
+                FROM core_moldes_por_fundir
+                WHERE material IS NOT NULL AND flask_id IS NOT NULL
+                """
+            ).fetchall()
+        
+        # Load current daily resources (we'll update as we schedule)
+        with self.db.connect() as con:
+            resources_rows = con.execute(
+                """
+                SELECT day, flask_type, available_qty, pouring_tons_available
+                FROM planner_daily_resources
+                WHERE scenario_id = ? AND day >= ?
+                ORDER BY day ASC
+                """,
+                (scenario_id, today.isoformat()),
+            ).fetchall()
+        
+        # Build mutable resource state
+        pouring_available: dict[str, float] = {}  # day -> tons
+        flask_available: dict[tuple[str, str], int] = {}  # (day, flask_type) -> qty
+        
+        for row in resources_rows:
+            day_str = str(row["day"])
+            flask_type = str(row["flask_type"])
+            pouring_available[day_str] = float(row["pouring_tons_available"])
+            flask_available[(day_str, flask_type)] = int(row["available_qty"])
+        
+        # Get workdays (only days with resources)
+        workdays_set = sorted(set(day_str for day_str, _ in flask_available.keys()))
+        
+        # Schedule each molde_por_fundir
+        moldes_scheduled = 0
+        daily_decrements_moldes: dict[tuple[str, str], int] = {}  # (day, flask_type) -> count
+        pouring_decrements: dict[str, float] = {}  # day -> tons
+        
+        for r in moldes_rows:
+            material = str(r["material"] or "").strip()
+            flask_id = str(r["flask_id"] or "").strip()
+            
+            if not material or not flask_id:
+                continue
+            
+            mat_data = material_data.get(material)
+            if not mat_data:
+                continue
+            
+            peso_ton = mat_data["peso_unitario_ton"]
+            cooling_hours = mat_data["cooling_hours"]
+            
+            if peso_ton <= 0:
+                continue
+            
+            flask_type = _get_flask_type(flask_id)
+            
+            # Find first workday >= HOY+1 with enough pouring capacity
+            tomorrow = date.fromordinal(today.toordinal() + 1)
+            poured_date = None
+            
+            for day_str in workdays_set:
+                try:
+                    day_date = date.fromisoformat(day_str)
+                except Exception:
+                    continue
+                
+                if day_date < tomorrow:
+                    continue
+                
+                # Check if enough pouring capacity available
+                available_pour = pouring_available.get(day_str, 0.0) - pouring_decrements.get(day_str, 0.0)
+                if available_pour >= peso_ton:
+                    poured_date = day_date
+                    poured_date_str = day_str
+                    break
+            
+            if not poured_date:
+                # No capacity found in horizon, skip this molde
+                continue
+            
+            # Decrement pouring capacity
+            pouring_decrements[poured_date_str] = pouring_decrements.get(poured_date_str, 0.0) + peso_ton
+            
+            # Calculate demolding date: poured_date + ceil(cooling_hours/24) + 1
+            cooling_days = math.ceil(cooling_hours / 24.0)
+            demolding_date = date.fromordinal(poured_date.toordinal() + cooling_days + 1)
+            
+            # Occupy 1 flask from today until demolding_date (exclusive)
+            current_day = today
+            while current_day < demolding_date:
+                day_str = current_day.isoformat()
+                key = (day_str, flask_type)
+                daily_decrements_moldes[key] = daily_decrements_moldes.get(key, 0) + 1
+                current_day = date.fromordinal(current_day.toordinal() + 1)
+            
+            moldes_scheduled += 1
+        
+        # Apply moldes_por_fundir flask decrements
+        updates_moldes = []
+        for (day_str, flask_type), count in daily_decrements_moldes.items():
+            updates_moldes.append((count, day_str, flask_type, scenario_id))
+        
+        with self.db.connect() as con:
+            con.executemany(
+                """
+                UPDATE planner_daily_resources
+                SET available_qty = MAX(0, available_qty - ?)
+                WHERE day = ? AND flask_type = ? AND scenario_id = ?
+                """,
+                updates_moldes,
+            )
+            con.commit()
+        
+        # Apply pouring capacity decrements
+        updates_pouring = []
+        for day_str, tons in pouring_decrements.items():
+            updates_pouring.append((tons, day_str, scenario_id))
+        
+        with self.db.connect() as con:
+            con.executemany(
+                """
+                UPDATE planner_daily_resources
+                SET pouring_tons_available = MAX(0.0, pouring_tons_available - ?)
+                WHERE day = ? AND scenario_id = ?
+                """,
+                updates_pouring,
+            )
+            con.commit()
+        
+        logger.info(f"Phase 3: Scheduled {moldes_scheduled} moldes_por_fundir, decremented {len(updates_moldes)} flask records, {len(updates_pouring)} pouring records")
 
     # ---------- Planner DB helpers ----------
     def ensure_planner_scenario(self, *, name: str | None = None) -> int:
@@ -748,20 +896,19 @@ class PlannerRepositoryImpl:
             )
 
     def update_master_flasks_from_history(self, flask_codes_map: dict[str, str] | None) -> None:
-        """Update material_master.flask_size based on observed usage in Demolding + Configured Codes."""
+        """Update core_material_master.flask_size based on observed usage in Demolding + Configured Codes."""
         if not flask_codes_map:
             return
             
         sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
         
         with self.db.connect() as con:
-            # Only look at materials where we have data
+            # Get data from both core_moldes_por_fundir and core_piezas_fundidas
             rows = con.execute(
                 """
-                SELECT material, flask_id 
-                FROM sap_demolding_snapshot 
-                WHERE flask_id IS NOT NULL AND flask_id <> ''
-                GROUP BY material, flask_id
+                SELECT material, flask_id FROM core_moldes_por_fundir WHERE flask_id IS NOT NULL AND flask_id <> ''
+                UNION
+                SELECT material, flask_id FROM core_piezas_fundidas WHERE flask_id IS NOT NULL AND flask_id <> ''
                 """
             ).fetchall()
         
@@ -782,7 +929,7 @@ class PlannerRepositoryImpl:
         if updates:
             with self.db.connect() as con:
                 con.executemany(
-                    "UPDATE material_master SET flask_size = COALESCE(flask_size, ?) WHERE material = ?",
+                    "UPDATE core_material_master SET flask_size = COALESCE(flask_size, ?) WHERE material = ?",
                     [(size, mat) for mat, size in updates.items()]
                 )
 
@@ -827,7 +974,7 @@ class PlannerRepositoryImpl:
                     MAX(COALESCE(v.cod_material, '')) AS material,
                     MAX(COALESCE(v.fecha_de_pedido, '')) AS fecha_de_pedido,
                     MAX(COALESCE(v.solicitado, 0)) AS solicitado
-                FROM sap_vision_snapshot v
+                FROM core_sap_vision_snapshot v
                 GROUP BY v.pedido, v.posicion
                 HAVING MAX(COALESCE(v.fecha_de_pedido, '')) <> ''
                 """,
@@ -874,7 +1021,7 @@ class PlannerRepositoryImpl:
         if not orders_out:
             raise ValueError("No hay órdenes válidas en Visión para planificar")
 
-        # Parts from material_master for referenced materials
+        # Parts from core_material_master for referenced materials
         materials = sorted({o[2] for o in orders_out})
         with self.db.connect() as con:
             rows = con.execute(
@@ -888,7 +1035,7 @@ class PlannerRepositoryImpl:
                     piezas_por_molde,
                     finish_hours,
                     min_finish_hours
-                FROM material_master
+                FROM core_material_master
                 WHERE material IN ({','.join(['?'] * len(materials))})
                 """,
                 materials,
@@ -1063,3 +1210,133 @@ class PlannerRepositoryImpl:
                 (scenario_id, today_str),
             ).fetchall()
         return [dict(r) for r in rows]
+    
+    def get_flask_usage_breakdown(self, *, scenario_id: int) -> dict:
+        """Get breakdown of flask usage by source (WIP molds vs completed pieces).
+        
+        Returns dict with structure:
+        {
+            'L10': {'wip_molds': 5, 'completed': 3, 'total_occupied': 8, 'wip_tons': 2.5},
+            'L14': {'wip_molds': 2, 'completed': 1, 'total_occupied': 3, 'wip_tons': 1.2},
+            ...
+        }
+        - wip_molds: cajas ocupadas por moldes en proceso (core_moldes_por_fundir)
+        - completed: fracción de cajas ocupadas por piezas fundidas pendientes de desmoldeo
+        - total_occupied: suma de wip_molds + completed
+        - wip_tons: toneladas a fundir asociadas a moldes WIP (usa peso_unitario_ton)
+        """
+        today = date.today()
+
+        # Build prefix map from planner_flask_types (same logic as daily resources update)
+        with self.db.connect() as con:
+            flask_config = con.execute(
+                """
+                SELECT flask_type, codes_csv
+                FROM planner_flask_types
+                WHERE scenario_id = ?
+                """,
+                (scenario_id,),
+            ).fetchall()
+
+            # Count flasks from WIP molds (core_moldes_por_fundir)
+            wip_rows = con.execute(
+                """
+                SELECT flask_id, COUNT(*) as qty
+                FROM core_moldes_por_fundir
+                WHERE flask_id IS NOT NULL AND TRIM(flask_id) <> ''
+                GROUP BY flask_id
+                """
+            ).fetchall()
+
+            # Toneladas por fundir (WIP) usando peso_unitario_ton del maestro de materiales (por molde)
+            wip_tons_rows = con.execute(
+                """
+                SELECT w.flask_id, SUM(COALESCE(mm.peso_unitario_ton, 0.0)) AS tons
+                FROM core_moldes_por_fundir w
+                LEFT JOIN core_material_master mm ON mm.material = w.material
+                WHERE w.flask_id IS NOT NULL AND TRIM(w.flask_id) <> ''
+                GROUP BY w.flask_id
+                """
+            ).fetchall()
+
+            # Count flasks from completed pieces (core_piezas_fundidas)
+            completed_rows = con.execute(
+                """
+                SELECT flask_id, demolding_date, COALESCE(mold_quantity, 1.0) AS qty
+                FROM core_piezas_fundidas
+                WHERE flask_id IS NOT NULL AND TRIM(flask_id) <> ''
+                """
+            ).fetchall()
+
+        # Build prefix mapping
+        flask_codes_map: dict[str, str] = {}
+        for row in flask_config:
+            ftype = str(row["flask_type"] or "").strip().upper()
+            codes_csv = str(row["codes_csv"] or "").strip()
+            if codes_csv:
+                for code in codes_csv.split(","):
+                    code = code.strip()
+                    if code:
+                        flask_codes_map[code] = ftype
+
+        sorted_codes = sorted(flask_codes_map.items(), key=lambda x: len(x[0]), reverse=True)
+
+        # Helper to extract flask type from flask_id using configured prefixes; fallback to regex
+        def _get_flask_type(flask_id: str) -> str:
+            flask_code = flask_id[:3] if flask_id else ""
+            for prefix, ftype in sorted_codes:
+                if flask_code.startswith(prefix):
+                    return ftype
+            match = re.search(r"L(\d+)", str(flask_id), re.IGNORECASE)
+            return f"L{match.group(1)}" if match else flask_code.upper() or "Unknown"
+        
+        def _ensure_bucket(breakdown: dict, flask_type: str) -> None:
+            if flask_type not in breakdown:
+                breakdown[flask_type] = {
+                    'wip_molds': 0,
+                    'completed': 0.0,
+                    'total_occupied': 0.0,
+                    'wip_tons': 0.0,
+                }
+        
+        # Aggregate by flask type
+        breakdown: dict[str, dict] = {}
+        
+        for row in wip_rows:
+            flask_type = _get_flask_type(str(row["flask_id"]))
+            qty = int(row["qty"])
+            _ensure_bucket(breakdown, flask_type)
+            breakdown[flask_type]['wip_molds'] += qty
+            breakdown[flask_type]['total_occupied'] += qty
+
+        for row in wip_tons_rows:
+            flask_type = _get_flask_type(str(row["flask_id"]))
+            tons = float(row["tons"] or 0.0)
+            _ensure_bucket(breakdown, flask_type)
+            breakdown[flask_type]['wip_tons'] += tons
+        
+        for row in completed_rows:
+            flask_type = _get_flask_type(str(row["flask_id"]))
+            qty = float(row["qty"])
+            demolding_raw = str(row["demolding_date"] or "").strip()
+
+            # Release date logic:
+            # - If demolding_date in future: occupied until demolding_date + 1 day
+            # - If demolding_date in past/empty: assume desmoldeo mañana => release = today + 1
+            try:
+                demolding_dt = date.fromisoformat(demolding_raw) if demolding_raw else None
+            except Exception:
+                demolding_dt = None
+
+            base_date = demolding_dt if demolding_dt and demolding_dt > today else today
+            release_date = base_date + timedelta(days=1)
+
+            # Only count if still occupied today
+            if today >= release_date:
+                continue
+
+            _ensure_bucket(breakdown, flask_type)
+            breakdown[flask_type]['completed'] += qty
+            breakdown[flask_type]['total_occupied'] += qty
+        
+        return breakdown

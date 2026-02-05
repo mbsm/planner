@@ -57,6 +57,10 @@ En esta pantalla verá un resumen del estado de la planta:
 Utilice esta herramienta los días Lunes para definir cuántos moldes fabricar por día.
 - El sistema propone un plan basado en la fecha de entrega y capacidad de moldeo.
 - Puede revisar y confirmar el plan semanal.
+- **Condiciones iniciales (moldeo)**: La tabla muestra las cajas ocupadas hoy según el reporte de desmoldeo, separadas por tipo de caja.
+    - **Moldes por Fundir (En Cancha)**: cada molde ocupa 1 caja; se redondea hacia arriba por tipo de caja.
+    - **Piezas Fundidas (Enfriando/Desmoldeo pendiente)**: usa la fracción `mold_quantity` y se redondea hacia arriba; si la fecha de desmoldeo es pasada o vacía, se considera ocupada hasta mañana; si es futura, hasta `fecha desmoldeo + 1`.
+    - **Tons por Fundir**: suma de `peso_unitario_ton` del maestro por molde en cancha, agrupado por tipo de caja.
 
 ### Paso 5: Programación de Despacho (Menú "Programa")
 Genera las colas de trabajo para las líneas productivas (Terminaciones, Mecanizado, etc.).

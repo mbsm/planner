@@ -35,12 +35,12 @@ class DataRepositoryImpl:
             # Moldeo: WIP stock in moldeo warehouse (used by planner for remaining molds calculation)
             "moldeo": {"almacen_key": "sap_almacen_moldeo", "label": "Moldeo"},
             # Toma de dureza: pieces in Terminaciones warehouse but NOT available
-            # (i.e., not Libre utilización and/or in Control de calidad).
+            # (i.e., not Libre utilizaci�n and/or in Control de calidad).
             "toma_de_dureza": {"almacen_key": "sap_almacen_toma_dureza", "label": "Toma de dureza"},
             "terminaciones": {"almacen_key": "sap_almacen_terminaciones", "label": "Terminaciones"},
             "mecanizado": {"almacen_key": "sap_almacen_mecanizado", "label": "Mecanizado"},
             "mecanizado_externo": {"almacen_key": "sap_almacen_mecanizado_externo", "label": "Mecanizado externo"},
-            "inspeccion_externa": {"almacen_key": "sap_almacen_inspeccion_externa", "label": "Inspección externa"},
+            "inspeccion_externa": {"almacen_key": "sap_almacen_inspeccion_externa", "label": "Inspecci�n externa"},
             "por_vulcanizar": {"almacen_key": "sap_almacen_por_vulcanizar", "label": "Por vulcanizar"},
             "en_vulcanizado": {"almacen_key": "sap_almacen_en_vulcanizado", "label": "En vulcanizado"},
         }
@@ -51,7 +51,7 @@ class DataRepositoryImpl:
         try:
             with self.db.connect() as con:
                 con.execute(
-                    "INSERT INTO audit_log (category, message, details) VALUES (?, ?, ?)",
+                    "INSERT INTO core_audit_log (category, message, details) VALUES (?, ?, ?)",
                     (category, message, details),
                 )
         except Exception as e:
@@ -61,7 +61,7 @@ class DataRepositoryImpl:
     def get_recent_audit_entries(self, limit: int = 100) -> list[AuditEntry]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT * FROM core_audit_log ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
             return [
                 AuditEntry(
@@ -87,7 +87,7 @@ class DataRepositoryImpl:
     def _mb52_availability_predicate_sql(self, *, process: str) -> str:
         """Process-specific MB52 availability predicate.
 
-        Reads from process.availability_predicate_json to generate SQL.
+        Reads from core_processes.availability_predicate_json to generate SQL.
         JSON format: {\"libre_utilizacion\": <int>, \"en_control_calidad\": <int>}
         
         - If libre_utilizacion is specified (0 or 1), filter by that value
@@ -103,11 +103,11 @@ class DataRepositoryImpl:
         """
         p = self._normalize_process(process)
         
-        # Read from process table
+        # Read from core_processes table
         try:
             with self.db.connect() as con:
                 row = con.execute(
-                    "SELECT availability_predicate_json FROM process WHERE process_id = ?",
+                    "SELECT availability_predicate_json FROM core_processes WHERE process_id = ?",
                     (p,)
                 ).fetchone()
                 
@@ -236,26 +236,26 @@ class DataRepositoryImpl:
     def _update_jobs_from_vision(self, *, con) -> None:
         """Update existing jobs with fecha_de_pedido from Vision snapshot.
         
-        Called automatically after Visión import. Updates fecha_de_pedido only.
+        Called automatically after Visi�n import. Updates fecha_de_pedido only.
         (qty comes from MB52 lote count; lotes disappear from MB52 when completed)
         """
         # Update fecha_de_pedido for all jobs from Vision
         con.execute(
             """
-            UPDATE job
+            UPDATE dispatcher_job
             SET fecha_de_pedido = (
                     SELECT v.fecha_de_pedido
-                    FROM sap_vision_snapshot v
-                    WHERE v.pedido = job.pedido
-                      AND v.posicion = job.posicion
+                    FROM core_sap_vision_snapshot v
+                    WHERE v.pedido = dispatcher_job.pedido
+                      AND v.posicion = dispatcher_job.posicion
                     LIMIT 1
                 ),
                 updated_at = CURRENT_TIMESTAMP
             WHERE EXISTS (
                 SELECT 1
-                FROM sap_vision_snapshot v2
-                WHERE v2.pedido = job.pedido
-                  AND v2.posicion = job.posicion
+                FROM core_sap_vision_snapshot v2
+                WHERE v2.pedido = dispatcher_job.pedido
+                  AND v2.posicion = dispatcher_job.posicion
             )
             """
         )
@@ -284,7 +284,7 @@ class DataRepositoryImpl:
                 con.execute(
                     f"""
                     SELECT COUNT(*)
-                    FROM sap_mb52_snapshot
+                    FROM core_sap_mb52_snapshot
                     WHERE centro = ?
                         AND almacen = ?
                         AND {avail_sql}
@@ -297,7 +297,7 @@ class DataRepositoryImpl:
                 con.execute(
                     f"""
                     SELECT COUNT(*)
-                    FROM sap_mb52_snapshot
+                    FROM core_sap_mb52_snapshot
                     WHERE centro = ?
                         AND almacen = ?
                         AND {avail_sql}
@@ -313,8 +313,8 @@ class DataRepositoryImpl:
                 con.execute(
                     f"""
                     SELECT COUNT(*)
-                    FROM sap_mb52_snapshot m
-                    JOIN sap_vision v
+                    FROM core_sap_mb52_snapshot m
+                    JOIN core_sap_vision_snapshot v
                         ON v.pedido = m.documento_comercial
                      AND v.posicion = m.posicion_sd
                     WHERE m.centro = ?
@@ -334,7 +334,7 @@ class DataRepositoryImpl:
                     SELECT COUNT(*)
                     FROM (
                         SELECT DISTINCT documento_comercial, posicion_sd
-                        FROM sap_mb52_snapshot
+                        FROM core_sap_mb52_snapshot
                         WHERE centro = ?
                           AND almacen = ?
                           AND {avail_sql}
@@ -353,8 +353,8 @@ class DataRepositoryImpl:
                     SELECT COUNT(*)
                     FROM (
                             SELECT DISTINCT m.documento_comercial AS pedido, m.posicion_sd AS posicion
-                            FROM sap_mb52_snapshot m
-                            LEFT JOIN sap_vision v
+                            FROM core_sap_mb52_snapshot m
+                            LEFT JOIN core_sap_vision_snapshot v
                                 ON v.pedido = m.documento_comercial
                              AND v.posicion = m.posicion_sd
                             WHERE m.centro = ?
@@ -382,9 +382,9 @@ class DataRepositoryImpl:
         }
 
     def get_sap_non_usable_with_orderpos_rows(self, *, limit: int = 200) -> list[dict]:
-        """MB52 rows that have pedido/posición but are not usable for building orders.
+        """MB52 rows that have pedido/posici�n but are not usable for building orders.
 
-        A row is considered usable when it matches the configured centro/almacén,
+        A row is considered usable when it matches the configured centro/almac�n,
         is libre_utilizacion=1, en_control_calidad=0, and has lote.
         """
         centro_cfg = (self.get_config(key="sap_centro", default="4000") or "").strip()
@@ -399,7 +399,7 @@ class DataRepositoryImpl:
                        COALESCE(libre_utilizacion, 0) AS libre,
                        COALESCE(en_control_calidad, 0) AS qc,
                        documento_comercial, posicion_sd
-                FROM sap_mb52_snapshot
+                FROM core_sap_mb52_snapshot
                 WHERE documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
                   AND posicion_sd IS NOT NULL AND TRIM(posicion_sd) <> ''
                         AND centro = ?
@@ -428,7 +428,7 @@ class DataRepositoryImpl:
 
             reasons: list[str] = []
             if libre != 1:
-                reasons.append("No libre utilización")
+                reasons.append("No libre utilizaci�n")
             if qc != 0:
                 reasons.append("En control de calidad")
 
@@ -466,8 +466,8 @@ class DataRepositoryImpl:
                        COUNT(*) AS piezas,
                        MIN(m.lote) AS lote_min,
                        MAX(m.lote) AS lote_max
-                FROM sap_mb52_snapshot m
-                LEFT JOIN sap_vision v
+                FROM core_sap_mb52_snapshot m
+                LEFT JOIN core_sap_vision_snapshot v
                   ON v.pedido = m.documento_comercial
                  AND v.posicion = m.posicion_sd
                 WHERE m.centro = ?
@@ -509,12 +509,12 @@ class DataRepositoryImpl:
         with self.db.connect() as con:
             if centro_n:
                 rows = con.execute(
-                    "SELECT almacen, COUNT(*) c FROM sap_mb52_snapshot WHERE centro = ? GROUP BY almacen ORDER BY c DESC LIMIT ?",
+                    "SELECT almacen, COUNT(*) c FROM core_sap_mb52_snapshot WHERE centro = ? GROUP BY almacen ORDER BY c DESC LIMIT ?",
                     (centro_n, lim),
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT almacen, COUNT(*) c FROM sap_mb52_snapshot GROUP BY almacen ORDER BY c DESC LIMIT ?",
+                    "SELECT almacen, COUNT(*) c FROM core_sap_mb52_snapshot GROUP BY almacen ORDER BY c DESC LIMIT ?",
                     (lim,),
                 ).fetchall()
         return [{"almacen": str(r[0] or ""), "count": int(r[1] or 0)} for r in rows]
@@ -523,9 +523,9 @@ class DataRepositoryImpl:
     def get_config(self, *, key: str, default: str | None = None) -> str | None:
         key = str(key).strip()
         if not key:
-            raise ValueError("config key vacío")
+            raise ValueError("config key vac�o")
         with self.db.connect() as con:
-            row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
+            row = con.execute("SELECT config_value FROM core_config WHERE config_key = ?", (key,)).fetchone()
         if row is None:
             return default
         return str(row[0])
@@ -533,11 +533,11 @@ class DataRepositoryImpl:
     def set_config(self, *, key: str, value: str) -> None:
         key = str(key).strip()
         if not key:
-            raise ValueError("config key vacío")
+            raise ValueError("config key vac�o")
 
         with self.db.connect() as con:
             # Audit config change
-            old_val_row = con.execute("SELECT config_value FROM app_config WHERE config_key = ?", (key,)).fetchone()
+            old_val_row = con.execute("SELECT config_value FROM core_config WHERE config_key = ?", (key,)).fetchone()
             old_val = old_val_row[0] if old_val_row else "(none)"
         
         self.log_audit("CONFIG", f"Updated '{key}'", f"From '{old_val}' to '{value}'")
@@ -556,19 +556,19 @@ class DataRepositoryImpl:
 
                     con.execute(
                         f"""
-                        UPDATE job
+                        UPDATE dispatcher_job
                         SET priority = CASE
                             WHEN COALESCE(is_test, 0) = 1 THEN ?
                             WHEN EXISTS (
-                                SELECT 1 FROM orderpos_priority opp
-                                WHERE opp.pedido = job.pedido
-                                  AND opp.posicion = job.posicion
+                                SELECT 1 FROM dispatcher_orderpos_priority opp
+                                WHERE opp.pedido = dispatcher_job.pedido
+                                  AND opp.posicion = dispatcher_job.posicion
                                   AND COALESCE(opp.is_priority, 0) = 1
                                   AND COALESCE(opp.kind, '') <> 'test'
                             ) THEN ?
                             WHEN EXISTS (
-                                SELECT 1 FROM order_priority op
-                                WHERE op.pedido = job.pedido
+                                SELECT 1 FROM dispatcher_order_priority op
+                                WHERE op.pedido = dispatcher_job.pedido
                                   AND COALESCE(op.is_priority, 0) = 1
                             ) THEN ?
                             ELSE ?
@@ -580,12 +580,12 @@ class DataRepositoryImpl:
                     pass
 
             con.execute(
-                "INSERT INTO app_config(config_key, config_value) VALUES(?, ?) ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value",
+                "INSERT INTO core_config(config_key, config_value) VALUES(?, ?) ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value",
                 (key, str(value).strip()),
             )
             # Warehouse/filters affect derived orders and programs.
-            con.execute("DELETE FROM orders")
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM core_orders")
+            con.execute("DELETE FROM dispatcher_last_program")
 
     def get_process_config(self, *, process_id: str) -> dict:
         """Get process configuration including almacen and availability filters.
@@ -602,7 +602,7 @@ class DataRepositoryImpl:
         p = self._normalize_process(process_id)
         with self.db.connect() as con:
             row = con.execute(
-                "SELECT process_id, label, sap_almacen, availability_predicate_json FROM process WHERE process_id = ?",
+                "SELECT process_id, label, sap_almacen, availability_predicate_json FROM core_processes WHERE process_id = ?",
                 (p,)
             ).fetchone()
             
@@ -674,7 +674,7 @@ class DataRepositoryImpl:
     # ---------- Family Catalog ----------
     def list_families(self) -> list[str]:
         with self.db.connect() as con:
-            rows = con.execute("SELECT family_id FROM family_catalog ORDER BY family_id").fetchall()
+            rows = con.execute("SELECT family_id FROM core_family_catalog ORDER BY family_id").fetchall()
         return [str(r[0]) for r in rows]
 
     def get_families_rows(self) -> list[dict]:
@@ -683,8 +683,8 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT f.family_id AS family_id, COUNT(p.material) AS parts_count
-                FROM family_catalog f
-                LEFT JOIN material_master p ON p.family_id = f.family_id
+                FROM core_family_catalog f
+                LEFT JOIN core_material_master p ON p.family_id = f.family_id
                 GROUP BY f.family_id
                 ORDER BY f.family_id
                 """
@@ -694,9 +694,9 @@ class DataRepositoryImpl:
     def add_family(self, *, name: str) -> None:
         name = str(name).strip()
         if not name:
-            raise ValueError("nombre de family_id vacío")
+            raise ValueError("nombre de family_id vac�o")
         with self.db.connect() as con:
-            con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", (name, name))
+            con.execute("INSERT OR IGNORE INTO core_family_catalog(family_id, label) VALUES(?, ?)", (name, name))
         
         self.log_audit("MASTER_DATA", "Add Family", f"Family: {name}")
 
@@ -704,12 +704,12 @@ class DataRepositoryImpl:
         old = str(old).strip()
         new = str(new).strip()
         if not old or not new:
-            raise ValueError("family_id inválida")
+            raise ValueError("family_id inv�lida")
         with self.db.connect() as con:
             # Ensure new exists
-            con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES(?, ?)", (new, new))
-            # UPDATE material_master mappings
-            con.execute("UPDATE material_master SET family_id = ? WHERE family_id = ?", (new, old))
+            con.execute("INSERT OR IGNORE INTO core_family_catalog(family_id, label) VALUES(?, ?)", (new, new))
+            # UPDATE core_material_master mappings
+            con.execute("UPDATE core_material_master SET family_id = ? WHERE family_id = ?", (new, old))
 
             # Update line_config allowed families JSON
             rows = con.execute("SELECT process, line_id, families_json FROM line_config").fetchall()
@@ -723,26 +723,26 @@ class DataRepositoryImpl:
                 )
 
             # Remove old from catalog
-            con.execute("DELETE FROM family_catalog WHERE family_id = ?", (old,))
+            con.execute("DELETE FROM core_family_catalog WHERE family_id = ?", (old,))
 
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Rename Family", f"{old} -> {new}")
 
     def delete_family(self, *, name: str, force: bool = False) -> None:
         name = str(name).strip()
         if not name:
-            raise ValueError("family_id inválida")
+            raise ValueError("family_id inv�lida")
         with self.db.connect() as con:
-            in_use = int(con.execute("SELECT COUNT(*) FROM material_master WHERE family_id = ?", (name,)).fetchone()[0])
+            in_use = int(con.execute("SELECT COUNT(*) FROM core_material_master WHERE family_id = ?", (name,)).fetchone()[0])
             if in_use and force:
                 # Keep mappings: move affected parts to 'Otros'
-                con.execute("INSERT OR IGNORE INTO family_catalog(family_id, label) VALUES('Otros', 'Otros')")
-                con.execute("UPDATE material_master SET family_id='Otros' WHERE family_id = ?", (name,))
+                con.execute("INSERT OR IGNORE INTO core_family_catalog(family_id, label) VALUES('Otros', 'Otros')")
+                con.execute("UPDATE core_material_master SET family_id='Otros' WHERE family_id = ?", (name,))
             elif in_use and not force:
                 # Default behavior: remove mappings so affected parts become "missing" and must be reassigned.
-                con.execute("DELETE FROM material_master WHERE family_id = ?", (name,))
+                con.execute("DELETE FROM core_material_master WHERE family_id = ?", (name,))
 
             # Update line_config allowed families JSON (remove or replace)
             rows = con.execute("SELECT process, line_id, families_json FROM line_config").fetchall()
@@ -758,10 +758,10 @@ class DataRepositoryImpl:
                     (json.dumps(updated), str(r["process"]), int(r["line_id"])),
                 )
 
-            con.execute("DELETE FROM family_catalog WHERE family_id = ?", (name,))
+            con.execute("DELETE FROM core_family_catalog WHERE family_id = ?", (name,))
 
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Delete Family", f"Name: {name}, Force: {force}")
 
@@ -770,20 +770,20 @@ class DataRepositoryImpl:
         material = str(material).strip()
         family_id = str(family_id).strip()
         if not material:
-            raise ValueError("material vacío")
+            raise ValueError("material vac�o")
         if not family_id:
-            raise ValueError("family_id vacía")
+            raise ValueError("family_id vac�a")
         # Ensure family exists in catalog
         self.add_family(name=family_id)
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO material_master(material, family_id) VALUES(?, ?) "
+                "INSERT INTO core_material_master(material, family_id) VALUES(?, ?) "
                 "ON CONFLICT(material) DO UPDATE SET family_id=excluded.family_id",
                 (material, family_id),
             )
 
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Set Family", f"{material} -> {family_id}")
 
@@ -809,9 +809,9 @@ class DataRepositoryImpl:
         material = str(material).strip()
         family_id = str(family_id).strip()
         if not material:
-            raise ValueError("material vacío")
+            raise ValueError("material vac�o")
         if not family_id:
-            raise ValueError("family_id vacía")
+            raise ValueError("family_id vac�a")
 
         def _coerce_days(value, *, field: str) -> int | None:
             if value is None:
@@ -852,14 +852,14 @@ class DataRepositoryImpl:
         aleacion_val = str(aleacion).strip() if aleacion else None
         flask_val = str(flask_size).strip().upper() if flask_size else None
         if flask_val is not None and flask_val not in {"S", "M", "L"}:
-            raise ValueError("flask_size inválido (debe ser S/M/L)")
+            raise ValueError("flask_size inv�lido (debe ser S/M/L)")
 
         # Ensure family exists in catalog
         self.add_family(name=family_id)
 
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO material_master("
+                "INSERT INTO core_material_master("
                 "material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
                 "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, tiempo_enfriamiento_molde_dias, "
                 "finish_days, min_finish_days"
@@ -883,7 +883,7 @@ class DataRepositoryImpl:
             )
 
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Upsert Part", f"Material: {material} Family: {family_id}")
 
@@ -897,7 +897,7 @@ class DataRepositoryImpl:
     ) -> None:
         material = str(material).strip()
         if not material:
-            raise ValueError("material vacío")
+            raise ValueError("material vac�o")
         for col_name, value in (
             ("vulcanizado_dias", vulcanizado_dias),
             ("mecanizado_dias", mecanizado_dias),
@@ -907,14 +907,14 @@ class DataRepositoryImpl:
                 raise ValueError(f"{col_name} no puede ser negativo")
 
         with self.db.connect() as con:
-            exists = con.execute("SELECT 1 FROM material_master WHERE material = ?", (material,)).fetchone()
+            exists = con.execute("SELECT 1 FROM core_material_master WHERE material = ?", (material,)).fetchone()
             if exists is None:
                 raise ValueError(
                     f"No existe maestro para material={material}. Asigna family_id primero en /family_ids."
                 )
             con.execute(
                 """
-                UPDATE material_master
+                UPDATE core_material_master
                 SET vulcanizado_dias = ?, mecanizado_dias = ?, inspeccion_externa_dias = ?
                 WHERE material = ?
                 """,
@@ -922,7 +922,7 @@ class DataRepositoryImpl:
             )
 
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit(
             "MASTER_DATA",
@@ -932,15 +932,15 @@ class DataRepositoryImpl:
 
     def delete_part(self, *, material: str) -> None:
         with self.db.connect() as con:
-            con.execute("DELETE FROM material_master WHERE material = ?", (str(material).strip(),))
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM core_material_master WHERE material = ?", (str(material).strip(),))
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Delete Part", f"Material: {material}")
 
     def delete_all_parts(self) -> None:
         with self.db.connect() as con:
-            con.execute("DELETE FROM material_master")
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM core_material_master")
+            con.execute("DELETE FROM dispatcher_last_program")
         
         self.log_audit("MASTER_DATA", "Delete All Parts", "Cleared all material master data")
 
@@ -951,7 +951,7 @@ class DataRepositoryImpl:
                 "SELECT material, family_id, flask_size, aleacion, piezas_por_molde, tiempo_enfriamiento_molde_dias, "
                 "finish_days, min_finish_days, "
                 "vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado "
-                "FROM material_master ORDER BY material"
+                "FROM core_material_master ORDER BY material"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -988,11 +988,11 @@ class DataRepositoryImpl:
                         MAX(p.piezas_por_molde) as piezas_por_molde,
                         MAX(p.peso_unitario_ton) as peso_unitario_ton,
                         MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
-                FROM sap_mb52_snapshot m
-                LEFT JOIN sap_vision_snapshot v
+                FROM core_sap_mb52_snapshot m
+                LEFT JOIN core_sap_vision_snapshot v
                     ON v.pedido = m.documento_comercial
                  AND v.posicion = m.posicion_sd
-                LEFT JOIN material_master p ON p.material = COALESCE(m.material_base, v.cod_material, m.material)
+                LEFT JOIN core_material_master p ON p.material = COALESCE(m.material_base, v.cod_material, m.material)
                 WHERE COALESCE(m.material_base, v.cod_material, m.material) IS NOT NULL
                     AND TRIM(COALESCE(m.material_base, v.cod_material, m.material)) <> ''
                   AND m.centro = ?
@@ -1033,9 +1033,9 @@ class DataRepositoryImpl:
         ]
 
     def get_missing_parts_from_vision_for(self, *, limit: int = 500) -> list[dict]:
-        """Distinct materials in Visión Planta not present in the local parts master.
+        """Distinct materials in Visi�n Planta not present in the local parts master.
         
-        Note: Visión Planta is global, not per-process (it's customer orders).
+        Note: Visi�n Planta is global, not per-process (it's customer orders).
         So we return ANY material in Vision that is missing from master.
         """
         lim = int(limit or 500)
@@ -1056,8 +1056,8 @@ class DataRepositoryImpl:
                     MAX(p.piezas_por_molde) as piezas_por_molde,
                     MAX(p.peso_unitario_ton) as peso_unitario_ton,
                     MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
-                FROM sap_vision_snapshot m
-                LEFT JOIN material_master p ON p.material = m.cod_material
+                FROM core_sap_vision_snapshot m
+                LEFT JOIN core_material_master p ON p.material = m.cod_material
                 WHERE m.cod_material IS NOT NULL AND TRIM(m.cod_material) <> ''
                   AND (
                       p.material IS NULL
@@ -1096,8 +1096,8 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT DISTINCT o.material
-                FROM orders o
-                LEFT JOIN material_master p ON p.material = o.material
+                FROM core_orders o
+                LEFT JOIN core_material_master p ON p.material = o.material
                 WHERE o.process = ?
                   AND p.material IS NULL
                 ORDER BY o.material
@@ -1114,8 +1114,8 @@ class DataRepositoryImpl:
                 SELECT COUNT(*)
                 FROM (
                     SELECT DISTINCT o.material
-                    FROM orders o
-                    LEFT JOIN material_master p ON p.material = o.material
+                    FROM core_orders o
+                    LEFT JOIN core_material_master p ON p.material = o.material
                     WHERE o.process = ?
                       AND p.material IS NULL
                 )
@@ -1131,8 +1131,8 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT DISTINCT o.material
-                FROM orders o
-                JOIN material_master p ON p.material = o.material
+                FROM core_orders o
+                JOIN core_material_master p ON p.material = o.material
                 WHERE o.process = ?
                   AND (
                        p.vulcanizado_dias IS NULL
@@ -1153,8 +1153,8 @@ class DataRepositoryImpl:
                 SELECT COUNT(*)
                 FROM (
                     SELECT DISTINCT o.material
-                    FROM orders o
-                    JOIN material_master p ON p.material = o.material
+                    FROM core_orders o
+                    JOIN core_material_master p ON p.material = o.material
                     WHERE o.process = ?
                       AND (
                            p.vulcanizado_dias IS NULL
@@ -1176,7 +1176,7 @@ class DataRepositoryImpl:
             row = con.execute(
                 """
                 SELECT COALESCE(MAX(texto_breve), '')
-                FROM sap_mb52_snapshot
+                FROM core_sap_mb52_snapshot
                 WHERE material = ?
                 """,
                 (mat,),
@@ -1185,7 +1185,7 @@ class DataRepositoryImpl:
 
     # ---------- Vision KPI & Dashboard ----------
     def upsert_vision_kpi_daily(self, *, snapshot_date: date | None = None) -> dict:
-        """Persist a daily KPI snapshot based on current Orders + Visión.
+        """Persist a daily KPI snapshot based on current Orders + Visi�n.
 
         Metrics:
         - tons_por_entregar: pending tons across all (pedido,posicion) present in `orders`
@@ -1211,8 +1211,8 @@ class DataRepositoryImpl:
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision_snapshot
-                    -- We trust sap_vision_snapshot contains only valid/filtered rows (Active, date > 2023, valid families/ZTLH)
+                    FROM core_sap_vision_snapshot
+                    -- We trust core_sap_vision_snapshot contains only valid/filtered rows (Active, date > 2023, valid families/ZTLH)
                     GROUP BY pedido, posicion
                 ), joined AS (
                     SELECT
@@ -1224,7 +1224,7 @@ class DataRepositoryImpl:
                         v.bodega AS bodega,
                         COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0) AS peso_unitario_ton
                     FROM v
-                    LEFT JOIN material_master p
+                    LEFT JOIN core_material_master p
                       ON p.material = v.cod_material
                 )
                 SELECT
@@ -1245,7 +1245,7 @@ class DataRepositoryImpl:
 
             con.execute(
                 """
-                INSERT INTO vision_kpi_daily(snapshot_date, snapshot_at, tons_por_entregar, tons_atrasadas)
+                INSERT INTO core_vision_kpi_daily(snapshot_date, snapshot_at, tons_por_entregar, tons_atrasadas)
                 VALUES(?, ?, ?, ?)
                 ON CONFLICT(snapshot_date) DO UPDATE SET
                     snapshot_at = excluded.snapshot_at,
@@ -1268,7 +1268,7 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT snapshot_date, snapshot_at, tons_por_entregar, tons_atrasadas
-                FROM vision_kpi_daily
+                FROM core_vision_kpi_daily
                 ORDER BY snapshot_date ASC
                 LIMIT ?
                 """,
@@ -1314,11 +1314,11 @@ class DataRepositoryImpl:
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision_snapshot
+                    FROM core_sap_vision_snapshot
                     GROUP BY pedido, posicion
                 HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
                 ) v
-                LEFT JOIN material_master p
+                LEFT JOIN core_material_master p
                   ON p.material = v.cod_material
                 ORDER BY v.fecha_de_pedido ASC, v.pedido, v.posicion
                 LIMIT ?
@@ -1366,7 +1366,7 @@ class DataRepositoryImpl:
                 """
                 WITH orderpos AS (
                     SELECT pedido, posicion, MIN(COALESCE(fecha_de_pedido, '9999-12-31')) AS fecha_de_pedido
-                    FROM sap_vision_snapshot
+                    FROM core_sap_vision_snapshot
                     GROUP BY pedido, posicion
                     HAVING MIN(COALESCE(fecha_de_pedido, '9999-12-31')) >= ?
                        AND MIN(COALESCE(fecha_de_pedido, '9999-12-31')) <= ?
@@ -1400,12 +1400,12 @@ class DataRepositoryImpl:
                         MAX(COALESCE(bodega, 0)) AS bodega,
                         MAX(COALESCE(despachado, 0)) AS despachado,
                         MAX(peso_unitario_ton) AS peso_unitario_ton
-                    FROM sap_vision_snapshot
+                    FROM core_sap_vision_snapshot
                     GROUP BY pedido, posicion
                 ) v
                   ON v.pedido = op.pedido
                  AND v.posicion = op.posicion
-                LEFT JOIN material_master p
+                LEFT JOIN core_material_master p
                   ON p.material = v.cod_material
                 ORDER BY op.fecha_de_pedido ASC, op.pedido, op.posicion
                 LIMIT ?
@@ -1446,8 +1446,8 @@ class DataRepositoryImpl:
                     COALESCE(SUM(o.cantidad * COALESCE(v.peso_unitario_ton, 0.0)), 0.0) AS tons,
                     COALESCE(SUM(CASE WHEN v.peso_unitario_ton IS NULL THEN o.cantidad ELSE 0 END), 0) AS piezas_sin_peso,
                     COUNT(DISTINCT (o.pedido || '/' || o.posicion)) AS orderpos
-                FROM orders o
-                LEFT JOIN sap_vision v
+                FROM core_orders o
+                LEFT JOIN core_sap_vision_snapshot v
                   ON v.pedido = o.pedido
                  AND v.posicion = o.posicion
                 GROUP BY o.process, o.almacen
@@ -1475,7 +1475,7 @@ class DataRepositoryImpl:
         return out
 
     def get_vision_stage_breakdown(self, *, pedido: str, posicion: str) -> dict:
-        """Return Visión Planta stage counts for a pedido/posición.
+        """Return Visi�n Planta stage counts for a pedido/posici�n.
 
         This is a best-effort reader: if a column is missing or NULL, it will be
         returned as None.
@@ -1483,7 +1483,7 @@ class DataRepositoryImpl:
         ped = self._normalize_sap_key(pedido) or str(pedido or "").strip()
         pos = self._normalize_sap_key(posicion) or str(posicion or "").strip()
         if not ped or not pos:
-            raise ValueError("pedido/posición vacío")
+            raise ValueError("pedido/posici�n vac�o")
 
         with self.db.connect() as con:
             row = con.execute(
@@ -1499,7 +1499,7 @@ class DataRepositoryImpl:
                     mecanizado_interno, mecanizado_externo, vulcanizado, insp_externa,
                     en_vulcaniz, pend_vulcanizado, rech_insp_externa, lib_vulcaniz_de,
                     bodega, despachado, rechazo
-                FROM sap_vision_snapshot
+                FROM core_sap_vision_snapshot
                 WHERE pedido = ? AND posicion = ?
                 LIMIT 1
                 """,
@@ -1528,7 +1528,7 @@ class DataRepositoryImpl:
             ("programado", "Por Moldear"),
             ("x_fundir", "Por Fundir"),
             ("desmoldeo", "En enfriamiento"),
-            ("tt", "En Tratamientos Térmicos"),
+            ("tt", "En Tratamientos T�rmicos"),
             ("terminacion", "En Terminaciones"),
             ("pend_vulcanizado", "Por Vulcanizar"),
             ("en_vulcanizado_computed", "En Vulcanizado"),
@@ -1593,7 +1593,7 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo
-                FROM orders
+                FROM core_orders
                 ORDER BY fecha_de_pedido, pedido, posicion, primer_correlativo
                 LIMIT ?
                 """,
@@ -1627,19 +1627,19 @@ class DataRepositoryImpl:
     def count_orders(self, *, process: str = "terminaciones") -> int:
         process = self._normalize_process(process)
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM orders WHERE process = ?", (process,)).fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM core_orders WHERE process = ?", (process,)).fetchone()[0])
 
     def count_sap_mb52(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM sap_mb52_snapshot").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM core_sap_mb52_snapshot").fetchone()[0])
 
     def count_sap_vision(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM sap_vision_snapshot").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM core_sap_vision_snapshot").fetchone()[0])
 
     def count_sap_demolding(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM sap_demolding_snapshot").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM core_sap_demolding_snapshot").fetchone()[0])
 
     def count_usable_pieces(self, *, process: str = "terminaciones") -> int:
         process = self._normalize_process(process)
@@ -1653,7 +1653,7 @@ class DataRepositoryImpl:
                 con.execute(
                     f"""
                     SELECT COUNT(*)
-                    FROM sap_mb52_snapshot
+                    FROM core_sap_mb52_snapshot
                     WHERE centro = ?
                       AND almacen = ?
                       AND {avail_sql}
@@ -1664,7 +1664,7 @@ class DataRepositoryImpl:
 
     def count_parts(self) -> int:
         with self.db.connect() as con:
-            return int(con.execute("SELECT COUNT(*) FROM material_master").fetchone()[0])
+            return int(con.execute("SELECT COUNT(*) FROM core_material_master").fetchone()[0])
 
     # ---------- Excel Import ----------
     def import_excel_bytes(self, *, kind: str, content: bytes) -> None:
@@ -1674,7 +1674,7 @@ class DataRepositoryImpl:
         read_excel_bytes(content)
 
         # The app currently supports SAP-driven imports only.
-        # Orders are rebuilt by joining MB52 + Visión.
+        # Orders are rebuilt by joining MB52 + Visi�n.
 
         if kind in {"mb52", "sap_mb52"}:
             self.import_sap_mb52_bytes(content=content, mode="replace")
@@ -1692,11 +1692,11 @@ class DataRepositoryImpl:
 
     def clear_imported_data(self) -> None:
         with self.db.connect() as con:
-            con.execute("DELETE FROM orders")
-            con.execute("DELETE FROM sap_mb52_snapshot")
-            con.execute("DELETE FROM sap_vision_snapshot")
+            con.execute("DELETE FROM core_orders")
+            con.execute("DELETE FROM core_sap_mb52_snapshot")
+            con.execute("DELETE FROM core_sap_vision_snapshot")
             # parts (family_ids) are managed manually in-app; keep them.
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
 
     # NOTE: import_sap_mb52_bytes, import_sap_vision_bytes, import_sap_demolding_bytes,
     # and _create_jobs_from_mb52 are extremely long methods. They would be included here
@@ -1712,7 +1712,7 @@ class DataRepositoryImpl:
                 SELECT material, material_base, texto_breve, centro, almacen, lote, pb_almacen,
                        libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad,
                        correlativo_int, is_test
-                FROM sap_mb52_snapshot
+                FROM core_sap_mb52_snapshot
                 ORDER BY material, almacen, lote
                 LIMIT ?
                 """,
@@ -1738,14 +1738,14 @@ class DataRepositoryImpl:
         ]
 
     def get_vision_snapshot_sample(self, *, limit: int = 100) -> list[dict]:
-        """Return sample rows from Visión snapshot."""
+        """Return sample rows from Visi�n snapshot."""
         with self.db.connect() as con:
             rows = con.execute(
                 """
                 SELECT pedido, posicion, cod_material, descripcion_material, fecha_de_pedido,
                        solicitado, programado, x_programar, x_fundir, desmoldeo, terminacion,
                        mecanizado_interno, mecanizado_externo, vulcanizado, en_vulcaniz
-                FROM sap_vision_snapshot
+                FROM core_sap_vision_snapshot
                 ORDER BY pedido, posicion
                 LIMIT ?
                 """,
@@ -1778,7 +1778,7 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT flask_id, material, demolding_date, flask_size
-                FROM sap_demolding_snapshot
+                FROM core_sap_demolding_snapshot
                 ORDER BY demolding_date DESC, flask_id
                 LIMIT ?
                 """,
@@ -1840,8 +1840,8 @@ class DataRepositoryImpl:
     def get_pedidos_master_rows(self) -> list[dict]:
         """Rows for UI: distinct (pedido,posicion) currently present in orders + priority flag.
 
-        Priority is stored primarily in `orderpos_priority` (pedido+posicion). For backward
-        compatibility with earlier versions, we also read `order_priority` (pedido only) as
+        Priority is stored primarily in `dispatcher_orderpos_priority` (pedido+posicion). For backward
+        compatibility with earlier versions, we also read `dispatcher_order_priority` (pedido only) as
         a fallback.
         """
         with self.db.connect() as con:
@@ -1860,12 +1860,12 @@ class DataRepositoryImpl:
                   COALESCE(MAX(v.peso_neto), 0.0) AS peso_neto,
                   COALESCE(MAX(v.bodega), 0) AS bodega,
                   COALESCE(MAX(v.despachado), 0) AS despachado
-                FROM orders o
-                LEFT JOIN orderpos_priority opp
+                FROM core_orders o
+                LEFT JOIN dispatcher_orderpos_priority opp
                        ON opp.pedido = o.pedido AND opp.posicion = o.posicion
-                LEFT JOIN order_priority op
+                LEFT JOIN dispatcher_order_priority op
                        ON op.pedido = o.pedido
-                LEFT JOIN sap_vision v
+                LEFT JOIN core_sap_vision_snapshot v
                        ON v.pedido = o.pedido AND v.posicion = o.posicion
                 GROUP BY o.pedido, o.posicion
                 ORDER BY COALESCE(opp.is_priority, op.is_priority, 0) DESC, fecha_de_pedido, o.pedido, o.posicion
@@ -1901,35 +1901,35 @@ class DataRepositoryImpl:
         ped = str(pedido or "").strip()
         pos = str(posicion or "").strip()
         if not ped or not pos:
-            raise ValueError("pedido/posición vacío")
+            raise ValueError("pedido/posici�n vac�o")
         flag = 1 if bool(is_priority) else 0
 
         with self.db.connect() as con:
             if flag == 1:
                 existing = con.execute(
-                    "SELECT kind FROM orderpos_priority WHERE pedido=? AND posicion=?",
+                    "SELECT kind FROM dispatcher_orderpos_priority WHERE pedido=? AND posicion=?",
                     (ped, pos),
                 ).fetchone()
                 if existing is not None and str(existing[0] or "").strip().lower() == "test":
                     con.execute(
-                        "UPDATE orderpos_priority SET is_priority=1 WHERE pedido=? AND posicion=?",
+                        "UPDATE dispatcher_orderpos_priority SET is_priority=1 WHERE pedido=? AND posicion=?",
                         (ped, pos),
                     )
                 else:
                     con.execute(
-                        "INSERT INTO orderpos_priority(pedido, posicion, is_priority, kind) VALUES(?, ?, 1, 'manual') "
+                        "INSERT INTO dispatcher_orderpos_priority(pedido, posicion, is_priority, kind) VALUES(?, ?, 1, 'manual') "
                         "ON CONFLICT(pedido, posicion) DO UPDATE SET is_priority=1, kind='manual'",
                         (ped, pos),
                     )
             else:
-                # Do not allow disabling production tests (lote alfanumérico): they must remain priority.
+                # Do not allow disabling production tests (lote alfanum�rico): they must remain priority.
                 con.execute(
-                    "UPDATE orderpos_priority SET is_priority=0 "
+                    "UPDATE dispatcher_orderpos_priority SET is_priority=0 "
                     "WHERE pedido=? AND posicion=? AND COALESCE(kind,'') <> 'test'",
                     (ped, pos),
                 )
             # Invalidate any previously generated program
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_last_program")
             # Update job priorities for this order position
             prios = self._get_priority_map_values()
             prio_urgente = prios.get("urgente", 2)
@@ -1937,7 +1937,7 @@ class DataRepositoryImpl:
             prio_prueba = prios.get("prueba", 1)
             con.execute(
                 """
-                UPDATE job
+                UPDATE dispatcher_job
                 SET priority = CASE
                     WHEN COALESCE(is_test, 0) = 1 THEN ?
                     WHEN ? = 1 THEN ?
@@ -1955,26 +1955,26 @@ class DataRepositoryImpl:
         )
 
     def delete_all_pedido_priorities(self, *, keep_tests: bool = True) -> None:
-        """Clear all pedido/posición priority flags.
+        """Clear all pedido/posici�n priority flags.
 
         By default we keep automatically-detected production tests (kind='test'),
         since they must remain prioritized.
         """
         with self.db.connect() as con:
             if keep_tests:
-                con.execute("DELETE FROM orderpos_priority WHERE COALESCE(kind,'') <> 'test'")
+                con.execute("DELETE FROM dispatcher_orderpos_priority WHERE COALESCE(kind,'') <> 'test'")
             else:
-                con.execute("DELETE FROM orderpos_priority")
+                con.execute("DELETE FROM dispatcher_orderpos_priority")
             # Legacy pedido-only priority table.
-            con.execute("DELETE FROM order_priority")
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM dispatcher_order_priority")
+            con.execute("DELETE FROM dispatcher_last_program")
 
     def list_priority_orderpos(self) -> list[tuple[str, str]]:
         with self.db.connect() as con:
             rows = con.execute(
                 """
                 SELECT pedido, posicion
-                FROM orderpos_priority
+                FROM dispatcher_orderpos_priority
                 WHERE COALESCE(is_priority, 0) = 1
                 ORDER BY pedido, posicion
                 """
@@ -1984,14 +1984,14 @@ class DataRepositoryImpl:
     def get_priority_orderpos_set(self) -> set[tuple[str, str]]:
         """Priority keys for scheduling: (pedido, posicion).
 
-        Uses `orderpos_priority` and also applies legacy pedido-only priority (`order_priority`)
+        Uses `dispatcher_orderpos_priority` and also applies legacy pedido-only priority (`dispatcher_order_priority`)
         to all positions currently present in `orders`.
         """
         with self.db.connect() as con:
             direct = con.execute(
                 """
                 SELECT pedido, posicion
-                FROM orderpos_priority
+                FROM dispatcher_orderpos_priority
                 WHERE COALESCE(is_priority, 0) = 1
                 """
             ).fetchall()
@@ -1999,8 +1999,8 @@ class DataRepositoryImpl:
             legacy = con.execute(
                 """
                 SELECT DISTINCT o.pedido, o.posicion
-                FROM orders o
-                INNER JOIN order_priority op ON op.pedido = o.pedido
+                FROM core_orders o
+                INNER JOIN dispatcher_order_priority op ON op.pedido = o.pedido
                 WHERE COALESCE(op.is_priority, 0) = 1
                 """
             ).fetchall()
@@ -2018,7 +2018,7 @@ class DataRepositoryImpl:
             direct = con.execute(
                 """
                 SELECT pedido, posicion
-                FROM orderpos_priority
+                FROM dispatcher_orderpos_priority
                 WHERE COALESCE(is_priority, 0) = 1
                   AND COALESCE(kind, '') <> 'test'
                 """
@@ -2027,8 +2027,8 @@ class DataRepositoryImpl:
             legacy = con.execute(
                 """
                 SELECT DISTINCT o.pedido, o.posicion
-                FROM orders o
-                INNER JOIN order_priority op ON op.pedido = o.pedido
+                FROM core_orders o
+                INNER JOIN dispatcher_order_priority op ON op.pedido = o.pedido
                 WHERE COALESCE(op.is_priority, 0) = 1
                 """
             ).fetchall()
@@ -2041,7 +2041,7 @@ class DataRepositoryImpl:
         return out
 
     def get_test_orderpos_set(self) -> set[tuple[str, str]]:
-        """Production test order positions (lote alfanumérico) as (pedido, posicion)."""
+        """Production test order positions (lote alfanum�rico) as (pedido, posicion)."""
         centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
         almacen = (self.get_config(key="sap_almacen_terminaciones", default="4035") or "").strip()
 
@@ -2049,7 +2049,7 @@ class DataRepositoryImpl:
             from_priority = con.execute(
                 """
                 SELECT pedido, posicion
-                FROM orderpos_priority
+                FROM dispatcher_orderpos_priority
                 WHERE COALESCE(is_priority, 0) = 1
                   AND COALESCE(kind, '') = 'test'
                 """
@@ -2060,7 +2060,7 @@ class DataRepositoryImpl:
                 from_mb52 = con.execute(
                     """
                     SELECT DISTINCT documento_comercial AS pedido, posicion_sd AS posicion
-                    FROM sap_mb52_snapshot
+                    FROM core_sap_mb52_snapshot
                     WHERE centro = ?
                       AND almacen = ?
                       AND COALESCE(libre_utilizacion, 0) = 1
@@ -2084,7 +2084,7 @@ class DataRepositoryImpl:
         """Backward-compatible API (pedido-only priorities)."""
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT pedido FROM order_priority WHERE COALESCE(is_priority, 0) = 1 ORDER BY pedido"
+                "SELECT pedido FROM dispatcher_order_priority WHERE COALESCE(is_priority, 0) = 1 ORDER BY pedido"
             ).fetchall()
         return [str(r[0]) for r in rows]
 
@@ -2120,7 +2120,7 @@ class DataRepositoryImpl:
         centro_almacen_pairs: set[tuple[str, str]] = set()
 
         # MB52: No prefix filtering (load all materials)
-        rows_snapshot: list[tuple] = []  # For sap_mb52_snapshot (v0.2 only, no legacy)
+        rows_snapshot: list[tuple] = []  # For core_sap_mb52_snapshot (v0.2 only, no legacy)
 
         for _, r in df.iterrows():
             material = str(r.get("material", "")).strip()
@@ -2150,16 +2150,16 @@ class DataRepositoryImpl:
 
         with self.db.connect() as con:
             if mode == "replace":
-                con.execute("DELETE FROM sap_mb52_snapshot")
+                con.execute("DELETE FROM core_sap_mb52_snapshot")
             else:
                 # Merge mode: replace only the centro/almacen subsets present in this file.
                 for c, a in sorted(centro_almacen_pairs):
-                    con.execute("DELETE FROM sap_mb52_snapshot WHERE centro = ? AND almacen = ?", (c, a))
+                    con.execute("DELETE FROM core_sap_mb52_snapshot WHERE centro = ? AND almacen = ?", (c, a))
             
             # Insert into snapshot table (v0.2 only)
             con.executemany(
                 """
-                INSERT INTO sap_mb52_snapshot(
+                INSERT INTO core_sap_mb52_snapshot(
                     material, texto_breve, centro, almacen, lote, pb_almacen,
                     libre_utilizacion, documento_comercial, posicion_sd, en_control_calidad,
                     correlativo_int, is_test
@@ -2170,8 +2170,8 @@ class DataRepositoryImpl:
             )
 
             # Imported SAP data invalidates all derived orders/programs.
-            con.execute("DELETE FROM orders")
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM core_orders")
+            con.execute("DELETE FROM dispatcher_last_program")
             
             # FASE 3.1: Create jobs automatically from MB52 for all configured processes
             self._create_jobs_from_mb52(con=con)
@@ -2202,7 +2202,7 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT pedido, posicion, COALESCE(kind, '') AS kind
-                FROM orderpos_priority
+                FROM dispatcher_orderpos_priority
                 WHERE COALESCE(is_priority, 0) = 1
                 """
             ).fetchall()
@@ -2214,7 +2214,7 @@ class DataRepositoryImpl:
             pass
         try:
             rows = con.execute(
-                "SELECT pedido FROM order_priority WHERE COALESCE(is_priority, 0) = 1"
+                "SELECT pedido FROM dispatcher_order_priority WHERE COALESCE(is_priority, 0) = 1"
             ).fetchall()
             legacy_priority = {str(r[0]).strip() for r in rows}
         except Exception:
@@ -2222,7 +2222,7 @@ class DataRepositoryImpl:
         
         # Get all active processes
         processes = con.execute(
-            "SELECT process_id, sap_almacen FROM process WHERE is_active = 1 AND sap_almacen IS NOT NULL"
+            "SELECT process_id, sap_almacen FROM core_processes WHERE is_active = 1 AND sap_almacen IS NOT NULL"
         ).fetchall()
         
         centro_config = self.get_config(key="sap_centro", default="4000") or "4000"
@@ -2249,7 +2249,7 @@ class DataRepositoryImpl:
                     material,
                     COALESCE(is_test, 0) AS is_test,
                     COUNT(*) AS qty
-                FROM sap_mb52_snapshot
+                FROM core_sap_mb52_snapshot
                 WHERE centro = ?
                   AND almacen = ?
                   AND {avail_sql}
@@ -2275,7 +2275,7 @@ class DataRepositoryImpl:
                 existing_jobs = con.execute(
                     """
                     SELECT job_id, qty
-                    FROM job
+                    FROM dispatcher_job
                     WHERE process_id = ? AND pedido = ? AND posicion = ? AND material = ? AND COALESCE(is_test, 0) = ?
                     ORDER BY qty ASC
                     """,
@@ -2301,7 +2301,7 @@ class DataRepositoryImpl:
                         job_ids = [str(j["job_id"]) for j in existing_jobs]
                         placeholders = ','.join('?' * len(job_ids))
                         unit_rows = con.execute(
-                            f"SELECT lote, job_id FROM job_unit WHERE job_id IN ({placeholders})",
+                            f"SELECT lote, job_id FROM dispatcher_job_unit WHERE job_id IN ({placeholders})",
                             job_ids
                         ).fetchall()
                         for u in unit_rows:
@@ -2316,7 +2316,7 @@ class DataRepositoryImpl:
                     new_job_id = f"job_{process_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
                     con.execute(
                         """
-                        INSERT INTO job(
+                        INSERT INTO dispatcher_job(
                             job_id, process_id, pedido, posicion, material,
                             qty, priority, is_test, state,
                             created_at, updated_at
@@ -2331,7 +2331,7 @@ class DataRepositoryImpl:
                 lotes_rows = con.execute(
                     f"""
                     SELECT lote, correlativo_int
-                    FROM sap_mb52_snapshot
+                    FROM core_sap_mb52_snapshot
                     WHERE centro = ?
                       AND almacen = ?
                       AND documento_comercial = ?
@@ -2368,7 +2368,7 @@ class DataRepositoryImpl:
                     # Update job header
                     con.execute(
                         """
-                        UPDATE job
+                        UPDATE dispatcher_job
                         SET qty = ?,
                             is_test = ?,
                             priority = ?,
@@ -2379,13 +2379,13 @@ class DataRepositoryImpl:
                     )
                     
                     # Replace job units
-                    con.execute("DELETE FROM job_unit WHERE job_id = ?", (job_id,))
+                    con.execute("DELETE FROM dispatcher_job_unit WHERE job_id = ?", (job_id,))
                     
                     for lote, corr in items:
                         job_unit_id = f"ju_{job_id}_{uuid4().hex[:8]}"
                         con.execute(
                             """
-                            INSERT INTO job_unit(
+                            INSERT INTO dispatcher_job_unit(
                                 job_unit_id, job_id, lote, correlativo_int, qty, status,
                                 created_at, updated_at
                             )
@@ -2402,9 +2402,9 @@ class DataRepositoryImpl:
                 placeholders = ','.join('?' * len(updated_job_ids))
                 con.execute(
                     f"""
-                    DELETE FROM job_unit
+                    DELETE FROM dispatcher_job_unit
                     WHERE job_id IN (
-                        SELECT job_id FROM job
+                        SELECT job_id FROM dispatcher_job
                         WHERE process_id = ?
                           AND job_id NOT IN ({placeholders})
                     )
@@ -2413,7 +2413,7 @@ class DataRepositoryImpl:
                 )
                 con.execute(
                     f"""
-                    UPDATE job
+                    UPDATE dispatcher_job
                     SET qty = 0, updated_at = CURRENT_TIMESTAMP
                     WHERE process_id = ?
                       AND job_id NOT IN ({placeholders})
@@ -2423,18 +2423,18 @@ class DataRepositoryImpl:
             else:
                 # No jobs were updated, reset all for this process
                 con.execute(
-                    "DELETE FROM job_unit WHERE job_id IN (SELECT job_id FROM job WHERE process_id = ?)",
+                    "DELETE FROM dispatcher_job_unit WHERE job_id IN (SELECT job_id FROM dispatcher_job WHERE process_id = ?)",
                     (process_id,)
                 )
                 con.execute(
-                    "UPDATE job SET qty = 0, updated_at = CURRENT_TIMESTAMP WHERE process_id = ?",
+                    "UPDATE dispatcher_job SET qty = 0, updated_at = CURRENT_TIMESTAMP WHERE process_id = ?",
                     (process_id,)
                 )
             
             # Cleanup: Delete jobs with qty=0 to keep the table clean.
             # This respects the "SAP is source of truth" principle: if stock is 0, job is gone.
             con.execute(
-                "DELETE FROM job WHERE process_id = ? AND qty = 0",
+                "DELETE FROM dispatcher_job WHERE process_id = ? AND qty = 0",
                 (process_id,)
             )
 
@@ -2512,6 +2512,13 @@ class DataRepositoryImpl:
 
         self._validate_columns(df.columns, {"pedido", "posicion", "cod_material", "fecha_de_pedido"})
 
+        # Pre-fetch config ONCE outside the loop for performance
+        prefixes_raw = str(self.get_config(key="sap_vision_material_prefixes", default="401,402,403,404") or "").strip()
+        if prefixes_raw and "*" not in prefixes_raw:
+            valid_prefixes = tuple(p.strip() for p in prefixes_raw.split(",") if p.strip())
+        else:
+            valid_prefixes = ("402", "403", "404")
+
         rows: list[tuple] = []
         for _, r in df.iterrows():
             pedido = self._normalize_sap_key(r.get("pedido")) or ""
@@ -2522,14 +2529,8 @@ class DataRepositoryImpl:
             tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
             cod_material = self._normalize_sap_key(r.get("cod_material"))
 
-            # Filter: Configurable material prefixes
-            prefixes_raw = str(self.get_config(key="sap_vision_material_prefixes", default="401,402,403,404") or "").strip()
-            if prefixes_raw and "*" not in prefixes_raw:
-                prefixes = [p.strip() for p in prefixes_raw.split(",") if p.strip()]
-                is_valid_mat = cod_material and any(cod_material.startswith(p) for p in prefixes)
-            else:
-                is_valid_mat = cod_material and (cod_material.startswith("402") or cod_material.startswith("403") or cod_material.startswith("404"))
-
+            # Filter: Material prefixes (using pre-fetched config)
+            is_valid_mat = cod_material and cod_material.startswith(valid_prefixes)
             is_ztlh = (tipo_posicion == "ZTLH")
 
             if not is_valid_mat and not is_ztlh:
@@ -2594,7 +2595,7 @@ class DataRepositoryImpl:
                 except Exception:
                     despachado = None
 
-            # Visión Planta provides weights in kg; the app uses tons.
+            # Visi�n Planta provides weights in kg; the app uses tons.
             peso_neto = None
             peso_unitario_ton = None
             if "peso_neto" in df.columns:
@@ -2648,10 +2649,10 @@ class DataRepositoryImpl:
             )
 
         with self.db.connect() as con:
-            con.execute("DELETE FROM sap_vision_snapshot")
+            con.execute("DELETE FROM core_sap_vision_snapshot")
             con.executemany(
                 """
-                INSERT INTO sap_vision_snapshot(
+                INSERT INTO core_sap_vision_snapshot(
                     pedido, posicion, cod_material, descripcion_material, fecha_de_pedido,
                     solicitado,
                     x_programar, programado, x_fundir, desmoldeo, tt, terminacion,
@@ -2667,12 +2668,12 @@ class DataRepositoryImpl:
             # Backfill MB52 material_base using Vision
             con.execute(
                 """
-                UPDATE sap_mb52_snapshot
+                UPDATE core_sap_mb52_snapshot
                 SET material_base = (
                     SELECT v.cod_material
-                    FROM sap_vision_snapshot v
-                    WHERE v.pedido = sap_mb52_snapshot.documento_comercial
-                      AND v.posicion = sap_mb52_snapshot.posicion_sd
+                    FROM core_sap_vision_snapshot v
+                    WHERE v.pedido = core_sap_mb52_snapshot.documento_comercial
+                      AND v.posicion = core_sap_mb52_snapshot.posicion_sd
                     LIMIT 1
                 )
                 WHERE documento_comercial IS NOT NULL AND TRIM(documento_comercial) <> ''
@@ -2683,12 +2684,12 @@ class DataRepositoryImpl:
             # Update material weights from Vision
             con.execute(
                 """
-                UPDATE material_master
+                UPDATE core_material_master
                 SET peso_unitario_ton = COALESCE(
                     (
                         SELECT v.peso_unitario_ton
-                        FROM sap_vision_snapshot v
-                        WHERE v.cod_material = material_master.material
+                        FROM core_sap_vision_snapshot v
+                        WHERE v.cod_material = core_material_master.material
                           AND v.peso_unitario_ton IS NOT NULL
                           AND v.peso_unitario_ton >= 0
                         ORDER BY v.fecha_de_pedido ASC, v.pedido ASC, v.posicion ASC
@@ -2698,28 +2699,39 @@ class DataRepositoryImpl:
                 )
                 WHERE EXISTS (
                     SELECT 1
-                    FROM sap_vision_snapshot v2
-                    WHERE v2.cod_material = material_master.material
+                    FROM core_sap_vision_snapshot v2
+                    WHERE v2.cod_material = core_material_master.material
                       AND v2.peso_unitario_ton IS NOT NULL
                       AND v2.peso_unitario_ton >= 0
                 )
                 """
             )
 
-            con.execute("DELETE FROM orders")
-            con.execute("DELETE FROM last_program")
+            con.execute("DELETE FROM core_orders")
+            con.execute("DELETE FROM dispatcher_last_program")
             
             # Update jobs from Vision (fecha_de_pedido)
             self._update_jobs_from_vision(con=con)
 
     def import_sap_demolding_bytes(self, *, content: bytes) -> None:
-        """Import Reporte Desmoldeo (demolding/shakeout report) from Excel."""
+        """Import Reporte Desmoldeo (demolding/shakeout report) from Excel.
+        
+        Filters by configured canchas and separates into:
+        - core_moldes_por_fundir: WIP molds (no demolding_date yet)
+        - core_piezas_fundidas: Completed pieces (with demolding_date)
+        """
         df_raw = read_excel_bytes(content)
         df = normalize_columns(df_raw)
+        
+        # Get cancha filter from config (comma-separated list)
+        default_canchas = "TCF-L1000,TCF-L1100,TCF-L1200,TCF-L1300,TCF-L1400,TCF-L1500,TCF-L1600,TCF-L1700,TCF-L3000,TDE-D0001,TDE-D0002,TDE-D0003"
+        canchas_config = self.get_config(key="planner_demolding_cancha", default=default_canchas) or default_canchas
+        valid_canchas = tuple(c.strip().upper() for c in canchas_config.split(",") if c.strip())
 
         # Map exact column names from Excel to database schema
         column_mapping = {
             "pieza": "material",
+            "tipo_pieza": "tipo_pieza",
             "caja": "flask_id",
             "cancha": "cancha",
             "fecha_desmoldeo": "demolding_date",
@@ -2737,12 +2749,15 @@ class DataRepositoryImpl:
             if old_col in df.columns and new_col not in df.columns:
                 df = df.rename(columns={old_col: new_col})
 
-        rows: list[tuple] = []
+        moldes_rows: list[tuple] = []  # WIP (no demolding_date)
+        piezas_rows: list[tuple] = []  # Completed (with demolding_date)
+        
         for _, r in df.iterrows():
-            material = str(r.get("material", "")).strip()
+            material_raw = str(r.get("material", "")).strip()  # "Pieza" column
+            tipo_pieza_raw = str(r.get("tipo_pieza", "")).strip()  # "Tipo pieza" column
             lote = str(r.get("lote", "")).strip()
             flask_id_raw = str(r.get("flask_id", "")).strip()
-            cancha = str(r.get("cancha", "")).strip()
+            cancha_raw = str(r.get("cancha", "")).strip()
             demolding_date_raw = r.get("demolding_date")
             demolding_time = str(r.get("demolding_time", "")).strip() or None
             cooling_hours = coerce_float(r.get("cooling_hours")) or None
@@ -2754,77 +2769,171 @@ class DataRepositoryImpl:
             if mold_qty is None or mold_qty <= 0:
                 mold_qty = 1.0  # Default: 1 pieza = 1 caja completa
 
-            if not material or not flask_id_raw:
+            if not flask_id_raw:
+                continue
+            
+            # Filter by cancha
+            cancha_upper = cancha_raw.upper()
+            if cancha_upper not in valid_canchas:
                 continue
 
-            try:
-                demolding_date = coerce_date(demolding_date_raw)
-            except Exception:
-                continue
+            # Try to parse demolding_date (handles None, NaN, NaT, empty strings)
+            import pandas as pd
+            demolding_date = None
+            demolding_date_str = str(demolding_date_raw).strip().upper() if demolding_date_raw else ""
+            # Check if it's a valid date (not NaT, NaN, None, empty, or "NAN"/"NAT")
+            if demolding_date_str and demolding_date_str not in ("", "NAN", "NAT", "NONE"):
+                try:
+                    if not pd.isna(demolding_date_raw):
+                        demolding_date = coerce_date(demolding_date_raw)
+                except Exception:
+                    demolding_date = None
+            
+            # Try to parse poured_date
+            poured_date = None
+            poured_date_str = str(poured_date_raw).strip().upper() if poured_date_raw else ""
+            if poured_date_str and poured_date_str not in ("", "NAN", "NAT", "NONE"):
+                try:
+                    if not pd.isna(poured_date_raw):
+                        poured_date = coerce_date(poured_date_raw)
+                except Exception:
+                    poured_date = None
 
-            # Skip rows without demolding date
+            # For WIP molds (no demolding_date): extract material code from tipo_pieza
             if not demolding_date:
-                continue
-
-            poured_date = coerce_date(poured_date_raw) if poured_date_raw else None
-
-            rows.append(
-                (
+                import re
+                material_match = re.search(r'(\d{11})(?:\D|$)', tipo_pieza_raw)
+                material = material_match.group(1) if material_match else material_raw
+                tipo_pieza = tipo_pieza_raw
+                
+                # WIP molds: no demolding_date, no demolding_time
+                molde_row = (
                     material,
+                    tipo_pieza,
                     lote or None,
-                    flask_id_raw,  # Guardamos el ID completo
-                    cancha or None,
+                    flask_id_raw,
+                    cancha_raw or None,
+                    mold_type,
+                    poured_date,
+                    poured_time,
+                    cooling_hours,
+                    mold_qty,
+                )
+                moldes_rows.append(molde_row)
+            else:
+                # Completed pieces: use values as-is from Excel
+                material = material_raw
+                tipo_pieza = tipo_pieza_raw
+                
+                # Completed pieces: include demolding_date and demolding_time
+                pieza_row = (
+                    material,
+                    tipo_pieza,
+                    lote or None,
+                    flask_id_raw,
+                    cancha_raw or None,
                     demolding_date,
                     demolding_time,
                     cooling_hours,
                     mold_type,
                     poured_date,
                     poured_time,
-                    int(mold_qty) if mold_qty else 1,
+                    mold_qty,
                 )
-            )
+                piezas_rows.append(pieza_row)
 
         with self.db.connect() as con:
-            con.execute("DELETE FROM sap_demolding_snapshot")
-            con.executemany(
-                """
-                INSERT INTO sap_demolding_snapshot(
-                    material, lote, flask_id, cancha, demolding_date, demolding_time,
-                    cooling_hours, mold_type, poured_date, poured_time, mold_quantity
+            # Clear both tables
+            con.execute("DELETE FROM core_moldes_por_fundir")
+            con.execute("DELETE FROM core_piezas_fundidas")
+            
+            # Insert WIP molds (no demolding_date)
+            if moldes_rows:
+                con.executemany(
+                    """
+                    INSERT INTO core_moldes_por_fundir(
+                        material, tipo_pieza, lote, flask_id, cancha,
+                        mold_type, poured_date, poured_time, cooling_hours, mold_quantity
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    moldes_rows,
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
+            
+            # Insert completed pieces (with demolding_date)
+            if piezas_rows:
+                con.executemany(
+                    """
+                    INSERT INTO core_piezas_fundidas(
+                        material, tipo_pieza, lote, flask_id, cancha, demolding_date, demolding_time,
+                        cooling_hours, mold_type, poured_date, poured_time, mold_quantity
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    piezas_rows,
+                )
 
-        self.log_audit("DATA_LOAD", "Demolding report imported", f"Rows: {len(rows)}")
+        self.log_audit("DATA_LOAD", "Demolding report imported", 
+                      f"WIP molds: {len(moldes_rows)}, Completed pieces: {len(piezas_rows)}, Canchas: {len(valid_canchas)}")
 
-        # Update material_master.flask_size and cooling_hours from demolding snapshot
+        # Update material_master from COMPLETED pieces only (piezas_fundidas)
         # flask_size = first 3 characters of flask_id
+        # tiempo_enfriamiento = cooling_hours (already in hours)
+        # piezas_por_molde = ROUND(1.0 / mold_quantity)
         with self.db.connect() as con:
             con.execute(
                 """
-                UPDATE material_master
+                UPDATE core_material_master
                 SET flask_size = (
                     SELECT SUBSTR(ds.flask_id, 1, 3)
-                    FROM sap_demolding_snapshot ds
-                    WHERE ds.material = material_master.material
+                    FROM core_piezas_fundidas ds
+                    WHERE ds.material = core_material_master.material
                       AND ds.flask_id IS NOT NULL AND ds.flask_id <> ''
                     ORDER BY ds.demolding_date DESC
                     LIMIT 1
                 ),
                 tiempo_enfriamiento_molde_dias = (
                     SELECT CAST(ds.cooling_hours AS INTEGER)
-                    FROM sap_demolding_snapshot ds
-                    WHERE ds.material = material_master.material
+                    FROM core_piezas_fundidas ds
+                    WHERE ds.material = core_material_master.material
                       AND ds.cooling_hours IS NOT NULL
+                    ORDER BY ds.demolding_date DESC
+                    LIMIT 1
+                ),
+                piezas_por_molde = (
+                    SELECT CAST(ROUND(1.0 / ds.mold_quantity) AS INTEGER)
+                    FROM core_piezas_fundidas ds
+                    WHERE ds.material = core_material_master.material
+                      AND ds.mold_quantity IS NOT NULL AND ds.mold_quantity > 0
                     ORDER BY ds.demolding_date DESC
                     LIMIT 1
                 )
                 WHERE EXISTS (
                     SELECT 1
-                    FROM sap_demolding_snapshot ds2
-                    WHERE ds2.material = material_master.material
+                    FROM core_piezas_fundidas ds2
+                    WHERE ds2.material = core_material_master.material
+                )
+                """
+            )
+        
+        # Update flask_size from WIP molds too (if no completed data exists)
+        with self.db.connect() as con:
+            con.execute(
+                """
+                UPDATE core_material_master
+                SET flask_size = (
+                    SELECT SUBSTR(wip.flask_id, 1, 3)
+                    FROM core_moldes_por_fundir wip
+                    WHERE wip.material = core_material_master.material
+                      AND wip.flask_id IS NOT NULL AND wip.flask_id <> ''
+                    ORDER BY wip.poured_date DESC
+                    LIMIT 1
+                )
+                WHERE flask_size IS NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM core_moldes_por_fundir wip2
+                    WHERE wip2.material = core_material_master.material
                 )
                 """
             )
@@ -2846,20 +2955,20 @@ class DataRepositoryImpl:
         """Update existing jobs with fecha_de_pedido from Vision snapshot."""
         con.execute(
             """
-            UPDATE job
+            UPDATE dispatcher_job
             SET fecha_de_pedido = (
                     SELECT v.fecha_de_pedido
-                    FROM sap_vision_snapshot v
-                    WHERE v.pedido = job.pedido
-                      AND v.posicion = job.posicion
+                    FROM core_sap_vision_snapshot v
+                    WHERE v.pedido = dispatcher_job.pedido
+                      AND v.posicion = dispatcher_job.posicion
                     LIMIT 1
                 ),
                 updated_at = CURRENT_TIMESTAMP
             WHERE EXISTS (
                 SELECT 1
-                FROM sap_vision_snapshot v2
-                WHERE v2.pedido = job.pedido
-                  AND v2.posicion = job.posicion
+                FROM core_sap_vision_snapshot v2
+                WHERE v2.pedido = dispatcher_job.pedido
+                  AND v2.posicion = dispatcher_job.posicion
             )
             """
         )
@@ -2884,8 +2993,8 @@ class DataRepositoryImpl:
                                 f"""
                                 SELECT COALESCE(m.material_base, v.cod_material, m.material) AS material,
                                              m.documento_comercial, m.posicion_sd, m.lote
-                                FROM sap_mb52_snapshot m
-                                LEFT JOIN sap_vision_snapshot v
+                                FROM core_sap_mb52_snapshot m
+                                LEFT JOIN core_sap_vision_snapshot v
                                     ON v.pedido = m.documento_comercial
                                  AND v.posicion = m.posicion_sd
                                 WHERE m.centro = ?
@@ -2899,13 +3008,13 @@ class DataRepositoryImpl:
             ).fetchall()
 
             if not mb_rows:
-                con.execute("DELETE FROM orders WHERE process = ?", (process,))
-                con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+                con.execute("DELETE FROM core_orders WHERE process = ?", (process,))
+                con.execute("DELETE FROM dispatcher_last_program WHERE process = ?", (process,))
                 return 0
 
             # Vision lookup
             vision_rows = con.execute(
-                "SELECT pedido, posicion, fecha_de_pedido, cod_material, cliente FROM sap_vision_snapshot"
+                "SELECT pedido, posicion, fecha_de_pedido, cod_material, cliente FROM core_sap_vision_snapshot"
             ).fetchall()
             vision_by_key: dict[tuple[str, str], tuple[str, str | None, str | None]] = {}
             for r in vision_rows:
@@ -2948,7 +3057,7 @@ class DataRepositoryImpl:
 
         if bad_lotes:
             raise ValueError(
-                "Hay lotes no numéricos o inválidos (ejemplos: " + ", ".join(bad_lotes[:20]) + ")."
+                "Hay lotes no num�ricos o inv�lidos (ejemplos: " + ", ".join(bad_lotes[:20]) + ")."
             )
 
         # Validate one material per orderpos
@@ -2958,7 +3067,7 @@ class DataRepositoryImpl:
         multi = [(k, sorted(v)) for k, v in material_by_orderpos.items() if len(v) > 1]
         if multi:
             k, mats = multi[0]
-            raise ValueError(f"Pedido/posición {k[0]}/{k[1]} tiene múltiples materiales: {mats}")
+            raise ValueError(f"Pedido/posici�n {k[0]}/{k[1]} tiene m�ltiples materiales: {mats}")
 
         # Build order rows
         order_rows: list[tuple] = []
@@ -2970,7 +3079,7 @@ class DataRepositoryImpl:
                 unique_materials = {material for _, _, material, _ in pieces.keys()}
                 placeholders = ','.join('?' * len(unique_materials))
                 time_rows = con.execute(
-                    f"SELECT material FROM material_master WHERE material IN ({placeholders})",
+                    f"SELECT material FROM core_material_master WHERE material IN ({placeholders})",
                     list(unique_materials)
                 ).fetchall()
         
@@ -2986,10 +3095,10 @@ class DataRepositoryImpl:
         order_rows.sort(key=lambda t: (t[4], t[0], t[1], -int(t[8] or 0), t[2]))
 
         with self.db.connect() as con:
-            con.execute("DELETE FROM orders WHERE process = ?", (process,))
+            con.execute("DELETE FROM core_orders WHERE process = ?", (process,))
             con.executemany(
                 """
-                INSERT INTO orders(process, almacen, pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente)
+                INSERT INTO core_orders(process, almacen, pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente)
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [(process, almacen, *row) for row in order_rows],
@@ -2998,7 +3107,7 @@ class DataRepositoryImpl:
             if auto_priority_orderpos:
                 con.executemany(
                     """
-                    INSERT INTO orderpos_priority(pedido, posicion, is_priority, kind)
+                    INSERT INTO dispatcher_orderpos_priority(pedido, posicion, is_priority, kind)
                     VALUES(?, ?, 1, 'test')
                     ON CONFLICT(pedido, posicion) DO UPDATE SET is_priority=1, kind='test'
                     """,
@@ -3006,7 +3115,7 @@ class DataRepositoryImpl:
                 )
 
             # V0.2 Job Sync
-            existing_jobs = con.execute("SELECT job_id, pedido, posicion, is_test FROM job WHERE process_id = ?", (process,)).fetchall()
+            existing_jobs = con.execute("SELECT job_id, pedido, posicion, is_test FROM dispatcher_job WHERE process_id = ?", (process,)).fetchall()
             existing_map = {(r["pedido"], r["posicion"], int(r["is_test"])): r["job_id"] for r in existing_jobs}
             seen_existing_ids = set()
 
@@ -3021,7 +3130,7 @@ class DataRepositoryImpl:
                 rows = con.execute(
                     """
                     SELECT pedido, posicion, COALESCE(kind, '') AS kind
-                    FROM orderpos_priority
+                    FROM dispatcher_orderpos_priority
                     WHERE COALESCE(is_priority, 0) = 1
                     """
                 ).fetchall()
@@ -3033,7 +3142,7 @@ class DataRepositoryImpl:
                 pass
             try:
                 rows = con.execute(
-                    "SELECT pedido FROM order_priority WHERE COALESCE(is_priority, 0) = 1"
+                    "SELECT pedido FROM dispatcher_order_priority WHERE COALESCE(is_priority, 0) = 1"
                 ).fetchall()
                 legacy_priority = {str(r[0]).strip() for r in rows}
             except Exception:
@@ -3051,20 +3160,20 @@ class DataRepositoryImpl:
                     jid = existing_map[key]
                     seen_existing_ids.add(jid)
                     con.execute(
-                        "UPDATE job SET qty=?, material=?, fecha_de_pedido=?, corr_min=?, corr_max=?, cliente=?, priority=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                        "UPDATE dispatcher_job SET qty=?, material=?, fecha_de_pedido=?, corr_min=?, corr_max=?, cliente=?, priority=?, updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
                         (int(row[3]), str(row[2]), str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None, prio, jid)
                     )
                 else:
                     new_jid = str(uuid4())
                     con.execute(
-                        "INSERT INTO job(job_id, process_id, pedido, posicion, material, qty, priority, is_test, state, fecha_de_pedido, corr_min, corr_max, cliente) "
+                        "INSERT INTO dispatcher_job(job_id, process_id, pedido, posicion, material, qty, priority, is_test, state, fecha_de_pedido, corr_min, corr_max, cliente) "
                         "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
                         (new_jid, process, str(row[0]), str(row[1]), str(row[2]), int(row[3]), prio, is_test_flag, str(row[4]), int(row[5]), int(row[6]), str(row[9]) if row[9] else None)
                     )
                     jid = new_jid
 
                 # Sync job_unit
-                con.execute("DELETE FROM job_unit WHERE job_id = ?", (jid,))
+                con.execute("DELETE FROM dispatcher_job_unit WHERE job_id = ?", (jid,))
                 for lote in sorted(lotes_set):
                     try:
                         corr = self._lote_to_int(lote)
@@ -3073,7 +3182,7 @@ class DataRepositoryImpl:
                     ju_id = f"ju_{jid}_{uuid4().hex[:8]}"
                     con.execute(
                         """
-                        INSERT INTO job_unit(job_unit_id, job_id, lote, correlativo_int, qty, status, created_at, updated_at)
+                        INSERT INTO dispatcher_job_unit(job_unit_id, job_id, lote, correlativo_int, qty, status, created_at, updated_at)
                         VALUES(?, ?, ?, ?, 1, 'available', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """,
                         (ju_id, jid, str(lote), corr),
@@ -3086,9 +3195,9 @@ class DataRepositoryImpl:
                 for i in range(0, len(to_del), chunk_s):
                     chunk = to_del[i:i+chunk_s]
                     qs = ",".join("?" * len(chunk))
-                    con.execute(f"DELETE FROM job WHERE job_id IN ({qs})", chunk)
+                    con.execute(f"DELETE FROM dispatcher_job WHERE job_id IN ({qs})", chunk)
 
-            con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+            con.execute("DELETE FROM dispatcher_last_program WHERE process = ?", (process,))
 
         return len(order_rows)
 

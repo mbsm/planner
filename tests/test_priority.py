@@ -30,7 +30,7 @@ def create_dummy_job(db, process="terminaciones", is_test=0, priority=3, pedido=
     with db.connect() as con:
         con.execute(
             """
-            INSERT INTO job(
+            INSERT INTO dispatcher_job(
                 job_id, process_id, pedido, posicion, material,
                 qty, priority, is_test, state
             ) VALUES (?, ?, ?, ?, 'M1', 1, ?, ?, 'pending')
@@ -49,14 +49,14 @@ def test_mark_job_urgent_normal_flow(temp_db):
     repo.mark_job_urgent(job_id)
     
     with db.connect() as con:
-        row = con.execute("SELECT priority FROM job WHERE job_id = ?", (job_id,)).fetchone()
+        row = con.execute("SELECT priority FROM dispatcher_job WHERE job_id = ?", (job_id,)).fetchone()
     assert row["priority"] == 2, "Should be updated to urgent priority (2)"
     
     # Unmark (back to normal)
     repo.unmark_job_urgent(job_id)
     
     with db.connect() as con:
-        row = con.execute("SELECT priority FROM job WHERE job_id = ?", (job_id,)).fetchone()
+        row = con.execute("SELECT priority FROM dispatcher_job WHERE job_id = ?", (job_id,)).fetchone()
     assert row["priority"] == 3, "Should be updated to normal priority (3)"
 
 def test_mark_job_urgent_on_test_job(temp_db):
@@ -72,7 +72,7 @@ def test_mark_job_urgent_on_test_job(temp_db):
         repo.mark_job_urgent(job_id)
         
     with db.connect() as con:
-        row = con.execute("SELECT priority FROM job WHERE job_id = ?", (job_id,)).fetchone()
+        row = con.execute("SELECT priority FROM dispatcher_job WHERE job_id = ?", (job_id,)).fetchone()
     assert row["priority"] == 1, "Priority should remain 1 (test)"
 
 def test_config_change_recalculates_priorities(temp_db):
@@ -97,9 +97,9 @@ def test_config_change_recalculates_priorities(temp_db):
     
     # 3. Verify updates
     with db.connect() as con:
-        p_normal = con.execute("SELECT priority FROM job WHERE job_id=?", (job_normal,)).fetchone()["priority"]
-        p_urgent = con.execute("SELECT priority FROM job WHERE job_id=?", (job_urgent,)).fetchone()["priority"]
-        p_test = con.execute("SELECT priority FROM job WHERE job_id=?", (job_test,)).fetchone()["priority"]
+        p_normal = con.execute("SELECT priority FROM dispatcher_job WHERE job_id=?", (job_normal,)).fetchone()["priority"]
+        p_urgent = con.execute("SELECT priority FROM dispatcher_job WHERE job_id=?", (job_urgent,)).fetchone()["priority"]
+        p_test = con.execute("SELECT priority FROM dispatcher_job WHERE job_id=?", (job_test,)).fetchone()["priority"]
         
     assert p_normal == 4, "Normal job should update to new normal value"
     assert p_urgent == 3, "Urgent job should update to new urgent value"

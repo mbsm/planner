@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import date
 
-from foundryplan.planner.model import PlannerOrder, PlannerPart, PlannerResource
+from foundryplan.planner.model import PlannerOrder, PlannerPart
 
 
 def _build_due_day_map(workdays: list[date]) -> dict[str, int]:
@@ -14,18 +14,18 @@ def solve_planner_heuristic(
     *,
     orders: list[PlannerOrder],
     parts: dict[str, PlannerPart],
-    resources: PlannerResource,
     workdays: list[date],
-    initial_flask_inuse: dict[tuple[str, int], int],
-    initial_pour_load: dict[int, float],
+    daily_resources: dict[int, dict[str, any]],  # day_idx -> {molding_capacity, same_mold_capacity, pouring_tons_available, flask_available: {flask_type -> qty}}
     initial_patterns_loaded: set[str],
     max_horizon_days: int = 365,
 ) -> dict:
-    """Greedy heuristic planner.
+    """Greedy heuristic planner using daily_resources from planner_daily_resources table.
+    
+    Reads capacities day-by-day instead of using global PlannerResource.
     
     Calculates start_by per order as:
       start_by = due_date - (
-          ceil(remaining_molds / molding_max_same_part_per_day) +  # Molding time
+          ceil(remaining_molds / same_mold_capacity_avg) +          # Molding time
           1 +                                                        # Pouring day
           ceil(cool_hours / 24) +                                   # Cooling days
           ceil(finish_hours / (8*24)) +                             # Finish time (workdays)
@@ -50,34 +50,21 @@ def solve_planner_heuristic(
     schedule: dict[str, dict[int, int]] = {}
     errors: list[str] = []
 
+    # Verify all required flask types have capacity
     required_flasks = {parts[o.part_id].flask_type for o in orders if o.part_id in parts}
-    missing_flasks = [ft for ft in required_flasks if resources.flask_capacity.get(ft, 0) <= 0]
-    if missing_flasks:
-        raise ValueError(f"Faltan capacidades para flasks: {', '.join(sorted(missing_flasks))}")
+    for ft in required_flasks:
+        has_capacity = any(
+            daily_resources.get(d, {}).get("flask_available", {}).get(ft, 0) > 0
+            for d in range(horizon)
+        )
+        if not has_capacity:
+            raise ValueError(f"Flask type {ft} sin capacidad disponible en ningún día del horizonte")
 
-    # Busy flasks per type/day (seeded by initial in-use)
-    busy_by_day: dict[str, dict[int, int]] = {ft: {} for ft in resources.flask_capacity.keys()}
-    for (size, day_idx), qty in initial_flask_inuse.items():
-        busy_by_day.setdefault(size, {})
-        busy_by_day[size][int(day_idx)] = busy_by_day[size].get(int(day_idx), 0) + int(qty)
-
-    def _can_allocate_flasks(*, size: str, day: int, qty: int, cool_days: int, max_flasks: int) -> bool:
-        # Flask lifecycle: Mold (day) → Pour (day+1) → Cool (day+2..day+1+cool_days) → Shakeout (day+2+cool_days)
-        # Lock duration = 2 + cool_days (mold day + pour day + cooling days)
-        lock_duration = 2 + cool_days
-        for d in range(day, min(day + lock_duration, horizon)):
-            used = busy_by_day.get(size, {}).get(d, 0)
-            if used + qty > max_flasks:
-                return False
-        return True
-
-    def _reserve_flasks(*, size: str, day: int, qty: int, cool_days: int) -> None:
-        # Flask lifecycle: Mold (day) → Pour (day+1) → Cool (day+2..day+1+cool_days) → Shakeout (day+2+cool_days)
-        # Lock duration = 2 + cool_days (mold day + pour day + cooling days)
-        lock_duration = 2 + cool_days
-        for d in range(day, min(day + lock_duration, horizon)):
-            busy_by_day.setdefault(size, {})
-            busy_by_day[size][d] = busy_by_day[size].get(d, 0) + qty
+    # Calculate average same_mold_capacity for start_by estimation
+    same_mold_capacity_avg = sum(
+        daily_resources.get(d, {}).get("same_mold_capacity", 0)
+        for d in range(horizon)
+    ) / max(1, horizon)
 
     def _calculate_start_by(order: PlannerOrder, part: PlannerPart) -> int:
         """Calculate start_by day index for order using resource capacity estimates."""
@@ -85,8 +72,8 @@ def solve_planner_heuristic(
         if remaining_molds <= 0:
             return horizon + 999
         
-        # Molding weeks: ceil(remaining_molds / molding_max_same_part_per_day)
-        molding_days = math.ceil(remaining_molds / float(resources.molding_max_same_part_per_day or 1))
+        # Molding days: ceil(remaining_molds / same_mold_capacity_avg)
+        molding_days = math.ceil(remaining_molds / float(same_mold_capacity_avg or 1))
         
         # Pouring: 1 day
         pouring_days = 1
@@ -138,11 +125,17 @@ def solve_planner_heuristic(
 
     # Iterate through days filling capacity
     for d in range(horizon):
-        remaining_capacity = int(resources.molding_max_per_day)
+        day_res = daily_resources.get(d, {})
+        
+        remaining_capacity = int(day_res.get("molding_capacity", 0))
+        same_mold_capacity = int(day_res.get("same_mold_capacity", 0))
+        pour_capacity_tons = float(day_res.get("pouring_tons_available", 0.0))
+        flask_available = day_res.get("flask_available", {})
+        
+        if remaining_capacity <= 0:
+            continue  # No molding capacity this day
+        
         part_usage: dict[str, int] = {}
-        pour_capacity_kg = int((resources.pour_max_ton_per_day - initial_pour_load.get(d, 0.0)) * 1000)
-        if pour_capacity_kg < 0:
-            pour_capacity_kg = 0
 
         for order in ordered:
             if remaining_capacity <= 0:
@@ -155,47 +148,37 @@ def solve_planner_heuristic(
             if part is None:
                 continue
 
-            max_by_part = resources.molding_max_same_part_per_day - part_usage.get(order.part_id, 0)
+            # Check same_mold constraint
+            max_by_part = same_mold_capacity - part_usage.get(order.part_id, 0)
             if max_by_part <= 0:
                 continue
 
-            metal_per_mold_kg = int(part.net_weight_ton * part.pieces_per_mold * 1000)
-            if metal_per_mold_kg <= 0:
+            # Check pouring capacity constraint
+            metal_per_mold_ton = float(part.net_weight_ton * part.pieces_per_mold)
+            if metal_per_mold_ton <= 0:
                 continue
-            max_by_pour = pour_capacity_kg // metal_per_mold_kg if metal_per_mold_kg > 0 else 0
+            max_by_pour = int(pour_capacity_tons / metal_per_mold_ton) if metal_per_mold_ton > 0 else 0
             if max_by_pour <= 0:
                 continue
 
-            max_qty = min(qty_left, remaining_capacity, max_by_part, max_by_pour)
+            # Check flask availability (already decremented by demolding)
+            flask_type = str(part.flask_type or "").upper()
+            max_by_flasks = int(flask_available.get(flask_type, 0))
+            if max_by_flasks <= 0:
+                continue
+
+            # Determine max qty for this order
+            max_qty = min(qty_left, remaining_capacity, max_by_part, max_by_pour, max_by_flasks)
             if max_qty <= 0:
                 continue
 
-            size = str(part.flask_type or "").upper()
-            max_flasks = int(resources.flask_capacity.get(size, 0))
-            cool_days = int(math.ceil(float(part.cool_hours or 0.0) / 24.0))
-            if cool_days <= 0:
-                cool_days = 1
-
-            # Reduce qty until flasks constraint satisfied
-            qty = max_qty
-            while qty > 0 and not _can_allocate_flasks(
-                size=size,
-                day=d,
-                qty=qty,
-                cool_days=cool_days,
-                max_flasks=int(max_flasks),
-            ):
-                qty -= 1
-
-            if qty <= 0:
-                continue
-
-            schedule.setdefault(order.order_id, {})[d] = qty
-            remaining[order.order_id] = qty_left - qty
-            remaining_capacity -= qty
-            part_usage[order.part_id] = part_usage.get(order.part_id, 0) + qty
-            pour_capacity_kg -= qty * metal_per_mold_kg
-            _reserve_flasks(size=size, day=d, qty=qty, cool_days=cool_days)
+            # Schedule this qty
+            schedule.setdefault(order.order_id, {})[d] = max_qty
+            remaining[order.order_id] = qty_left - max_qty
+            remaining_capacity -= max_qty
+            part_usage[order.part_id] = part_usage.get(order.part_id, 0) + max_qty
+            pour_capacity_tons -= max_qty * metal_per_mold_ton
+            flask_available[flask_type] = max_by_flasks - max_qty
 
     # Check if all orders scheduled
     for order_id, qty_left in remaining.items():

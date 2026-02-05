@@ -47,7 +47,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
     
     with db.connect() as con:
         con.execute("""
-            INSERT INTO sap_vision_snapshot(
+            INSERT INTO core_sap_vision_snapshot(
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (
@@ -56,7 +56,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
             )
         """)
         con.execute("""
-            INSERT INTO sap_vision_snapshot(
+            INSERT INTO core_sap_vision_snapshot(
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (

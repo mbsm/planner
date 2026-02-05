@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 from datetime import date, datetime, timedelta
 
 from nicegui import ui
@@ -925,7 +926,7 @@ def register_pages(repo: Repository) -> None:
                         ui.label(f"Error cargando recursos: {ex}").classes("text-red-600")
             
             def _render_initial_conditions_table(scenario_name: str) -> None:
-                """Render initial conditions (occupied resources from planner_daily_resources)."""
+                """Render initial conditions (occupied resources breakdown by source)."""
                 initial_conditions_container.clear()
                 
                 try:
@@ -941,7 +942,6 @@ def register_pages(repo: Repository) -> None:
                     # Get configured flask types (dynamic)
                     flask_types = resources.get("flask_types", [])
                     flask_codes = [ft['flask_type'] for ft in flask_types]
-                    flask_totals = {ft['flask_type']: ft['qty_total'] for ft in flask_types}
                     
                     if not flask_codes:
                         with initial_conditions_container:
@@ -949,33 +949,41 @@ def register_pages(repo: Repository) -> None:
                             ui.label("Configure tipos de cajas en Config > Planner primero.").classes("text-sm text-slate-500")
                         return
                     
-                    # Read daily resources from database to calculate occupied
-                    daily_rows = repo.planner.get_daily_resources_for_today(scenario_id=scenario_id)
+                    # Get breakdown by source (WIP molds vs completed pieces)
+                    breakdown = repo.planner.get_flask_usage_breakdown(scenario_id=scenario_id)
+                    total_wip_tons = sum(float((breakdown.get(ft) or {}).get('wip_tons', 0.0)) for ft in breakdown)
                     
-                    # Calculate occupied as (total - available) for TODAY
-                    flask_occupied = {}
-                    
-                    if not daily_rows:
-                        # No data for today - might be weekend/holiday or table not generated
-                        with initial_conditions_container:
-                            ui.label("Condiciones Iniciales (Recursos Ocupados)").classes("text-lg font-semibold mb-2")
-                            today_label = date.today().strftime('%d-%m-%Y')
-                            ui.label(f"⚠️ Sin datos para hoy ({today_label}). Puede ser día no laborable o falta regenerar recursos.").classes("text-sm text-amber-600")
-                        return
-                    
-                    for r in daily_rows:
-                        flask_type = r["flask_type"]
-                        available = int(r["available_qty"])
-                        total = flask_totals.get(flask_type, 0)
-                        occupied = max(0, total - available)
-                        flask_occupied[flask_type] = occupied
-                    
-                    # Build single row with flask counts
-                    row_data = {'concepto': 'Cajas Ocupadas (Enfriamiento)'}
-                    
+                    # Build table rows (add tons as its own row by flask type)
+                    rows_data = []
+
+                    # Row 1: Moldes sin fundir (WIP)
+                    row_wip = {'concepto': 'Moldes por Fundir (En Cancha)'}
                     for flask_code in flask_codes:
-                        row_data[f'flask_{flask_code}'] = flask_occupied.get(flask_code, 0)
-                    
+                        wip_count = breakdown.get(flask_code, {}).get('wip_molds', 0)
+                        row_wip[f'flask_{flask_code}'] = math.ceil(wip_count)
+                    rows_data.append(row_wip)
+
+                    # Row 2: Piezas fundidas (completed)
+                    row_completed = {'concepto': 'Piezas Fundidas (Enfriando/Desmoldeo Pendiente)'}
+                    for flask_code in flask_codes:
+                        completed_count = breakdown.get(flask_code, {}).get('completed', 0)
+                        row_completed[f'flask_{flask_code}'] = math.ceil(completed_count)
+                    rows_data.append(row_completed)
+
+                    # Row 3: Tons por fundir (solo moldes por fundir)
+                    row_tons = {'concepto': 'Tons por Fundir (Moldes en cancha)'}
+                    for flask_code in flask_codes:
+                        tons = breakdown.get(flask_code, {}).get('wip_tons', 0.0)
+                        row_tons[f'flask_{flask_code}'] = round(tons, 2)
+                    rows_data.append(row_tons)
+
+                    # Row 4: Total occupied
+                    row_total = {'concepto': 'TOTAL Ocupadas'}
+                    for flask_code in flask_codes:
+                        total_count = breakdown.get(flask_code, {}).get('total_occupied', 0)
+                        row_total[f'flask_{flask_code}'] = math.ceil(total_count)
+                    rows_data.append(row_total)
+
                     # Build dynamic columns
                     columns = [
                         {'name': 'concepto', 'label': 'Concepto', 'field': 'concepto', 'align': 'left'},
@@ -995,14 +1003,12 @@ def register_pages(repo: Repository) -> None:
                         
                         ui.table(
                             columns=columns,
-                            rows=[row_data],
+                            rows=rows_data,
                             row_key='concepto',
-                        ).classes('w-full').props('dense flat')
+                        ).classes('w-full').props('dense flat bordered')
                         
                         today_label = date.today().strftime('%d-%m-%Y')
-                        ui.label(f"📦 Cajas ocupadas HOY ({today_label}) = Total config - Disponible").classes("text-xs text-slate-500 mt-1")
-                        ui.label(f"💡 Los valores en 'Recursos Disponibles' muestran el MÍNIMO de la semana (puede ser menor si hubo ocupación días anteriores)").classes("text-xs text-slate-400 mt-0.5")
-                        
+                        ui.label(f"📦 Cajas ocupadas HOY ({today_label}) según reporte de desmoldeo").classes("text-xs text-slate-500 mt-1")
                 except Exception as ex:
                     with initial_conditions_container:
                         ui.label(f"Error calculando condiciones iniciales: {ex}").classes("text-red-600")
@@ -1692,6 +1698,7 @@ def register_pages(repo: Repository) -> None:
             tbl = ui.table(
                 columns=[
                     {"name": "material", "label": "Material", "field": "material"},
+                    {"name": "descripcion", "label": "Descripción", "field": "descripcion_material"},
                     {"name": "familia", "label": "Familia", "field": "family_id"},
                     {"name": "aleacion", "label": "Aleación", "field": "aleacion"},
                     {"name": "flask", "label": "Flask", "field": "flask_size"},
@@ -2065,9 +2072,7 @@ def register_pages(repo: Repository) -> None:
 
                 def _load_click() -> None:
                     _, res = _load_resources(str(scenario_in.value or "default"))
-                    molding_max.value = int(res.get("molding_max_per_day") or 0)
                     molding_same.value = int(res.get("molding_max_same_part_per_day") or 0)
-                    pour_max.value = float(res.get("pour_max_ton_per_day") or 0.0)
                     molding_shift.value = int(res.get("molding_max_per_shift") or 0)
                     pour_shift.value = float(res.get("pour_max_ton_per_shift") or 0.0)
                     
@@ -2086,7 +2091,7 @@ def register_pages(repo: Repository) -> None:
                     horizon_days.value = int(repo.data.get_config(key="planner_horizon_days", default="30") or 30)
                     horizon_buffer.value = int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10)
                     demolding_cancha.value = str(repo.data.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400")
-                    for w in (molding_max, molding_same, pour_max, molding_shift, pour_shift, notes, holidays):
+                    for w in (molding_same, molding_shift, pour_shift, notes, holidays):
                         w.update()
                     for w in (horizon_days, horizon_buffer, demolding_cancha):
                         w.update()
@@ -2100,36 +2105,30 @@ def register_pages(repo: Repository) -> None:
             scenario_id, res = _load_resources(str(scenario_in.value or "default"))
 
             with ui.row().classes("w-full gap-6 items-start pt-3"):
-                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                with ui.card().classes("flex-1 p-4"):
                     ui.label("Capacidades").classes("text-lg font-medium text-slate-700 mb-2")
-                    with ui.column().classes("w-full gap-2"):
-                        molding_max = ui.number("Máx. moldes/día", value=int(res.get("molding_max_per_day") or 0), min=0, step=1)
-                        molding_same = ui.number(
-                            "Máx. mismo material/día",
-                            value=int(res.get("molding_max_same_part_per_day") or 0),
-                            min=0,
-                            step=1,
-                        )
-                        pour_max = ui.number(
-                            "Máx. colada (ton/día)",
-                            value=float(res.get("pour_max_ton_per_day") or 0.0),
-                            min=0,
-                            step=0.1,
-                        )
-                        molding_max.props("outlined dense")
-                        molding_same.props("outlined dense")
-                        pour_max.props("outlined dense")
-
-                with ui.card().classes("flex-1 min-w-[420px] p-4"):
-                    ui.label("Turnos (configuración por día)").classes("text-lg font-medium text-slate-700 mb-2")
                     ui.label("Define capacidades por turno y turnos por día de la semana.").classes("text-xs text-slate-500 mb-3")
                     
-                    molding_shift = ui.number("Moldes por turno", value=int(res.get("molding_max_per_shift") or 0), min=0, step=1).classes("w-full")
-                    pour_shift = ui.number("Toneladas por turno", value=float(res.get("pour_max_ton_per_shift") or 0.0), min=0, step=0.1).classes("w-full")
-                    molding_shift.props("outlined dense")
-                    pour_shift.props("outlined dense")
+                    with ui.row().classes("w-full gap-4 mb-4"):
+                        with ui.column().classes("flex-1"):
+                            ui.label("Moldeo").classes("text-sm font-semibold text-slate-600 mb-1")
+                            molding_shift = ui.number("Moldes por turno", value=int(res.get("molding_max_per_shift") or 0), min=0, step=1).classes("w-full")
+                            molding_shift.props("outlined dense")
+                            molding_same = ui.number(
+                                "Máx. mismo material/día",
+                                value=int(res.get("molding_max_same_part_per_day") or 0),
+                                min=0,
+                                step=1,
+                            ).classes("w-full")
+                            molding_same.props("outlined dense")
+                        
+                        with ui.column().classes("flex-1"):
+                            ui.label("Fusión").classes("text-sm font-semibold text-slate-600 mb-1")
+                            pour_shift = ui.number("Toneladas por turno", value=float(res.get("pour_max_ton_per_shift") or 0.0), min=0, step=0.1).classes("w-full")
+                            pour_shift.props("outlined dense")
                     
-                    ui.label("Turnos por día de la semana").classes("text-sm font-medium text-slate-600 mt-3 mb-1")
+                    ui.separator().classes("my-2")
+                    ui.label("Turnos por día de la semana").classes("text-sm font-medium text-slate-600 mb-2")
                     
                     molding_shifts_dict = res.get("molding_shifts") or {}
                     pour_shifts_dict = res.get("pour_shifts") or {}
@@ -2138,28 +2137,45 @@ def register_pages(repo: Repository) -> None:
                     pour_shifts_inputs = {}
                     
                     with ui.column().classes("w-full gap-1"):
+                        with ui.row().classes("w-full items-center gap-2 mb-1"):
+                            ui.label("Día").classes("w-20 text-xs font-medium text-slate-500")
+                            ui.label("Moldeo").classes("w-16 text-xs font-medium text-slate-500 text-center")
+                            ui.label("Fusión").classes("w-16 text-xs font-medium text-slate-500 text-center")
+                            ui.label("Cap. Moldeo/día").classes("flex-1 text-xs font-medium text-slate-500 text-right")
+                            ui.label("Cap. Fusión/día").classes("flex-1 text-xs font-medium text-slate-500 text-right")
+                        
                         for day_name, day_label in zip(day_names, day_labels):
                             with ui.row().classes("w-full items-center gap-2"):
                                 ui.label(day_label).classes("w-20 text-sm")
                                 molding_shifts_inputs[day_name] = ui.number(
-                                    "M",
+                                    "",
                                     value=int(molding_shifts_dict.get(day_name, 0)),
                                     min=0,
                                     max=3,
                                     step=1,
-                                ).classes("w-16").props("outlined dense")
+                                ).classes("w-16").props("outlined dense hide-bottom-space")
                                 molding_shifts_inputs[day_name].tooltip("Turnos de moldeo")
                                 pour_shifts_inputs[day_name] = ui.number(
-                                    "F",
+                                    "",
                                     value=int(pour_shifts_dict.get(day_name, 0)),
                                     min=0,
                                     max=3,
                                     step=1,
-                                ).classes("w-16").props("outlined dense")
+                                ).classes("w-16").props("outlined dense hide-bottom-space")
                                 pour_shifts_inputs[day_name].tooltip("Turnos de fusión")
+                                
+                                # Capacidad calculada de moldeo
+                                molding_cap = int(molding_shifts_dict.get(day_name, 0)) * int(res.get("molding_max_per_shift") or 0)
+                                ui.label(f"{molding_cap} moldes").classes("flex-1 text-sm text-right text-slate-600")
+                                
+                                # Capacidad calculada de fusión
+                                pour_cap = int(pour_shifts_dict.get(day_name, 0)) * float(res.get("pour_max_ton_per_shift") or 0.0)
+                                ui.label(f"{pour_cap:.1f} ton").classes("flex-1 text-sm text-right text-slate-600")
             
             with ui.row().classes("w-full gap-6 items-start pt-3"):
+                with ui.card().classes("w-full p-4"):
                     ui.label("Flasks (tipos configurables)").classes("text-lg font-medium text-slate-700 mb-2")
+                    
                     flask_table = ui.table(
                         columns=[
                             {"name": "flask_type", "label": "Código", "field": "flask_type", "sortable": True},
@@ -2172,89 +2188,132 @@ def register_pages(repo: Repository) -> None:
                         row_key="flask_type",
                         pagination={"rowsPerPage": 10},
                     ).classes("w-full")
-
-                    flask_type_in = ui.input("Código", placeholder="Ej: JUMBO").classes("w-full")
-                    flask_label_in = ui.input("Etiqueta", placeholder="Nombre descriptivo").classes("w-full")
-                    flask_qty_in = ui.number("Cantidad total", value=0, min=0, step=1).classes("w-full")
-                    flask_codes_in = ui.input("Códigos (prefijos separados por coma)", placeholder="101, 102").classes("w-full")
-                    flask_notes_in = ui.input("Notas", placeholder="Opcional").classes("w-full")
-                    for w in (flask_type_in, flask_label_in, flask_qty_in, flask_codes_in, flask_notes_in):
-                        w.props("outlined dense")
-
-                    def _fill_form(row: dict | None) -> None:
-                        if not row:
-                            flask_type_in.value = ""
-                            flask_label_in.value = ""
-                            flask_qty_in.value = 0
-                            flask_codes_in.value = ""
-                            flask_notes_in.value = ""
+                    
+                    # Dialog para editar/crear flask
+                    with ui.dialog() as flask_dialog, ui.card().classes("w-[500px] p-6"):
+                        flask_dialog_title_label = ui.label("Editar Flask").classes("text-xl font-semibold mb-4")
+                        
+                        flask_type_edit = ui.input("Código", placeholder="Ej: JUMBO").classes("w-full")
+                        flask_label_edit = ui.input("Etiqueta", placeholder="Nombre descriptivo").classes("w-full")
+                        flask_qty_edit = ui.number("Cantidad total", value=0, min=0, step=1).classes("w-full")
+                        flask_codes_edit = ui.input("Códigos (prefijos separados por coma)", placeholder="101, 102").classes("w-full")
+                        flask_notes_edit = ui.input("Notas", placeholder="Opcional").classes("w-full")
+                        
+                        for w in (flask_type_edit, flask_label_edit, flask_qty_edit, flask_codes_edit, flask_notes_edit):
+                            w.props("outlined dense")
+                        
+                        with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                            def save_flask_from_dialog() -> None:
+                                sid = repo.planner.ensure_planner_scenario(name=str(scenario_in.value or "default"))
+                                repo.planner.upsert_planner_flask_type(
+                                    scenario_id=sid,
+                                    flask_type=str(flask_type_edit.value or "").strip(),
+                                    qty_total=int(flask_qty_edit.value or 0),
+                                    codes_csv=str(flask_codes_edit.value or "").strip(),
+                                    label=str(flask_label_edit.value or "").strip(),
+                                    notes=str(flask_notes_edit.value or "").strip(),
+                                )
+                                flask_dialog.close()
+                                _load_click()
+                                ui.notify("Flask guardado", type="positive")
+                            
+                            def delete_flask_from_dialog() -> None:
+                                sid = repo.planner.ensure_planner_scenario(name=str(scenario_in.value or "default"))
+                                flask_code = str(flask_type_edit.value or "").strip()
+                                if not flask_code:
+                                    ui.notify("Debe especificar un código de flask", type="warning")
+                                    return
+                                repo.planner.delete_planner_flask_type(
+                                    scenario_id=sid,
+                                    flask_type=flask_code,
+                                )
+                                flask_dialog.close()
+                                _load_click()
+                                ui.notify("Flask eliminado", type="positive")
+                            
+                            ui.button("Guardar", on_click=save_flask_from_dialog).props("color=primary")
+                            ui.button("Eliminar", on_click=delete_flask_from_dialog).props("color=negative outline")
+                            ui.button("Cancelar", on_click=flask_dialog.close).props("outline")
+                    
+                    def open_flask_editor(*, flask_type: str = "", row: dict | None = None) -> None:
+                        if row is None and not flask_type:
+                            # Nuevo flask
+                            flask_dialog_title_label.text = "Nuevo Flask"
+                            flask_type_edit.value = ""
+                            flask_label_edit.value = ""
+                            flask_qty_edit.value = 0
+                            flask_codes_edit.value = ""
+                            flask_notes_edit.value = ""
+                            flask_type_edit.props("outlined dense")
                         else:
-                            flask_type_in.value = str(row.get("flask_type") or "")
-                            flask_label_in.value = str(row.get("label") or "")
-                            flask_qty_in.value = int(row.get("qty_total") or 0)
-                            flask_codes_in.value = str(row.get("codes_csv") or "")
-                            flask_notes_in.value = str(row.get("notes") or "")
-                        for w in (flask_type_in, flask_label_in, flask_qty_in, flask_codes_in, flask_notes_in):
+                            # Editar existente
+                            ft = flask_type or (row.get('flask_type', '') if row else '')
+                            flask_dialog_title_label.text = f"Editar Flask: {ft}"
+                            if row is None:
+                                # Buscar fila
+                                current_rows = list(getattr(flask_table, "rows", []) or [])
+                                row = next((r for r in current_rows if r.get("flask_type") == flask_type), None)
+                            
+                            if row:
+                                flask_type_edit.value = str(row.get("flask_type") or "")
+                                flask_label_edit.value = str(row.get("label") or "")
+                                flask_qty_edit.value = int(row.get("qty_total") or 0)
+                                flask_codes_edit.value = str(row.get("codes_csv") or "")
+                                flask_notes_edit.value = str(row.get("notes") or "")
+                                flask_type_edit.props("outlined dense readonly")
+                        
+                        for w in (flask_type_edit, flask_label_edit, flask_qty_edit, flask_codes_edit, flask_notes_edit):
                             w.update()
-
-                    def _on_row_click(e) -> None:
-                        try:
-                            row = (e.args or {}).get("row")
-                        except Exception:
-                            row = None
-                        if isinstance(row, dict):
-                            _fill_form(row)
-
-                    flask_table.on("rowClick", _on_row_click)
-
-                    def _save_flask() -> None:
-                        sid = repo.planner.ensure_planner_scenario(name=str(scenario_in.value or "default"))
-                        repo.planner.upsert_planner_flask_type(
-                            scenario_id=sid,
-                            flask_type=str(flask_type_in.value or ""),
-                            qty_total=int(flask_qty_in.value or 0),
-                            codes_csv=str(flask_codes_in.value or ""),
-                            label=str(flask_label_in.value or ""),
-                            notes=str(flask_notes_in.value or ""),
-                        )
-                        _load_click()
-
-                    def _delete_flask() -> None:
-                        sid = repo.planner.ensure_planner_scenario(name=str(scenario_in.value or "default"))
-                        repo.planner.delete_planner_flask_type(
-                            scenario_id=sid,
-                            flask_type=str(flask_type_in.value or ""),
-                        )
-                        _fill_form(None)
-                        _load_click()
-
-                    with ui.row().classes("gap-2 pt-2"):
-                        ui.button("Guardar flask", on_click=_save_flask).props("color=primary")
-                        ui.button("Eliminar", on_click=_delete_flask).props("outline")
+                        flask_dialog.open()
+                    
+                    def on_flask_row_event(e):
+                        args = getattr(e, "args", None)
+                        if isinstance(args, dict):
+                            row = args.get("row")
+                            if isinstance(row, dict):
+                                flask_type = str(row.get("flask_type") or "")
+                                if flask_type:
+                                    open_flask_editor(flask_type=flask_type, row=row)
+                    
+                    flask_table.on("rowDblClick", on_flask_row_event)
+                    flask_table.on("rowDblclick", on_flask_row_event)
+                    
+                    with ui.row().classes("w-full justify-start gap-2 mt-3"):
+                        ui.button("Agregar Flask", icon="add", on_click=lambda: open_flask_editor()).props("color=primary outline")
 
             with ui.row().classes("w-full gap-6 items-start pt-3"):
                 with ui.card().classes("flex-1 min-w-[320px] p-4"):
                     ui.label("Condiciones Iniciales (Desmoldeo)").classes("text-lg font-medium text-slate-700 mb-2")
                     ui.label("Configuración para lectura de flasks en enfriamiento.").classes("text-xs text-slate-500 mb-2")
-                    demolding_cancha = ui.input(
-                        "Cancha (filtro)",
-                        value=str(repo.data.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"),
-                        placeholder="Ej: TCF-L1400"
-                    ).classes("w-full")
-                    demolding_cancha.props("outlined dense")
-                    ui.label("Solo se consideran piezas en esta cancha para calcular flasks ocupadas.").classes("text-xs text-slate-500 mt-1")
+                    default_canchas = "TCF-L1000,TCF-L1100,TCF-L1200,TCF-L1300,TCF-L1400,TCF-L1500,TCF-L1600,TCF-L1700,TCF-L3000,TDE-D0001,TDE-D0002,TDE-D0003"
+                    demolding_cancha = ui.textarea(
+                        "Canchas (separadas por coma)",
+                        value=str(repo.data.get_config(key="planner_demolding_cancha", default=default_canchas) or default_canchas),
+                        placeholder="Ej: TCF-L1000, TCF-L1400, TDE-D0001"
+                    ).classes("w-full").props("outlined dense rows=3")
+                    ui.label("Solo se consideran piezas en estas canchas para calcular flasks ocupadas y filtrar importación.").classes("text-xs text-slate-500 mt-1")
                 
                 with ui.card().classes("flex-1 min-w-[320px] p-4"):
                     ui.label("Horizonte de Planificación").classes("text-lg font-medium text-slate-700 mb-2")
                     ui.label("Días hacia adelante para generar disponibilidad.").classes("text-xs text-slate-500 mb-2")
-                    horizon_days_input = ui.number(
+                    horizon_days = ui.number(
                         "Horizonte (días)",
-                        value=int(repo.data.get_config(key="planner_horizon_days", default="180") or 180),
+                        value=int(repo.data.get_config(key="planner_horizon_days", default="30") or 30),
                         min=30,
                         max=365,
                         step=1,
                     ).classes("w-full")
-                    horizon_days_input.props("outlined dense")
+                    horizon_days.props("outlined dense")
+                    
+                    horizon_buffer = ui.number(
+                        "Buffer (días)",
+                        value=int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10),
+                        min=0,
+                        max=60,
+                        step=1,
+                    ).classes("w-full")
+                    horizon_buffer.props("outlined dense")
+                    
                     ui.label("Se usa el mínimo entre este valor y los días para cubrir todos los pedidos Vision.").classes("text-xs text-slate-500 mt-1")
 
             ui.separator().classes("my-4")
@@ -2283,11 +2342,15 @@ def register_pages(repo: Repository) -> None:
                     molding_shifts = {day_name: int(molding_shifts_inputs[day_name].value or 0) for day_name in day_names}
                     pour_shifts = {day_name: int(pour_shifts_inputs[day_name].value or 0) for day_name in day_names}
                     
+                    # Calculate max per day based on shifts (no longer stored separately)
+                    molding_max_per_day = max(molding_shifts.values()) * int(molding_shift.value or 0)
+                    pour_max_ton_per_day = max(pour_shifts.values()) * float(pour_shift.value or 0.0)
+                    
                     repo.planner.upsert_planner_resources(
                         scenario_id=scenario_id,
-                        molding_max_per_day=int(molding_max.value or 0),
+                        molding_max_per_day=molding_max_per_day,
                         molding_max_same_part_per_day=int(molding_same.value or 0),
-                        pour_max_ton_per_day=float(pour_max.value or 0.0),
+                        pour_max_ton_per_day=pour_max_ton_per_day,
                         molding_max_per_shift=int(molding_shift.value or 0),
                         molding_shifts=molding_shifts,
                         pour_max_ton_per_shift=float(pour_shift.value or 0.0),
@@ -2300,7 +2363,11 @@ def register_pages(repo: Repository) -> None:
                     )
                     repo.data.set_config(
                         key="planner_horizon_days",
-                        value=str(int(horizon_days_input.value or 180)),
+                        value=str(int(horizon_days.value or 30)),
+                    )
+                    repo.data.set_config(
+                        key="planner_horizon_buffer_days",
+                        value=str(int(horizon_buffer.value or 10)),
                     )
                     repo.data.set_config(
                         key="planner_demolding_cancha",

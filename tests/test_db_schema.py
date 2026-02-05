@@ -40,26 +40,24 @@ def test_ensure_schema_creates_all_tables(temp_db):
         tables = {row[0] for row in cursor.fetchall()}
 
     # FASE 1.1: Config tables
-    assert "family_catalog" in tables
-    assert "app_config" in tables
-    assert "material_master" in tables
-    assert "process" in tables
-    assert "resource" in tables
-    assert "resource_constraint" in tables
-    assert "process_attribute_def" in tables
+    assert "core_family_catalog" in tables
+    assert "core_config" in tables
+    assert "core_material_master" in tables
+    assert "core_processes" in tables
+    # Note: resource, resource_constraint, process_attribute_def were legacy tables - removed
 
     # FASE 1.2: SAP tables
-    assert "sap_mb52_snapshot" in tables
-    assert "sap_vision_snapshot" in tables
+    assert "core_sap_mb52_snapshot" in tables
+    assert "core_sap_vision_snapshot" in tables
     
     # FASE 1.3: Job tables
-    assert "job" in tables
-    assert "job_unit" in tables
+    assert "dispatcher_job" in tables
+    assert "dispatcher_job_unit" in tables
 
     # FASE 1.5-1.6: State & KPI tables
-    assert "vision_kpi_daily" in tables
-    assert "program_in_progress" in tables
-    assert "program_in_progress_item" in tables
+    assert "core_vision_kpi_daily" in tables
+    assert "dispatcher_program_in_progress" in tables
+    assert "dispatcher_program_in_progress_item" in tables
 
     # Obsolete dispatch tables should be absent
     assert "dispatch_queue_run" not in tables
@@ -76,7 +74,7 @@ def test_material_master_structure(temp_db):
 
     with db.connect() as con:
         cursor = con.cursor()
-        cursor.execute("PRAGMA table_info(material_master)")
+        cursor.execute("PRAGMA table_info(core_material_master)")
         columns = {row[1]: row[2] for row in cursor.fetchall()}  # name: type
 
     expected_columns = {
@@ -97,7 +95,7 @@ def test_material_master_structure(temp_db):
     }
 
     for col_name, col_type in expected_columns.items():
-        assert col_name in columns, f"Column {col_name} missing from material_master"
+        assert col_name in columns, f"Column {col_name} missing from core_material_master"
         assert columns[col_name] == col_type, f"Column {col_name} has type {columns[col_name]}, expected {col_type}"
 
 
@@ -108,7 +106,7 @@ def test_job_structure(temp_db):
 
     with db.connect() as con:
         cursor = con.cursor()
-        cursor.execute("PRAGMA table_info(job)")
+        cursor.execute("PRAGMA table_info(dispatcher_job)")
         columns = {row[1]: row[2] for row in cursor.fetchall()}
 
     expected_columns = {
@@ -128,7 +126,7 @@ def test_job_structure(temp_db):
     }
 
     for col_name in expected_columns:
-        assert col_name in columns, f"Column {col_name} missing from job table"
+        assert col_name in columns, f"Column {col_name} missing from dispatcher_job table"
 
 
 def test_seeds_family_catalog(temp_db):
@@ -138,7 +136,7 @@ def test_seeds_family_catalog(temp_db):
 
     with db.connect() as con:
         cursor = con.cursor()
-        cursor.execute("SELECT config_key, config_value FROM app_config WHERE config_key IN ('sap_center', 'sap_material_prefixes')")
+        cursor.execute("SELECT config_key, config_value FROM core_config WHERE config_key IN ('sap_center', 'sap_material_prefixes')")
         config = {row[0]: row[1] for row in cursor.fetchall()}
 
     assert config.get("sap_center") == "4000"
@@ -177,7 +175,7 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
     with db.connect() as con:
         # Update config values for terminaciones process (seeds may have created defaults)
         con.executemany("""
-            INSERT INTO app_config (config_key, config_value)
+            INSERT INTO core_config (config_key, config_value)
             VALUES (?, ?)
             ON CONFLICT(config_key) DO UPDATE SET config_value=excluded.config_value
         """, [
@@ -185,9 +183,9 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
             ("sap_almacen_terminaciones", "4022"),
         ])
         
-        # Insert MB52 rows into sap_mb52_snapshot (v0.2 table)
+        # Insert MB52 rows into core_sap_mb52_snapshot (v0.2 table)
         con.executemany("""
-            INSERT INTO sap_mb52_snapshot (
+            INSERT INTO core_sap_mb52_snapshot (
                 centro, almacen, material, lote,
                 documento_comercial, posicion_sd,
                 libre_utilizacion, en_control_calidad,
@@ -200,9 +198,9 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
             ("4000", "4022", "436002", "ABC124", "5000002", "20", 1, 0, None, 124, 1),  # alphanumeric lote (test)
         ])
         
-        # Insert Vision rows into sap_vision_snapshot (v0.2 table)
+        # Insert Vision rows into core_sap_vision_snapshot (v0.2 table)
         con.executemany("""
-            INSERT INTO sap_vision_snapshot (pedido, posicion, fecha_de_pedido, cod_material)
+            INSERT INTO core_sap_vision_snapshot (pedido, posicion, fecha_de_pedido, cod_material)
             VALUES (?, ?, ?, ?)
         """, [
             ("5000001", "10", "2024-03-15", "436001"),
@@ -220,7 +218,7 @@ def test_auto_test_detection_in_rebuild_orders(temp_db):
         cursor = con.cursor()
         cursor.execute("""
             SELECT pedido, posicion, material, cantidad, is_test
-            FROM orders
+            FROM core_orders
             WHERE process = 'terminaciones'
             ORDER BY pedido, posicion
         """)

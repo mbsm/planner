@@ -1,4 +1,4 @@
-"""Dispatcher repository implementation.
+﻿"""Dispatcher repository implementation.
 
 Extracted from _RepositoryImpl to separate dispatcher concerns from data layer.
 """
@@ -36,7 +36,7 @@ class DispatcherRepositoryImpl:
         process = self.data_repo._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente FROM orders WHERE process = ?",
+                "SELECT pedido, posicion, material, cantidad, fecha_de_pedido, primer_correlativo, ultimo_correlativo, tiempo_proceso_min, is_test, cliente FROM core_orders WHERE process = ?",
                 (process,),
             ).fetchall()
         out: list[Order] = []
@@ -61,7 +61,7 @@ class DispatcherRepositoryImpl:
         process = self.data_repo._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT job_id, pedido, posicion, material, qty, priority, fecha_de_pedido, is_test, notes, corr_min, corr_max, cliente FROM job WHERE process_id = ?",
+                "SELECT job_id, pedido, posicion, material, qty, priority, fecha_de_pedido, is_test, notes, corr_min, corr_max, cliente FROM dispatcher_job WHERE process_id = ?",
                 (process,),
             ).fetchall()
         
@@ -88,7 +88,7 @@ class DispatcherRepositoryImpl:
     def get_parts_model(self) -> list[Part]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM material_master"
+                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM core_material_master"
             ).fetchall()
         return [
             Part(
@@ -195,7 +195,7 @@ class DispatcherRepositoryImpl:
         process = self.data_repo._normalize_process(process)
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT line_id, line_name, families_json, mec_perf_inclinada, sobre_medida_mecanizado FROM line_config WHERE process = ? ORDER BY line_id",
+                "SELECT line_id, line_name, families_json, mec_perf_inclinada, sobre_medida_mecanizado FROM dispatcher_line_config WHERE process = ? ORDER BY line_id",
                 (process,),
             ).fetchall()
         out: list[dict] = []
@@ -242,26 +242,26 @@ class DispatcherRepositoryImpl:
             name = f"Línea {int(line_id)}"
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO line_config(process, line_id, line_name, families_json, mec_perf_inclinada, sobre_medida_mecanizado) "
+                "INSERT INTO dispatcher_line_config(process, line_id, line_name, families_json, mec_perf_inclinada, sobre_medida_mecanizado) "
                 "VALUES(?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(process, line_id) DO UPDATE SET "
                 "families_json=excluded.families_json, "
-                "line_name=COALESCE(excluded.line_name, line_config.line_name), "
+                "line_name=COALESCE(excluded.line_name, dispatcher_line_config.line_name), "
                 "mec_perf_inclinada=excluded.mec_perf_inclinada, "
                 "sobre_medida_mecanizado=excluded.sobre_medida_mecanizado",
                 (process, int(line_id), name, families_json, int(mec_perf_inclinada), int(sobre_medida_mecanizado)),
             )
 
             # Invalidate cached program for this process
-            con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+            con.execute("DELETE FROM dispatcher_last_program WHERE process = ?", (process,))
         
         self.data_repo.log_audit("CONFIG", "Upsert Line", f"Proc: {process}, ID: {line_id}, Name: {name}, Fams: {len(families)}")
 
     def delete_dispatch_line(self, *, process: str = "terminaciones", line_id: int) -> None:
         process = self.data_repo._normalize_process(process)
         with self.db.connect() as con:
-            con.execute("DELETE FROM line_config WHERE process = ? AND line_id = ?", (process, int(line_id)))
-            con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+            con.execute("DELETE FROM dispatcher_line_config WHERE process = ? AND line_id = ?", (process, int(line_id)))
+            con.execute("DELETE FROM dispatcher_last_program WHERE process = ?", (process,))
         
         self.data_repo.log_audit("CONFIG", "Delete Line", f"Proc: {process}, ID: {line_id}")
 
@@ -294,7 +294,7 @@ class DispatcherRepositoryImpl:
         with self.db.connect() as con:
             try:
                 rows = con.execute(
-                    "SELECT process, pedido, posicion, is_test, split_id, line_id, qty, marked_at FROM program_in_progress_item WHERE process=? ORDER BY marked_at ASC",
+                    "SELECT process, pedido, posicion, is_test, split_id, line_id, qty, marked_at FROM dispatcher_program_in_progress_item WHERE process=? ORDER BY marked_at ASC",
                     (process,),
                 ).fetchall()
                 return [
@@ -313,7 +313,7 @@ class DispatcherRepositoryImpl:
             except Exception:
                 # Backward-compatible fallback (older DBs).
                 rows = con.execute(
-                    "SELECT process, pedido, posicion, is_test, line_id, marked_at FROM program_in_progress WHERE process=? ORDER BY marked_at ASC",
+                    "SELECT process, pedido, posicion, is_test, line_id, marked_at FROM dispatcher_program_in_progress WHERE process=? ORDER BY marked_at ASC",
                     (process,),
                 ).fetchall()
         return [
@@ -482,13 +482,13 @@ class DispatcherRepositoryImpl:
         return pinned_program, remaining_jobs
 
     def _refresh_program_with_locks(self, process: str) -> None:
-        """Update last_program in-place with current locks, avoiding full regen."""
+        """Update dispatcher_last_program in-place with current locks, avoiding full regen."""
         last = self.load_last_program(process=process)
 
         if last is None:
             # No cache to update; delete to ensure next load generates fresh
             with self.db.connect() as con:
-                con.execute("DELETE FROM last_program WHERE process = ?", (process,))
+                con.execute("DELETE FROM dispatcher_last_program WHERE process = ?", (process,))
             return
 
         program = last["program"]
@@ -503,7 +503,7 @@ class DispatcherRepositoryImpl:
         
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO last_program(process, program_json, generated_on) VALUES(?, ?, ?) "
+                "INSERT INTO dispatcher_last_program(process, program_json, generated_on) VALUES(?, ?, ?) "
                 "ON CONFLICT(process) DO UPDATE SET program_json=excluded.program_json, generated_on=excluded.generated_on",
                 (process, payload, now)
             )
@@ -535,17 +535,17 @@ class DispatcherRepositoryImpl:
             # Split-aware: create/update with provided split_id and qty
             try:
                 con.execute(
-                    "INSERT INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                    "INSERT INTO dispatcher_program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(process, pedido, posicion, is_test, split_id) DO UPDATE SET "
-                    "line_id=excluded.line_id, qty=excluded.qty, marked_at=program_in_progress_item.marked_at",
+                    "line_id=excluded.line_id, qty=excluded.qty, marked_at=dispatcher_program_in_progress_item.marked_at",
                     (process, pedido_s, posicion_s, is_test_i, split_id_final, int(line_id), qty_final, marked_at),
                 )
             except Exception:
                 # Backward-compatible fallback.
                 con.execute(
-                    "INSERT INTO program_in_progress(process, pedido, posicion, is_test, line_id, marked_at) VALUES(?, ?, ?, ?, ?, ?) "
+                    "INSERT INTO dispatcher_program_in_progress(process, pedido, posicion, is_test, line_id, marked_at) VALUES(?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(process, pedido, posicion, is_test) DO UPDATE SET "
-                    "line_id=excluded.line_id, marked_at=program_in_progress.marked_at",
+                    "line_id=excluded.line_id, marked_at=dispatcher_program_in_progress.marked_at",
                     (process, pedido_s, posicion_s, is_test_i, int(line_id), marked_at),
                 )
             
@@ -577,7 +577,7 @@ class DispatcherRepositoryImpl:
                 # Delete only specific split
                 try:
                     con.execute(
-                        "DELETE FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
+                        "DELETE FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
                         (process, pedido_s, posicion_s, is_test_i, int(split_id)),
                     )
                 except Exception:
@@ -586,7 +586,7 @@ class DispatcherRepositoryImpl:
                 # Delete all splits for this order/position
                 try:
                     con.execute(
-                        "DELETE FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                        "DELETE FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                         (process, pedido_s, posicion_s, is_test_i),
                     )
                 except Exception:
@@ -595,7 +595,7 @@ class DispatcherRepositoryImpl:
                 # Legacy cleanup.
                 try:
                     con.execute(
-                        "DELETE FROM program_in_progress WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                        "DELETE FROM dispatcher_program_in_progress WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                         (process, pedido_s, posicion_s, is_test_i),
                     )
                 except Exception:
@@ -642,12 +642,12 @@ class DispatcherRepositoryImpl:
             try:
                 if split_id is None:
                     con.execute(
-                        "UPDATE program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                        "UPDATE dispatcher_program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                         (int(line_id), process, pedido_s, posicion_s, is_test_i),
                     )
                 else:
                     con.execute(
-                        "UPDATE program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
+                        "UPDATE dispatcher_program_in_progress_item SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
                         (int(line_id), process, pedido_s, posicion_s, is_test_i, int(split_id)),
                     )
                 
@@ -657,7 +657,7 @@ class DispatcherRepositoryImpl:
             except Exception:
                 # Backward-compatible fallback.
                 con.execute(
-                    "UPDATE program_in_progress SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    "UPDATE dispatcher_program_in_progress SET line_id=? WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                     (int(line_id), process, pedido_s, posicion_s, is_test_i),
                 )
                 
@@ -715,35 +715,35 @@ class DispatcherRepositoryImpl:
             try:
                 # Ensure there is at least split_id=1 (carry its line_id/marked_at).
                 row = con.execute(
-                    "SELECT line_id, marked_at FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                    "SELECT line_id, marked_at FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
                     (process, pedido_s, posicion_s, is_test_i),
                 ).fetchone()
                 if row is None:
                     # If not marked, default to line 1 (UI normally marks first).
                     con.execute(
-                        "INSERT OR IGNORE INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 1, 1, 0, ?)",
+                        "INSERT OR IGNORE INTO dispatcher_program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 1, 1, 0, ?)",
                         (process, pedido_s, posicion_s, is_test_i, now),
                     )
                     row = con.execute(
-                        "SELECT line_id, marked_at FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                        "SELECT line_id, marked_at FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
                         (process, pedido_s, posicion_s, is_test_i),
                     ).fetchone()
 
                 line_id = int(row[0])
 
                 existing = con.execute(
-                    "SELECT COUNT(*) FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
+                    "SELECT COUNT(*) FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=?",
                     (process, pedido_s, posicion_s, is_test_i),
                 ).fetchone()
                 if int(existing[0] or 0) != 1:
                     raise ValueError("Ya existe un split (o múltiples partes) para esta fila")
 
                 con.execute(
-                    "UPDATE program_in_progress_item SET qty=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
+                    "UPDATE dispatcher_program_in_progress_item SET qty=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=1",
                     (int(qty1), process, pedido_s, posicion_s, is_test_i),
                 )
                 con.execute(
-                    "INSERT INTO program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 2, ?, ?, ?)",
+                    "INSERT INTO dispatcher_program_in_progress_item(process, pedido, posicion, is_test, split_id, line_id, qty, marked_at) VALUES(?, ?, ?, ?, 2, ?, ?, ?)",
                     (process, pedido_s, posicion_s, is_test_i, int(line_id), int(qty2), now),
                 )
             except Exception:
@@ -777,7 +777,7 @@ class DispatcherRepositoryImpl:
         with self.db.connect() as con:
             try:
                 con.execute(
-                    "DELETE FROM program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
+                    "DELETE FROM dispatcher_program_in_progress_item WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
                     (process, pedido_s, posicion_s, is_test_i, int(split_id)),
                 )
             except Exception:
@@ -810,7 +810,7 @@ class DispatcherRepositoryImpl:
         with self.db.connect() as con:
             try:
                 con.execute(
-                    "UPDATE program_in_progress_item SET qty=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
+                    "UPDATE dispatcher_program_in_progress_item SET qty=? WHERE process=? AND pedido=? AND posicion=? AND is_test=? AND split_id=?",
                     (int(qty), process, pedido_s, posicion_s, is_test_i, int(split_id)),
                 )
             except Exception:
@@ -1030,7 +1030,7 @@ class DispatcherRepositoryImpl:
         generated_on = datetime.now().isoformat(timespec="seconds")
         with self.db.connect() as con:
             con.execute(
-                "INSERT INTO last_program(process, generated_on, program_json) VALUES(?, ?, ?) "
+                "INSERT INTO dispatcher_last_program(process, generated_on, program_json) VALUES(?, ?, ?) "
                 "ON CONFLICT(process) DO UPDATE SET generated_on=excluded.generated_on, program_json=excluded.program_json",
                 (process, generated_on, payload),
             )
@@ -1047,7 +1047,7 @@ class DispatcherRepositoryImpl:
     def load_last_program(self, *, process: str = "terminaciones") -> dict | None:
         process = self.data_repo._normalize_process(process)
         with self.db.connect() as con:
-            row = con.execute("SELECT generated_on, program_json FROM last_program WHERE process=?", (process,)).fetchone()
+            row = con.execute("SELECT generated_on, program_json FROM dispatcher_last_program WHERE process=?", (process,)).fetchone()
         if row is None:
             return None
         payload = json.loads(row["program_json"])
@@ -1071,7 +1071,7 @@ class DispatcherRepositoryImpl:
                 """
                 SELECT job_id, process_id, pedido, posicion, material, qty,
                        priority, is_test, state, fecha_de_pedido, notes
-                FROM job
+                FROM dispatcher_job
                 WHERE job_id = ?
                 """,
                 (job_id,),
@@ -1094,7 +1094,7 @@ class DispatcherRepositoryImpl:
             
             con.execute(
                 """
-                INSERT INTO job(
+                INSERT INTO dispatcher_job(
                     job_id, process_id, pedido, posicion, material,
                     qty, priority, is_test, state, fecha_de_pedido, notes,
                     created_at, updated_at
@@ -1118,7 +1118,7 @@ class DispatcherRepositoryImpl:
             
             con.execute(
                 """
-                UPDATE job
+                UPDATE dispatcher_job
                 SET qty = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE job_id = ?
@@ -1129,7 +1129,7 @@ class DispatcherRepositoryImpl:
             job_units = con.execute(
                 """
                 SELECT lote, correlativo_int, qty, status
-                FROM job_unit
+                FROM dispatcher_job_unit
                 WHERE job_id = ?
                 ORDER BY correlativo_int, lote
                 """,
@@ -1140,14 +1140,14 @@ class DispatcherRepositoryImpl:
             
             for unit in units_to_move:
                 con.execute(
-                    "DELETE FROM job_unit WHERE job_id = ? AND lote = ?",
+                    "DELETE FROM dispatcher_job_unit WHERE job_id = ? AND lote = ?",
                     (job_id, unit["lote"]),
                 )
                 
                 new_unit_id = f"ju_{new_job_id}_{uuid4().hex[:8]}"
                 con.execute(
                     """
-                    INSERT INTO job_unit(
+                    INSERT INTO dispatcher_job_unit(
                         job_unit_id, job_id, lote, correlativo_int, qty, status,
                         created_at, updated_at
                     )
@@ -1176,7 +1176,7 @@ class DispatcherRepositoryImpl:
     def mark_job_urgent(self, job_id: str) -> None:
         """Mark a job as urgent."""
         with self.db.connect() as con:
-            row = con.execute("SELECT is_test FROM job WHERE job_id = ?", (job_id,)).fetchone()
+            row = con.execute("SELECT is_test FROM dispatcher_job WHERE job_id = ?", (job_id,)).fetchone()
             if not row:
                 raise ValueError(f"Job not found: {job_id}")
             if row["is_test"]:
@@ -1185,12 +1185,12 @@ class DispatcherRepositoryImpl:
             priorities = self._get_priority_map_values()
             urgent_prio = priorities.get("urgente", 2)
             
-            con.execute("UPDATE job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (urgent_prio, job_id))
+            con.execute("UPDATE dispatcher_job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (urgent_prio, job_id))
 
     def unmark_job_urgent(self, job_id: str) -> None:
         """Unmark a job as urgent (return to normal)."""
         with self.db.connect() as con:
-            row = con.execute("SELECT is_test FROM job WHERE job_id = ?", (job_id,)).fetchone()
+            row = con.execute("SELECT is_test FROM dispatcher_job WHERE job_id = ?", (job_id,)).fetchone()
             if not row:
                 raise ValueError(f"Job not found: {job_id}")
             if row["is_test"]:
@@ -1199,4 +1199,4 @@ class DispatcherRepositoryImpl:
             priorities = self._get_priority_map_values()
             normal_prio = priorities.get("normal", 3)
             
-            con.execute("UPDATE job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (normal_prio, job_id))
+            con.execute("UPDATE dispatcher_job SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (normal_prio, job_id))

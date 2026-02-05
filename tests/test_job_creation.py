@@ -112,7 +112,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     # Verify job was created
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT job_id, process_id, pedido, posicion, material, qty, priority, is_test, state FROM job"
+            "SELECT job_id, process_id, pedido, posicion, material, qty, priority, is_test, state FROM dispatcher_job"
         ).fetchall()
     
     assert len(jobs) >= 1, "Should create at least one job (terminaciones)"
@@ -136,7 +136,7 @@ def test_create_jobs_from_mb52_basic(temp_db):
     # Verify job_units were created
     with db.connect() as con:
         job_units = con.execute(
-            "SELECT job_unit_id, job_id, lote, correlativo_int, qty, status FROM job_unit WHERE job_id = ?",
+            "SELECT job_unit_id, job_id, lote, correlativo_int, qty, status FROM dispatcher_job_unit WHERE job_id = ?",
             (term_job["job_id"],),
         ).fetchall()
     
@@ -174,7 +174,7 @@ def test_create_jobs_test_priority(temp_db):
     
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT priority, is_test FROM job WHERE process_id = 'terminaciones'"
+            "SELECT priority, is_test FROM dispatcher_job WHERE process_id = 'terminaciones'"
         ).fetchall()
     
     assert len(jobs) >= 1
@@ -216,7 +216,7 @@ def test_create_jobs_auto_split_test_and_normal_lotes(temp_db):
 
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT job_id, is_test, qty, priority FROM job WHERE process_id='terminaciones' AND pedido='1010044531' AND posicion='10' AND material='43633021531' ORDER BY is_test ASC"
+            "SELECT job_id, is_test, qty, priority FROM dispatcher_job WHERE process_id='terminaciones' AND pedido='1010044531' AND posicion='10' AND material='43633021531' ORDER BY is_test ASC"
         ).fetchall()
 
     assert len(jobs) == 2, "Should create 2 jobs: normal + test"
@@ -234,11 +234,11 @@ def test_create_jobs_auto_split_test_and_normal_lotes(temp_db):
 
     with db.connect() as con:
         normal_units = con.execute(
-            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            "SELECT lote FROM dispatcher_job_unit WHERE job_id = ? ORDER BY lote",
             (normal_job["job_id"],),
         ).fetchall()
         test_units = con.execute(
-            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            "SELECT lote FROM dispatcher_job_unit WHERE job_id = ? ORDER BY lote",
             (test_job["job_id"],),
         ).fetchall()
 
@@ -281,7 +281,7 @@ def test_create_jobs_multiple_processes(temp_db):
     
     with db.connect() as con:
         jobs = con.execute(
-            "SELECT process_id, qty FROM job ORDER BY process_id"
+            "SELECT process_id, qty FROM dispatcher_job ORDER BY process_id"
         ).fetchall()
     
     processes = {j["process_id"] for j in jobs}
@@ -359,7 +359,7 @@ def test_update_jobs_from_vision(temp_db):
         job = con.execute(
             """
             SELECT fecha_de_pedido, qty
-            FROM job
+            FROM dispatcher_job
             WHERE process_id = 'terminaciones'
               AND pedido = '1010044531'
               AND posicion = '10'
@@ -399,7 +399,7 @@ def test_split_job_basic(temp_db):
         original_job = con.execute(
             """
             SELECT job_id, qty
-            FROM job
+            FROM dispatcher_job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
               AND posicion = '10'
@@ -421,7 +421,7 @@ def test_split_job_basic(temp_db):
         jobs = con.execute(
             """
             SELECT job_id, process_id, pedido, posicion, material, qty, priority, is_test
-            FROM job
+            FROM dispatcher_job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
               AND posicion = '10'
@@ -450,11 +450,11 @@ def test_split_job_basic(temp_db):
     # Validate job_units distribution
     with db.connect() as con:
         units1 = con.execute(
-            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            "SELECT lote FROM dispatcher_job_unit WHERE job_id = ? ORDER BY lote",
             (job1_id,),
         ).fetchall()
         units2 = con.execute(
-            "SELECT lote FROM job_unit WHERE job_id = ? ORDER BY lote",
+            "SELECT lote FROM dispatcher_job_unit WHERE job_id = ? ORDER BY lote",
             (job2_id,),
         ).fetchall()
     
@@ -497,7 +497,7 @@ def test_split_job_validation_errors(temp_db):
     
     with db.connect() as con:
         job = con.execute(
-            "SELECT job_id FROM job WHERE pedido = '30517821'"
+            "SELECT job_id FROM dispatcher_job WHERE pedido = '30517821'"
         ).fetchone()
     
     job_id = job["job_id"]
@@ -547,7 +547,7 @@ def test_split_distribution_new_stock(temp_db):
     # Step 2: Get job and split it (4 + 6)
     with db.connect() as con:
         original = con.execute(
-            "SELECT job_id FROM job WHERE pedido = '30517821'"
+            "SELECT job_id FROM dispatcher_job WHERE pedido = '30517821'"
         ).fetchone()
     
     job1_id, job2_id = repo.dispatcher.split_job(job_id=original["job_id"], qty_split=4)
@@ -575,11 +575,11 @@ def test_split_distribution_new_stock(temp_db):
     # Job 2 received no stock (0), so it should be deleted by cleanup logic.
     with db.connect() as con:
         job1 = con.execute(
-            "SELECT qty FROM job WHERE job_id = ?",
+            "SELECT qty FROM dispatcher_job WHERE job_id = ?",
             (job1_id,),
         ).fetchone()
         job2 = con.execute(
-            "SELECT qty FROM job WHERE job_id = ?",
+            "SELECT qty FROM dispatcher_job WHERE job_id = ?",
             (job2_id,),
         ).fetchone()
     
@@ -614,7 +614,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
     # Step 2: Split job (3 + 5)
     with db.connect() as con:
         original = con.execute(
-            "SELECT job_id FROM job WHERE pedido = '30517821'"
+            "SELECT job_id FROM dispatcher_job WHERE pedido = '30517821'"
         ).fetchone()
     
     job1_id, job2_id = repo.dispatcher.split_job(job_id=original["job_id"], qty_split=3)
@@ -628,7 +628,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
         jobs = con.execute(
             """
             SELECT job_id, qty
-            FROM job
+            FROM dispatcher_job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
               AND posicion = '10'
@@ -661,7 +661,7 @@ def test_split_distribution_all_zero_creates_new_job(temp_db):
         jobs = con.execute(
             """
             SELECT job_id, qty
-            FROM job
+            FROM dispatcher_job
             WHERE process_id = 'terminaciones'
               AND pedido = '30517821'
               AND posicion = '10'

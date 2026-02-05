@@ -24,6 +24,15 @@ Foundry Plan is a Windows-first production planning web app (NiceGUI + SQLite) w
   - *Constraint*: Do not call `Db.connect()` directly outside Repository implementations.
   - Schema split: `src/foundryplan/data/schema/` with `data_schema.py`, `dispatcher_schema.py`, `planner_schema.py`.
 
+**Database Table Naming Convention:**
+All database tables use module prefixes to indicate ownership:
+- **`core_*`**: Shared data layer (SAP snapshots, master data, config) - managed by `data_repository.py`
+  - Examples: `core_sap_mb52_snapshot`, `core_sap_vision_snapshot`, `core_material_master`, `core_orders`, `core_config`
+- **`dispatcher_*`**: Dispatcher module tables - managed by `dispatcher_repository.py`
+  - Examples: `dispatcher_job`, `dispatcher_job_unit`, `dispatcher_line_config`, `dispatcher_last_program`
+- **`planner_*`**: Planner module tables - managed by `planner_repository.py`
+  - Examples: `planner_orders`, `planner_schedule`, `planner_daily_resources`, `planner_flask_types`
+
 ### Dispatcher (Downstream Scheduling)
 - **`src/foundryplan/dispatcher/scheduler.py`**: Pure functional module.
   - Input: `lines: list[Line]`, `jobs: list[Job]`, `parts: list[Part]`, optional `pinned_program`.
@@ -57,17 +66,17 @@ Foundry Plan is a Windows-first production planning web app (NiceGUI + SQLite) w
 User uploads MB52 (stock snapshot) and Vision (orders) via page `/actualizar`:
 - Excel columns normalized via `src/foundryplan/data/excel_io.py` (handles format coercion).
 - SAP keys (Documento Comercial, Posición SD) normalized via `_normalize_sap_key()`.
-- Tables stored in `sap_mb52_snapshot`, `sap_vision_snapshot`, `sap_demolding_snapshot`.
+- Tables stored in `core_sap_mb52_snapshot`, `core_sap_vision_snapshot`, `core_moldes_por_fundir`, `core_piezas_fundidas`.
 - **MB52**: No material prefix filtering (loads all materials).
 - **Vision**: Filters by `sap_vision_material_prefixes` config (default: 401,402,403,404).
-- **Desmoldeo**: No material prefix filtering (loads all materials). Auto-updates `material_master` and regenerates `planner_daily_resources`.
+- **Desmoldeo**: Separates into `core_moldes_por_fundir` (WIP) and `core_piezas_fundidas` (completed). Auto-updates `core_material_master` and regenerates `planner_daily_resources`.
 
 ### 2. Reconciliation
 `Repository.try_rebuild_orders_from_sap_for(process)`:
 - Joins MB52 (stock) + Vision (dates/qty) on normalized SAP keys.
 - Filters by process `almacen` config.
 - Applies `_mb52_availability_predicate_sql(process)` (e.g., `libre_utilizacion=1`).
-- Creates/updates `orders` table with reconciled data.
+- Creates/updates `core_orders` table with reconciled data.
 - Vision is source of truth for `fecha_de_pedido`; MB52 is source for qty available.
 
 ### 3. Dispatcher (Downstream Workflows)

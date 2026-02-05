@@ -60,7 +60,7 @@ def test_split_retention_existing_lotes(temp_db):
     repo.import_sap_mb52_bytes(content=create_mock_mb52_excel(rows_1), mode="replace")
     
     with db.connect() as con:
-        job = con.execute("SELECT job_id FROM job WHERE pedido='P1'").fetchone()
+        job = con.execute("SELECT job_id FROM dispatcher_job WHERE pedido='P1'").fetchone()
         job_id = job["job_id"]
         
     # 2. Split: Job 1 has 1 qty (Lote A presumably), Job 2 has 1 qty (Lote B)
@@ -70,11 +70,11 @@ def test_split_retention_existing_lotes(temp_db):
     
     # Verify split state
     with db.connect() as con:
-        j1 = con.execute("SELECT qty FROM job WHERE job_id=?", (job1_id,)).fetchone()
-        j2 = con.execute("SELECT qty FROM job WHERE job_id=?", (job2_id,)).fetchone()
+        j1 = con.execute("SELECT qty FROM dispatcher_job WHERE job_id=?", (job1_id,)).fetchone()
+        j2 = con.execute("SELECT qty FROM dispatcher_job WHERE job_id=?", (job2_id,)).fetchone()
         # Check who has what
-        lotes_j1 = [r[0] for r in con.execute("SELECT lote FROM job_unit WHERE job_id=?", (job1_id,)).fetchall()]
-        lotes_j2 = [r[0] for r in con.execute("SELECT lote FROM job_unit WHERE job_id=?", (job2_id,)).fetchall()]
+        lotes_j1 = [r[0] for r in con.execute("SELECT lote FROM dispatcher_job_unit WHERE job_id=?", (job1_id,)).fetchall()]
+        lotes_j2 = [r[0] for r in con.execute("SELECT lote FROM dispatcher_job_unit WHERE job_id=?", (job2_id,)).fetchall()]
         
     print(f"DEBUG: J1={lotes_j1}, J2={lotes_j2}")
     
@@ -91,8 +91,8 @@ def test_split_retention_existing_lotes(temp_db):
     repo.import_sap_mb52_bytes(content=create_mock_mb52_excel(rows_2), mode="replace")
     
     with db.connect() as con:
-        j1_new = con.execute("SELECT qty FROM job WHERE job_id=?", (job1_id,)).fetchone()
-        j2_new = con.execute("SELECT qty FROM job WHERE job_id=?", (job2_id,)).fetchone()
+        j1_new = con.execute("SELECT qty FROM dispatcher_job WHERE job_id=?", (job1_id,)).fetchone()
+        j2_new = con.execute("SELECT qty FROM dispatcher_job WHERE job_id=?", (job2_id,)).fetchone()
         
     # Currently (buggy behavior expected): One job has 3, the other has 0 (and is deleted)
     # Desired behavior: One has 1 (or 2), the other has 2 (or 1), total 3. Both exist.
