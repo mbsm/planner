@@ -73,8 +73,11 @@ class PlannerRepositoryImpl:
         - Read first 3 characters of flask_id (Caja) to determine flask_type
         - Use Fecha Desmoldeo (NOT Fecha a desmoldear)
         - Flask is occupied from today until demolding_date + 1 day
-        - Quantity is mold_quantity (Cant. Moldes)
+        - mold_quantity es la fracción de caja que usa UNA pieza
+        - Se acumulan fracciones y se redondea hacia arriba (ceil)
         """
+        import math
+        
         # Get cancha filter from config
         cancha_filter = self.data_repo.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400"
         
@@ -117,16 +120,16 @@ class PlannerRepositoryImpl:
                 (cancha_filter,),
             ).fetchall()
         
-        flask_counts: dict[str, int] = {}
+        flask_fractions: dict[str, float] = {}
         
         for r in rows:
             material = str(r["material"] or "").strip()
             flask_id = str(r["flask_id"] or "").strip()
             demolding_date_str = str(r["demolding_date"] or "").strip()
-            mold_qty = int(r["mold_quantity"] or 1)
+            mold_qty = float(r["mold_quantity"] or 0.0)
             
-            # Skip if missing critical data
-            if not flask_id or not demolding_date_str:
+            # Skip if mold_qty invalid or missing data
+            if mold_qty <= 0 or not flask_id or not demolding_date_str:
                 continue
             
             try:
@@ -159,7 +162,10 @@ class PlannerRepositoryImpl:
             if not flask_type:
                 flask_type = flask_code.upper()
             
-            flask_counts[flask_type] = flask_counts.get(flask_type, 0) + mold_qty
+            flask_fractions[flask_type] = flask_fractions.get(flask_type, 0.0) + mold_qty
+        
+        # Convert fractions to integer counts (ceil)
+        flask_counts = {ftype: math.ceil(fraction) for ftype, fraction in flask_fractions.items()}
         
         return flask_counts
 
@@ -370,12 +376,18 @@ class PlannerRepositoryImpl:
             ).fetchall()
         
         today = date.today()
-        updates: list[tuple[int, str, str]] = []  # [(decrement_qty, day, flask_type), ...]
+        # Acumular fracciones por día/flask_type antes de actualizar
+        # mold_quantity es la fracción de caja que usa UNA pieza
+        daily_decrements: dict[tuple[str, str], float] = {}  # (day, flask_type) -> qty_to_decrement
         
         for r in rows:
             flask_id = str(r["flask_id"] or "").strip()
             demolding_date_str = str(r["demolding_date"] or "").strip()
-            mold_qty = int(r["mold_quantity"] or 1)
+            mold_qty = float(r["mold_quantity"] or 0.0)
+            
+            # Skip si mold_qty es 0 o negativo (datos inválidos)
+            if mold_qty <= 0:
+                continue
             
             # Skip if missing critical data
             if not flask_id or not demolding_date_str:
@@ -407,14 +419,22 @@ class PlannerRepositoryImpl:
             if not flask_type:
                 flask_type = flask_code.upper()
             
-            # Decrement available_qty for each day from today until release_date (exclusive)
+            # Acumular fracciones para cada día desde hoy hasta release_date (exclusive)
             current_day = today
             while current_day < release_date:
                 day_str = current_day.isoformat()
-                updates.append((mold_qty, day_str, flask_type, scenario_id))
+                key = (day_str, flask_type)
+                daily_decrements[key] = daily_decrements.get(key, 0.0) + mold_qty
                 current_day = date.fromordinal(current_day.toordinal() + 1)
         
-        # Apply decrements to database
+        # Apply decrements to database (convertir fracciones acumuladas a enteros con ceil)
+        import math
+        updates = []
+        for (day_str, flask_type), total_fraction in daily_decrements.items():
+            # Redondear hacia arriba: si usamos 0.5 cajas, ocupamos 1 caja completa
+            flasks_occupied = math.ceil(total_fraction)
+            updates.append((flasks_occupied, day_str, flask_type, scenario_id))
+        
         with self.db.connect() as con:
             con.executemany(
                 """
@@ -426,7 +446,7 @@ class PlannerRepositoryImpl:
             )
             con.commit()
         
-        logger.info(f"Updated {len(updates)} daily resource records from demolding for scenario {scenario_id}")
+        logger.info(f"Updated {len(updates)} daily resource records from demolding for scenario {scenario_id} (processed {len(rows)} demolding records)")
 
     # ---------- Planner DB helpers ----------
     def ensure_planner_scenario(self, *, name: str | None = None) -> int:

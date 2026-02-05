@@ -2749,7 +2749,10 @@ class DataRepositoryImpl:
             mold_type = str(r.get("mold_type", "")).strip() or None
             poured_date_raw = r.get("poured_date")
             poured_time = str(r.get("poured_time", "")).strip() or None
-            mold_qty = coerce_float(r.get("mold_quantity")) or 1
+            # mold_quantity es la fracción de caja que usa UNA pieza (inverso de piezas_por_molde)
+            mold_qty = coerce_float(r.get("mold_quantity"))
+            if mold_qty is None or mold_qty <= 0:
+                mold_qty = 1.0  # Default: 1 pieza = 1 caja completa
 
             if not material or not flask_id_raw:
                 continue

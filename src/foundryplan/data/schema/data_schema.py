@@ -165,7 +165,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             poured_date TEXT,
             poured_time TEXT,
             cooling_hours REAL,
-            mold_quantity INTEGER
+            mold_quantity REAL
         );
 
         CREATE TABLE IF NOT EXISTS orders (
@@ -292,3 +292,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE sap_demolding_snapshot ADD COLUMN cancha TEXT")
     except Exception:
         pass
+    
+    # Note: mold_quantity should be REAL to store fractions (1/piezas_por_molde)
+    # SQLite's INTEGER affinity can store REAL values, but for new tables we use REAL
+    # Existing data will work correctly with float() conversion in Python
