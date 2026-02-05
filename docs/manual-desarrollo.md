@@ -30,7 +30,7 @@ En UI, cualquier lectura de órdenes, stock, desmoldeo o maestro debe ir por `re
 - **Lenguaje**: Python 3.11+.
 - **UI Framework**: NiceGUI (basado en FastAPI/Vue).
 - **Base de Datos**: SQLite (con modo WAL estricto).
-- **Solver**: Google OR-Tools (CP-SAT) para el módulo Planner.
+- **Planner**: Hoy usa heurística greedy; **CP-SAT (OR-Tools)** está planificado a futuro (no implementado aún).
 - **Testing**: Pytest.
 
 ---
@@ -359,21 +359,29 @@ Persistencia y vista:
 
 Nota: los ítems marcados “en proceso” se muestran fijados en su línea y al inicio de la cola, y el resto de los jobs se ordena/redistribuye bajo las reglas del Dispatcher.
 
-### 3.2 Planner (Nuevo)
+### 3.2 Planner (Moldeo)
 Responsable de la planificación de *Moldeo* (nivel orden, semanal).
+
+- **Estado actual**: Implementado con heurística greedy (ver 3.2.2 Heurística). Usa capacidades diarias reales desde `planner_daily_resources` y condiciones iniciales.
+- **Futuro (no implementado aún)**: CP-SAT con OR-Tools conforme al diseño descrito más abajo; se mantiene como diseño de referencia pero **no está activo**.
 - **Ubicación**: `src/foundryplan/planner/`
-- **Objetivo**: Decidir cuántos moldes producir por día por pedido, optimizando entrega a tiempo, minimizando cambios de modelo y uso de capacidad reducida.
+- **Objetivo (común)**: Decidir cuántos moldes producir por día por pedido, buscando cumplir fechas y respetar capacidades y cajas.
 - **Entradas**:
     - `PlannerOrder`: Pedidos pendientes (Visión) + `remaining_molds`.
     - `PlannerPart`: Atributos de moldeo (`flask_size`, `cool_hours`, `pieces_per_mold`, `finish_hours`, `min_finish_hours`).
-    - `PlannerResource`: Capacidades diarias (molding, pouring, flasks).
+    - `PlannerResource` / `planner_daily_resources`: Capacidades diarias (molding, same_mold, pouring, flasks) ya afectadas por desmoldeo.
     - `PlannerInitialConditions`: WIP actual (modelos cargados, flasks en uso, carga de colada).
-- **Solver**: Modela el problema como CSP usando OR-Tools CP-SAT.
-    - Maximiza entrega a tiempo, con penalidades por cambios de modelo y reducción de tiempos.
 
-#### 3.2.1 Decisiones de modelado (Moldeo)
-- **`remaining_molds`**: representa *moldes pendientes de fabricar* para el pedido (no hechos aún).
-- **Modelos (pattern) = `order_id`**: un modelo puede servir a varias órdenes, pero la política de cambio es por orden.
+#### 3.2.1 Diseño CP-SAT (futuro, no implementado)
+Se mantiene como referencia para la evolución del planner, pero hoy no se ejecuta.
+
+- **`remaining_molds`**: moldes pendientes por pedido.
+- **Modelos (pattern) = `order_id`**: con penalidad por cambio de modelo y límite de modelos activos.
+- **Cajas**: bloqueos por tipo/tamaño, usando desmoldeo para fechas de liberación.
+- **Carga inicial de colada**: desde MB52 de moldes por fundir, forward-fill.
+- **Restricciones previstas**: capacidades de moldeo, mismo molde, metal diario, cajas, y límites `finish_hours` / `min_finish_hours`.
+
+Este diseño CP-SAT quedará para una fase futura; la implementación actual usa heurística greedy (ver 3.2.2).
     - **Regla blanda (soft)**: preferir terminar la orden antes de cambiar modelo; se modela como penalidad en el objetivo.
     - **Límite duro**: máximo 6 modelos (órdenes) activos en paralelo.
     - **Finish before switch**: una orden debe tener `remaining_molds = 0` antes de desactivar su modelo.
@@ -391,7 +399,28 @@ Responsable de la planificación de *Moldeo* (nivel orden, semanal).
     - Puede reducirse hasta `min_finish_hours` para respetar fecha comprometida.
     - Si incluso con reducción máxima no se alcanza la fecha, la orden se marca **late (atrasada)**.
 
-#### 3.2.2 Supuestos de calendario (flujo de proceso)
+#### 3.2.2 Heurística actual (implementada)
+Ubicación: `src/foundryplan/planner/solve.py` (`solve_planner_heuristic`).
+
+- **Capacidades por día**: lee `planner_daily_resources` ya descontado por desmoldeo (`update_daily_resources_from_demolding`). Para cada día usa:
+  - `molding_capacity`
+  - `same_mold_capacity`
+  - `pouring_tons_available`
+  - `flask_available` por tipo de caja
+- **Orden de prioridad**: se calcula `start_by` estimando días de proceso (moldeo, fundición=1, enfriamiento=ceil(cool_hours/24), terminación=ceil(finish_hours/64), buffer de fin de semana). Se ordena:
+  1) overdue (start_by <= 0)
+  2) patrones cargados inicialmente (`initial_patterns_loaded`)
+  3) `priority` ASC
+  4) `start_by` ASC
+- **Asignación diaria (greedy)**: recorre días y asigna moldes cumpliendo simultáneamente:
+  - capacidad de moldeo del día
+  - límite `same_mold_capacity` por parte en el día
+  - límite de metal: `molds * (net_weight_ton * pieces_per_mold) <= pouring_tons_available`
+  - cajas disponibles por tipo (ya descontadas por desmoldeo; se reduce al asignar)
+- **Resultado**: `molds_schedule[order_id][day_idx] = qty`; marca `HEURISTIC_INCOMPLETE` si alguna orden queda con `qty_left > 0` (horizonte insuficiente).
+- **No modela**: cambios de patrón, penalidades, ni finish_hours flexible; no usa CP-SAT.
+
+#### 3.2.3 Supuestos de calendario (flujo de proceso)
 - **Moldeo**: se moldean piezas el día $d$ (día hábil).
 - **Fundición**: se funde el **siguiente día hábil**.
 - **Enfriamiento**: desde el día de fundido, contar $\lceil \text{cool\_hours}/24 \rceil$ días **calendario**.
