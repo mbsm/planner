@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from foundryplan.data.db import Db
 from foundryplan.data.excel_io import coerce_date, coerce_float, normalize_columns, parse_int_strict, read_excel_bytes, to_int01
+from foundryplan.data.material_codes import extract_part_code, extract_alloy_code, get_material_type, is_finished_product, extract_part_code_sql
 from foundryplan.dispatcher.models import AuditEntry
 
 
@@ -530,6 +531,103 @@ class DataRepositoryImpl:
             return default
         return str(row[0])
 
+    def get_active_alloy_codes(self) -> list[str]:
+        """Get list of active alloy codes from catalog.
+        
+        Returns:
+            List of 2-digit alloy codes (e.g., ['32', '33', '34', ...])
+        """
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT alloy_code FROM core_alloy_catalog WHERE is_active = 1 ORDER BY alloy_code"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def list_alloys(self) -> list[dict]:
+        """Get all alloys from catalog.
+        
+        Returns:
+            List of dicts with keys: alloy_code, alloy_name, is_active
+        """
+        with self.db.connect() as con:
+            rows = con.execute(
+                "SELECT alloy_code, alloy_name, is_active FROM core_alloy_catalog ORDER BY alloy_code"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_alloy(self, *, alloy_code: str, alloy_name: str, is_active: bool = True) -> None:
+        """Create or update an alloy in the catalog.
+        
+        Args:
+            alloy_code: 2-digit alloy code (e.g., '32', '33')
+            alloy_name: Display name (e.g., 'CM2', 'CM3')
+            is_active: Whether alloy is active for filtering
+        """
+        alloy_code = str(alloy_code).strip()
+        alloy_name = str(alloy_name).strip()
+        
+        if not alloy_code:
+            raise ValueError("alloy_code vacío")
+        if len(alloy_code) != 2 or not alloy_code.isdigit():
+            raise ValueError("alloy_code debe ser 2 dígitos (ej: '32')")
+        if not alloy_name:
+            raise ValueError("alloy_name vacío")
+        
+        active_val = 1 if is_active else 0
+        
+        with self.db.connect() as con:
+            con.execute(
+                """
+                INSERT INTO core_alloy_catalog (alloy_code, alloy_name, is_active, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(alloy_code) DO UPDATE SET
+                    alloy_name = excluded.alloy_name,
+                    is_active = excluded.is_active,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (alloy_code, alloy_name, active_val),
+            )
+        
+        self.log_audit("ALLOY_CATALOG", "Upsert Alloy", f"{alloy_code} - {alloy_name} (active={is_active})")
+
+    def delete_alloy(self, *, alloy_code: str) -> None:
+        """Delete an alloy from the catalog.
+        
+        Args:
+            alloy_code: 2-digit alloy code to delete
+        """
+        alloy_code = str(alloy_code).strip()
+        if not alloy_code:
+            raise ValueError("alloy_code vacío")
+        
+        with self.db.connect() as con:
+            con.execute("DELETE FROM core_alloy_catalog WHERE alloy_code = ?", (alloy_code,))
+        
+        self.log_audit("ALLOY_CATALOG", "Delete Alloy", f"{alloy_code}")
+
+    def toggle_alloy_active(self, *, alloy_code: str) -> None:
+        """Toggle is_active status for an alloy.
+        
+        Args:
+            alloy_code: 2-digit alloy code
+        """
+        alloy_code = str(alloy_code).strip()
+        if not alloy_code:
+            raise ValueError("alloy_code vacío")
+        
+        with self.db.connect() as con:
+            con.execute(
+                """
+                UPDATE core_alloy_catalog
+                SET is_active = 1 - is_active,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE alloy_code = ?
+                """,
+                (alloy_code,),
+            )
+        
+        self.log_audit("ALLOY_CATALOG", "Toggle Alloy Active", f"{alloy_code}")
+
     def set_config(self, *, key: str, value: str) -> None:
         key = str(key).strip()
         if not key:
@@ -682,7 +780,7 @@ class DataRepositoryImpl:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT f.family_id AS family_id, COUNT(p.material) AS parts_count
+                SELECT f.family_id AS family_id, COUNT(p.part_code) AS parts_count
                 FROM core_family_catalog f
                 LEFT JOIN core_material_master p ON p.family_id = f.family_id
                 GROUP BY f.family_id
@@ -787,6 +885,40 @@ class DataRepositoryImpl:
         
         self.log_audit("MASTER_DATA", "Set Family", f"{material} -> {family_id}")
 
+    @staticmethod
+    def _infer_family_from_description(description: str) -> str | None:
+        """Infer material family from description keywords.
+        
+        Keywords mapping:
+        - Lifters: lifter, high linner, 35°, shark
+        - Parrillas: grate, parrilla
+        - Corazas: placa, coraza, shell linner
+        - Otros: pulp lifter
+        
+        Returns family name or None if no match found.
+        """
+        if not description:
+            return None
+        
+        desc_lower = description.lower()
+        
+        # Check Lifters first (more specific patterns)
+        if any(kw in desc_lower for kw in ["lifter", "high linner", "35°", "shark"]):
+            # But exclude "pulp lifter" which should be "Otros"
+            if "pulp lifter" in desc_lower:
+                return "Otros"
+            return "Lifters"
+        
+        # Check Parrillas
+        if any(kw in desc_lower for kw in ["grate", "parrilla"]):
+            return "Parrillas"
+        
+        # Check Corazas
+        if any(kw in desc_lower for kw in ["placa", "coraza", "shell linner"]):
+            return "Corazas"
+        
+        return None
+
     def upsert_part_master(
         self,
         *,
@@ -800,7 +932,7 @@ class DataRepositoryImpl:
         sobre_medida_mecanizado: bool = False,
         aleacion: str | None = None,
         piezas_por_molde: float | None = None,
-        tiempo_enfriamiento_molde_dias: int | None = None,
+        tiempo_enfriamiento_molde_horas: int | None = None,
         flask_size: str | None = None,
         finish_days: int | None = None,
         min_finish_days: int | None = None,
@@ -824,7 +956,7 @@ class DataRepositoryImpl:
         v = _coerce_days(vulcanizado_dias, field="vulcanizado_dias")
         m = _coerce_days(mecanizado_dias, field="mecanizado_dias")
         i = _coerce_days(inspeccion_externa_dias, field="inspeccion_externa_dias")
-        t_enfr = _coerce_days(tiempo_enfriamiento_molde_dias, field="tiempo_enfriamiento_molde_dias")
+        t_enfr = _coerce_days(tiempo_enfriamiento_molde_horas, field="tiempo_enfriamiento_molde_horas")
 
         pt: float | None = None
         if peso_unitario_ton is not None:
@@ -838,21 +970,24 @@ class DataRepositoryImpl:
             if ppm < 0:
                 raise ValueError("piezas_por_molde no puede ser negativo")
 
-        # Defaults for new materials: finish_days=15, min_finish_days=5
-        fd: int | None = finish_days if finish_days is not None else 15
-        if fd is not None and fd < 0:
+        # Defaults for new materials: finish_days=20, min_finish_days=5
+        fd_val: int = finish_days if finish_days is not None else 20
+        if fd_val < 0:
             raise ValueError("finish_days no puede ser negativo")
         
-        mfd: int | None = min_finish_days if min_finish_days is not None else 5
-        if mfd is not None and mfd < 0:
+        mfd_val: int = min_finish_days if min_finish_days is not None else 5
+        if mfd_val < 0:
             raise ValueError("min_finish_days no puede ser negativo")
 
         mec_perf = 1 if bool(mec_perf_inclinada) else 0
         sm = 1 if bool(sobre_medida_mecanizado) else 0
         aleacion_val = str(aleacion).strip() if aleacion else None
         flask_val = str(flask_size).strip().upper() if flask_size else None
-        if flask_val is not None and flask_val not in {"S", "M", "L"}:
-            raise ValueError("flask_size inv�lido (debe ser S/M/L)")
+
+        # Extract part_code from material
+        part_code = extract_part_code(material)
+        if not part_code:
+            raise ValueError(f"Cannot extract part_code from material: {material}")
 
         # Ensure family exists in catalog
         self.add_family(name=family_id)
@@ -860,12 +995,12 @@ class DataRepositoryImpl:
         with self.db.connect() as con:
             con.execute(
                 "INSERT INTO core_material_master("
-                "material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
-                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, tiempo_enfriamiento_molde_dias, "
+                "part_code, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, "
+                "mec_perf_inclinada, sobre_medida_mecanizado, aleacion, flask_size, piezas_por_molde, tiempo_enfriamiento_molde_horas, "
                 "finish_days, min_finish_days"
                 ") "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(material) DO UPDATE SET "
+                "ON CONFLICT(part_code) DO UPDATE SET "
                 "family_id=excluded.family_id, "
                 "vulcanizado_dias=excluded.vulcanizado_dias, "
                 "mecanizado_dias=excluded.mecanizado_dias, "
@@ -876,10 +1011,10 @@ class DataRepositoryImpl:
                 "aleacion=excluded.aleacion, "
                 "flask_size=excluded.flask_size, "
                 "piezas_por_molde=excluded.piezas_por_molde, "
-                "tiempo_enfriamiento_molde_dias=excluded.tiempo_enfriamiento_molde_dias, "
+                "tiempo_enfriamiento_molde_horas=excluded.tiempo_enfriamiento_molde_horas, "
                 "finish_days=excluded.finish_days, "
                 "min_finish_days=excluded.min_finish_days",
-                (material, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, flask_val, ppm, t_enfr, fd, mfd),
+                (part_code, family_id, v, m, i, pt, mec_perf, sm, aleacion_val, flask_val, ppm, t_enfr, fd_val, mfd_val),
             )
 
             # Invalidate any previously generated program
@@ -931,11 +1066,18 @@ class DataRepositoryImpl:
         )
 
     def delete_part(self, *, material: str) -> None:
+        material = str(material).strip()
+        
+        # Extract part_code from material
+        part_code = extract_part_code(material)
+        if not part_code:
+            raise ValueError(f"Cannot extract part_code from material: {material}")
+        
         with self.db.connect() as con:
-            con.execute("DELETE FROM core_material_master WHERE material = ?", (str(material).strip(),))
+            con.execute("DELETE FROM core_material_master WHERE part_code = ?", (part_code,))
             con.execute("DELETE FROM dispatcher_last_program")
         
-        self.log_audit("MASTER_DATA", "Delete Part", f"Material: {material}")
+        self.log_audit("MASTER_DATA", "Delete Part", f"Material: {material} (part_code: {part_code})")
 
     def delete_all_parts(self) -> None:
         with self.db.connect() as con:
@@ -948,10 +1090,14 @@ class DataRepositoryImpl:
         """Return the part master as UI-friendly dict rows."""
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT material, family_id, flask_size, aleacion, piezas_por_molde, tiempo_enfriamiento_molde_dias, "
+                "SELECT part_code, descripcion_pieza, family_id, flask_size, aleacion, piezas_por_molde, tiempo_enfriamiento_molde_horas, "
                 "finish_days, min_finish_days, "
-                "vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado "
-                "FROM core_material_master ORDER BY material"
+                "vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado, "
+                "CASE "
+                "  WHEN aleacion IS NOT NULL AND length(TRIM(aleacion)) = 2 THEN '40' || TRIM(aleacion) || '00' || part_code "
+                "  ELSE '4000000' || part_code "
+                "END AS material_example "
+                "FROM core_material_master ORDER BY part_code"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -960,9 +1106,10 @@ class DataRepositoryImpl:
         return self.get_missing_parts_from_mb52_for(process="terminaciones")
 
     def get_missing_parts_from_mb52_for(self, *, process: str = "terminaciones", limit: int = 500) -> list[dict]:
-        """Distinct materials in MB52 for a process almacen not present in the local parts master.
+        """Distinct part_codes in MB52 for a process almacen not present in the local parts master.
 
-        Returns a list of dicts with keys: material, texto_breve.
+        Returns a list of dicts with keys: material (example), texto_breve, part_code.
+        Grouped by part_code (5 digits) to avoid duplicates across material types.
         """
         process = self._normalize_process(process)
         centro = (self.get_config(key="sap_centro", default="4000") or "").strip()
@@ -976,6 +1123,12 @@ class DataRepositoryImpl:
             rows = con.execute(
                 f"""
                 SELECT
+                        (CASE
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 2) = '40' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 2) = '00' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 4) = '4310' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 10, 2) = '01' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 5)
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '435' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '436' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                        END) AS part_code,
                         COALESCE(m.material_base, v.cod_material, m.material) AS material,
                         COALESCE(MAX(m.texto_breve), '') AS texto_breve,
                         MAX(p.family_id) as family_id,
@@ -984,15 +1137,24 @@ class DataRepositoryImpl:
                         MAX(p.inspeccion_externa_dias) as inspeccion_externa_dias,
                         MAX(p.mec_perf_inclinada) as mec_perf_inclinada,
                         MAX(p.sobre_medida_mecanizado) as sobre_medida_mecanizado,
-                        MAX(p.aleacion) as aleacion,
+                        COALESCE(MAX(p.aleacion), (CASE
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 2) = '40' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 2) = '00' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 3, 2)
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '435' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 4, 2)
+                            WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '436' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 4, 2)
+                        END)) as aleacion,
                         MAX(p.piezas_por_molde) as piezas_por_molde,
                         MAX(p.peso_unitario_ton) as peso_unitario_ton,
-                        MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
+                        MAX(p.tiempo_enfriamiento_molde_horas) as tiempo_enfriamiento_molde_horas
                 FROM core_sap_mb52_snapshot m
                 LEFT JOIN core_sap_vision_snapshot v
                     ON v.pedido = m.documento_comercial
                  AND v.posicion = m.posicion_sd
-                LEFT JOIN core_material_master p ON p.material = COALESCE(m.material_base, v.cod_material, m.material)
+                LEFT JOIN core_material_master p ON p.part_code = (CASE
+                    WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 2) = '40' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 2) = '00' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                    WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 4) = '4310' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 10, 2) = '01' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 5)
+                    WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '435' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                    WHEN substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '436' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0' THEN substr(COALESCE(m.material_base, v.cod_material, m.material), 7, 5)
+                END)
                 WHERE COALESCE(m.material_base, v.cod_material, m.material) IS NOT NULL
                     AND TRIM(COALESCE(m.material_base, v.cod_material, m.material)) <> ''
                   AND m.centro = ?
@@ -1002,23 +1164,41 @@ class DataRepositoryImpl:
                   AND m.posicion_sd IS NOT NULL AND TRIM(m.posicion_sd) <> ''
                   AND m.lote IS NOT NULL AND TRIM(m.lote) <> ''
                   AND (
-                      p.material IS NULL
+                      (substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 2) = '40' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 5, 2) = '00')
+                      OR (substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '435' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0')
+                      OR (substr(COALESCE(m.material_base, v.cod_material, m.material), 1, 3) = '436' AND substr(COALESCE(m.material_base, v.cod_material, m.material), 6, 1) = '0')
+                  )
+                  AND (
+                      p.part_code IS NULL
                       OR p.family_id IS NULL OR TRIM(p.family_id) = ''
                       OR p.vulcanizado_dias IS NULL
                       OR p.mecanizado_dias IS NULL
                       OR p.inspeccion_externa_dias IS NULL
                   )
-                GROUP BY COALESCE(m.material_base, v.cod_material, m.material)
-                ORDER BY COALESCE(m.material_base, v.cod_material, m.material)
+                GROUP BY COALESCE(part_code, material)
+                ORDER BY COALESCE(part_code, material)
                 LIMIT ?
                 """.strip(),
                 (centro, almacen, lim),
             ).fetchall()
-        return [
-            {
+        
+        # Apply family inference from description if family_id is missing
+        results = []
+        for r in rows:
+            texto_breve = str(r["texto_breve"] or "")
+            family_id = r["family_id"]
+            
+            # Infer family from description if not set
+            if not family_id or str(family_id).strip() == "":
+                inferred = self._infer_family_from_description(texto_breve)
+                if inferred:
+                    family_id = inferred
+            
+            results.append({
+                "part_code": str(r["part_code"]) if r["part_code"] else None,
                 "material": str(r["material"]),
-                "texto_breve": str(r["texto_breve"] or ""),
-                "family_id": r["family_id"],
+                "texto_breve": texto_breve,
+                "family_id": family_id,
                 "vulcanizado_dias": r["vulcanizado_dias"],
                 "mecanizado_dias": r["mecanizado_dias"],
                 "inspeccion_externa_dias": r["inspeccion_externa_dias"],
@@ -1027,10 +1207,10 @@ class DataRepositoryImpl:
                 "aleacion": r["aleacion"],
                 "piezas_por_molde": r["piezas_por_molde"],
                 "peso_unitario_ton": r["peso_unitario_ton"],
-                "tiempo_enfriamiento_molde_dias": r["tiempo_enfriamiento_molde_dias"],
-            }
-            for r in rows
-        ]
+                "tiempo_enfriamiento_molde_horas": r["tiempo_enfriamiento_molde_horas"],
+            })
+        
+        return results
 
     def get_missing_parts_from_vision_for(self, *, limit: int = 500) -> list[dict]:
         """Distinct materials in Visi�n Planta not present in the local parts master.
@@ -1044,7 +1224,13 @@ class DataRepositoryImpl:
             rows = con.execute(
                 """
                 SELECT
-                    m.cod_material,
+                    (CASE
+                        WHEN substr(m.cod_material, 1, 2) = '40' AND substr(m.cod_material, 5, 2) = '00' THEN substr(m.cod_material, 7, 5)
+                        WHEN substr(m.cod_material, 1, 4) = '4310' AND substr(m.cod_material, 10, 2) = '01' THEN substr(m.cod_material, 5, 5)
+                        WHEN substr(m.cod_material, 1, 3) = '435' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 7, 5)
+                        WHEN substr(m.cod_material, 1, 3) = '436' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 7, 5)
+                    END) AS part_code,
+                    m.cod_material AS material,
                     COALESCE(MAX(m.descripcion_material), '') AS descripcion_material,
                     MAX(p.family_id) as family_id,
                     MAX(p.vulcanizado_dias) as vulcanizado_dias,
@@ -1052,31 +1238,58 @@ class DataRepositoryImpl:
                     MAX(p.inspeccion_externa_dias) as inspeccion_externa_dias,
                     MAX(p.mec_perf_inclinada) as mec_perf_inclinada,
                     MAX(p.sobre_medida_mecanizado) as sobre_medida_mecanizado,
-                    MAX(p.aleacion) as aleacion,
+                    COALESCE(MAX(p.aleacion), (CASE
+                        WHEN substr(m.cod_material, 1, 2) = '40' AND substr(m.cod_material, 5, 2) = '00' THEN substr(m.cod_material, 3, 2)
+                        WHEN substr(m.cod_material, 1, 3) = '435' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 4, 2)
+                        WHEN substr(m.cod_material, 1, 3) = '436' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 4, 2)
+                    END)) as aleacion,
                     MAX(p.piezas_por_molde) as piezas_por_molde,
                     MAX(p.peso_unitario_ton) as peso_unitario_ton,
-                    MAX(p.tiempo_enfriamiento_molde_dias) as tiempo_enfriamiento_molde_dias
+                    MAX(p.tiempo_enfriamiento_molde_horas) as tiempo_enfriamiento_molde_horas
                 FROM core_sap_vision_snapshot m
-                LEFT JOIN core_material_master p ON p.material = m.cod_material
+                LEFT JOIN core_material_master p ON p.part_code = (CASE
+                    WHEN substr(m.cod_material, 1, 2) = '40' AND substr(m.cod_material, 5, 2) = '00' THEN substr(m.cod_material, 7, 5)
+                    WHEN substr(m.cod_material, 1, 4) = '4310' AND substr(m.cod_material, 10, 2) = '01' THEN substr(m.cod_material, 5, 5)
+                    WHEN substr(m.cod_material, 1, 3) = '435' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 7, 5)
+                    WHEN substr(m.cod_material, 1, 3) = '436' AND substr(m.cod_material, 6, 1) = '0' THEN substr(m.cod_material, 7, 5)
+                END)
                 WHERE m.cod_material IS NOT NULL AND TRIM(m.cod_material) <> ''
                   AND (
-                      p.material IS NULL
+                      (substr(m.cod_material, 1, 2) = '40' AND substr(m.cod_material, 5, 2) = '00')
+                      OR (substr(m.cod_material, 1, 3) = '435' AND substr(m.cod_material, 6, 1) = '0')
+                      OR (substr(m.cod_material, 1, 3) = '436' AND substr(m.cod_material, 6, 1) = '0')
+                  )
+                  AND (
+                      p.part_code IS NULL
                       OR p.family_id IS NULL OR TRIM(p.family_id) = ''
                       OR p.vulcanizado_dias IS NULL
                       OR p.mecanizado_dias IS NULL
                       OR p.inspeccion_externa_dias IS NULL
                   )
-                GROUP BY m.cod_material
-                ORDER BY m.cod_material
+                GROUP BY COALESCE(part_code, material)
+                ORDER BY COALESCE(part_code, material)
                 LIMIT ?
                 """.strip(),
                 (lim,),
             ).fetchall()
-        return [
-            {
-                "material": str(r["cod_material"]),
-                "texto_breve": str(r["descripcion_material"] or ""),
-                "family_id": r["family_id"],
+        
+        # Apply family inference from description if family_id is missing
+        results = []
+        for r in rows:
+            texto_breve = str(r["descripcion_material"] or "")
+            family_id = r["family_id"]
+            
+            # Infer family from description if not set
+            if not family_id or str(family_id).strip() == "":
+                inferred = self._infer_family_from_description(texto_breve)
+                if inferred:
+                    family_id = inferred
+            
+            results.append({
+                "part_code": str(r["part_code"]) if r["part_code"] else None,
+                "material": str(r["material"]),
+                "texto_breve": texto_breve,
+                "family_id": family_id,
                 "vulcanizado_dias": r["vulcanizado_dias"],
                 "mecanizado_dias": r["mecanizado_dias"],
                 "inspeccion_externa_dias": r["inspeccion_externa_dias"],
@@ -1085,10 +1298,10 @@ class DataRepositoryImpl:
                 "aleacion": r["aleacion"],
                 "piezas_por_molde": r["piezas_por_molde"],
                 "peso_unitario_ton": r["peso_unitario_ton"],
-                "tiempo_enfriamiento_molde_dias": r["tiempo_enfriamiento_molde_dias"],
-            }
-            for r in rows
-        ]
+                "tiempo_enfriamiento_molde_horas": r["tiempo_enfriamiento_molde_horas"],
+            })
+        
+        return results
 
     def get_missing_parts_from_orders(self, *, process: str = "terminaciones") -> list[str]:
         process = self._normalize_process(process)
@@ -1097,9 +1310,14 @@ class DataRepositoryImpl:
                 """
                 SELECT DISTINCT o.material
                 FROM core_orders o
-                LEFT JOIN core_material_master p ON p.material = o.material
+                LEFT JOIN core_material_master p ON p.part_code = (CASE
+                    WHEN substr(o.material, 1, 2) = '40' AND substr(o.material, 5, 2) = '00' THEN substr(o.material, 7, 5)
+                    WHEN substr(o.material, 1, 4) = '4310' AND substr(o.material, 10, 2) = '01' THEN substr(o.material, 5, 5)
+                    WHEN substr(o.material, 1, 3) = '435' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                    WHEN substr(o.material, 1, 3) = '436' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                END)
                 WHERE o.process = ?
-                  AND p.material IS NULL
+                  AND p.part_code IS NULL
                 ORDER BY o.material
                 """,
                 (process,),
@@ -1115,9 +1333,14 @@ class DataRepositoryImpl:
                 FROM (
                     SELECT DISTINCT o.material
                     FROM core_orders o
-                    LEFT JOIN core_material_master p ON p.material = o.material
+                    LEFT JOIN core_material_master p ON p.part_code = (CASE
+                        WHEN substr(o.material, 1, 2) = '40' AND substr(o.material, 5, 2) = '00' THEN substr(o.material, 7, 5)
+                        WHEN substr(o.material, 1, 4) = '4310' AND substr(o.material, 10, 2) = '01' THEN substr(o.material, 5, 5)
+                        WHEN substr(o.material, 1, 3) = '435' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                        WHEN substr(o.material, 1, 3) = '436' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                    END)
                     WHERE o.process = ?
-                      AND p.material IS NULL
+                      AND p.part_code IS NULL
                 )
                 """,
                 (process,),
@@ -1132,7 +1355,12 @@ class DataRepositoryImpl:
                 """
                 SELECT DISTINCT o.material
                 FROM core_orders o
-                JOIN core_material_master p ON p.material = o.material
+                JOIN core_material_master p ON p.part_code = (CASE
+                    WHEN substr(o.material, 1, 2) = '40' AND substr(o.material, 5, 2) = '00' THEN substr(o.material, 7, 5)
+                    WHEN substr(o.material, 1, 4) = '4310' AND substr(o.material, 10, 2) = '01' THEN substr(o.material, 5, 5)
+                    WHEN substr(o.material, 1, 3) = '435' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                    WHEN substr(o.material, 1, 3) = '436' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                END)
                 WHERE o.process = ?
                   AND (
                        p.vulcanizado_dias IS NULL
@@ -1154,7 +1382,12 @@ class DataRepositoryImpl:
                 FROM (
                     SELECT DISTINCT o.material
                     FROM core_orders o
-                    JOIN core_material_master p ON p.material = o.material
+                    JOIN core_material_master p ON p.part_code = (CASE
+                        WHEN substr(o.material, 1, 2) = '40' AND substr(o.material, 5, 2) = '00' THEN substr(o.material, 7, 5)
+                        WHEN substr(o.material, 1, 4) = '4310' AND substr(o.material, 10, 2) = '01' THEN substr(o.material, 5, 5)
+                        WHEN substr(o.material, 1, 3) = '435' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                        WHEN substr(o.material, 1, 3) = '436' AND substr(o.material, 6, 1) = '0' THEN substr(o.material, 7, 5)
+                    END)
                     WHERE o.process = ?
                       AND (
                            p.vulcanizado_dias IS NULL
@@ -1225,7 +1458,12 @@ class DataRepositoryImpl:
                         COALESCE(p.peso_unitario_ton, v.peso_unitario_ton, 0.0) AS peso_unitario_ton
                     FROM v
                     LEFT JOIN core_material_master p
-                      ON p.material = v.cod_material
+                      ON p.part_code = (CASE
+                        WHEN substr(v.cod_material, 1, 2) = '40' AND substr(v.cod_material, 5, 2) = '00' THEN substr(v.cod_material, 7, 5)
+                        WHEN substr(v.cod_material, 1, 4) = '4310' AND substr(v.cod_material, 10, 2) = '01' THEN substr(v.cod_material, 5, 5)
+                        WHEN substr(v.cod_material, 1, 3) = '435' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                        WHEN substr(v.cod_material, 1, 3) = '436' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                    END)
                 )
                 SELECT
                     COALESCE(SUM((CASE WHEN pendientes > 0 THEN pendientes ELSE 0 END) * peso_unitario_ton), 0.0) AS tons_por_entregar,
@@ -1319,7 +1557,12 @@ class DataRepositoryImpl:
                 HAVING MAX(COALESCE(fecha_de_pedido, '9999-12-31')) < ?
                 ) v
                 LEFT JOIN core_material_master p
-                  ON p.material = v.cod_material
+                  ON p.part_code = (CASE
+                    WHEN substr(v.cod_material, 1, 2) = '40' AND substr(v.cod_material, 5, 2) = '00' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 4) = '4310' AND substr(v.cod_material, 10, 2) = '01' THEN substr(v.cod_material, 5, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '435' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '436' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                END)
                 ORDER BY v.fecha_de_pedido ASC, v.pedido, v.posicion
                 LIMIT ?
                 """,
@@ -1406,7 +1649,12 @@ class DataRepositoryImpl:
                   ON v.pedido = op.pedido
                  AND v.posicion = op.posicion
                 LEFT JOIN core_material_master p
-                  ON p.material = v.cod_material
+                  ON p.part_code = (CASE
+                    WHEN substr(v.cod_material, 1, 2) = '40' AND substr(v.cod_material, 5, 2) = '00' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 4) = '4310' AND substr(v.cod_material, 10, 2) = '01' THEN substr(v.cod_material, 5, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '435' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '436' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                END)
                 ORDER BY op.fecha_de_pedido ASC, op.pedido, op.posicion
                 LIMIT ?
                 """,
@@ -2169,6 +2417,64 @@ class DataRepositoryImpl:
                 rows_snapshot,
             )
 
+            # Update descripcion_pieza for finished products (40XX00YYYYY) from MB52
+            con.execute(
+                """
+                UPDATE core_material_master
+                SET descripcion_pieza = COALESCE(
+                    (
+                        SELECT m.texto_breve
+                        FROM core_sap_mb52_snapshot m
+                        WHERE substr(m.material, 1, 2) = '40'
+                          AND substr(m.material, 5, 2) = '00'
+                          AND substr(m.material, 7, 5) = core_material_master.part_code
+                          AND m.texto_breve IS NOT NULL
+                          AND TRIM(m.texto_breve) <> ''
+                        LIMIT 1
+                    ),
+                    descripcion_pieza
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM core_sap_mb52_snapshot m2
+                    WHERE substr(m2.material, 1, 2) = '40'
+                      AND substr(m2.material, 5, 2) = '00'
+                      AND substr(m2.material, 7, 5) = core_material_master.part_code
+                      AND m2.texto_breve IS NOT NULL
+                      AND TRIM(m2.texto_breve) <> ''
+                )
+                """
+            )
+
+            # Update aleacion from MB52 (finished products only: 40XX00YYYYY -> extract XX)
+            con.execute(
+                """
+                UPDATE core_material_master
+                SET aleacion = COALESCE(
+                    (
+                        SELECT substr(m.material, 3, 2)
+                        FROM core_sap_mb52_snapshot m
+                        WHERE substr(m.material, 1, 2) = '40'
+                          AND substr(m.material, 5, 2) = '00'
+                          AND substr(m.material, 7, 5) = core_material_master.part_code
+                          AND substr(m.material, 3, 2) IS NOT NULL
+                          AND TRIM(substr(m.material, 3, 2)) <> ''
+                        LIMIT 1
+                    ),
+                    aleacion
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM core_sap_mb52_snapshot m2
+                    WHERE substr(m2.material, 1, 2) = '40'
+                      AND substr(m2.material, 5, 2) = '00'
+                      AND substr(m2.material, 7, 5) = core_material_master.part_code
+                      AND substr(m2.material, 3, 2) IS NOT NULL
+                      AND TRIM(substr(m2.material, 3, 2)) <> ''
+                )
+                """
+            )
+
             # Imported SAP data invalidates all derived orders/programs.
             con.execute("DELETE FROM core_orders")
             con.execute("DELETE FROM dispatcher_last_program")
@@ -2512,12 +2818,13 @@ class DataRepositoryImpl:
 
         self._validate_columns(df.columns, {"pedido", "posicion", "cod_material", "fecha_de_pedido"})
 
-        # Pre-fetch config ONCE outside the loop for performance
-        prefixes_raw = str(self.get_config(key="sap_vision_material_prefixes", default="401,402,403,404") or "").strip()
-        if prefixes_raw and "*" not in prefixes_raw:
-            valid_prefixes = tuple(p.strip() for p in prefixes_raw.split(",") if p.strip())
-        else:
-            valid_prefixes = ("402", "403", "404")
+        # Get active alloy codes from catalog for filtering
+        active_alloys = set(self.get_active_alloy_codes())
+        
+        # Fallback if catalog is empty (shouldn't happen after seed)
+        if not active_alloys:
+            logger.warning("No active alloys in catalog, falling back to default set")
+            active_alloys = {'32', '33', '34', '37', '38', '42', '21', '28'}
 
         rows: list[tuple] = []
         for _, r in df.iterrows():
@@ -2529,8 +2836,17 @@ class DataRepositoryImpl:
             tipo_posicion = str(r.get("tipo_posicion", "") or "").strip() or None
             cod_material = self._normalize_sap_key(r.get("cod_material"))
 
-            # Filter: Material prefixes (using pre-fetched config)
-            is_valid_mat = cod_material and cod_material.startswith(valid_prefixes)
+            # Filter: Only finished products (Pieza: 40XX00YYYYY) with configured alloys
+            # or special ZTLH tipo_posicion
+            is_valid_mat = False
+            if cod_material:
+                # Check if it's a finished product (Pieza pattern)
+                if is_finished_product(cod_material):
+                    # Extract alloy code and verify it's in catalog
+                    alloy_code = extract_alloy_code(cod_material)
+                    if alloy_code and alloy_code in active_alloys:
+                        is_valid_mat = True
+            
             is_ztlh = (tipo_posicion == "ZTLH")
 
             if not is_valid_mat and not is_ztlh:
@@ -2540,9 +2856,9 @@ class DataRepositoryImpl:
             if not fecha_de_pedido or fecha_de_pedido <= "2023-12-31":
                 continue
 
-            # Filter: Status comercial (Active only)
+            # Filter: Status comercial (reject only if "0" or empty)
             status_comercial = str(r.get("status_comercial", "") or "").strip() or None
-            if status_comercial and status_comercial.lower() != "activo":
+            if not status_comercial or status_comercial == "0":
                 continue
 
             desc = str(r.get("descripcion_material", "")).strip() or None
@@ -2681,7 +2997,7 @@ class DataRepositoryImpl:
                 """
             )
 
-            # Update material weights from Vision
+            # Update material weights from Vision (finished products only: 40XX00YYYYY)
             con.execute(
                 """
                 UPDATE core_material_master
@@ -2689,7 +3005,9 @@ class DataRepositoryImpl:
                     (
                         SELECT v.peso_unitario_ton
                         FROM core_sap_vision_snapshot v
-                        WHERE v.cod_material = core_material_master.material
+                        WHERE substr(v.cod_material, 1, 2) = '40'
+                          AND substr(v.cod_material, 5, 2) = '00'
+                          AND substr(v.cod_material, 7, 5) = core_material_master.part_code
                           AND v.peso_unitario_ton IS NOT NULL
                           AND v.peso_unitario_ton >= 0
                         ORDER BY v.fecha_de_pedido ASC, v.pedido ASC, v.posicion ASC
@@ -2700,9 +3018,71 @@ class DataRepositoryImpl:
                 WHERE EXISTS (
                     SELECT 1
                     FROM core_sap_vision_snapshot v2
-                    WHERE v2.cod_material = core_material_master.material
+                    WHERE substr(v2.cod_material, 1, 2) = '40'
+                      AND substr(v2.cod_material, 5, 2) = '00'
+                      AND substr(v2.cod_material, 7, 5) = core_material_master.part_code
                       AND v2.peso_unitario_ton IS NOT NULL
                       AND v2.peso_unitario_ton >= 0
+                )
+                """
+            )
+
+            # Update aleacion from Vision (finished products only: 40XX00YYYYY -> extract XX)
+            con.execute(
+                """
+                UPDATE core_material_master
+                SET aleacion = COALESCE(
+                    (
+                        SELECT substr(v.cod_material, 3, 2)
+                        FROM core_sap_vision_snapshot v
+                        WHERE substr(v.cod_material, 1, 2) = '40'
+                          AND substr(v.cod_material, 5, 2) = '00'
+                          AND substr(v.cod_material, 7, 5) = core_material_master.part_code
+                          AND substr(v.cod_material, 3, 2) IS NOT NULL
+                          AND TRIM(substr(v.cod_material, 3, 2)) <> ''
+                        ORDER BY v.fecha_de_pedido ASC, v.pedido ASC, v.posicion ASC
+                        LIMIT 1
+                    ),
+                    aleacion
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM core_sap_vision_snapshot v2
+                    WHERE substr(v2.cod_material, 1, 2) = '40'
+                      AND substr(v2.cod_material, 5, 2) = '00'
+                      AND substr(v2.cod_material, 7, 5) = core_material_master.part_code
+                      AND substr(v2.cod_material, 3, 2) IS NOT NULL
+                      AND TRIM(substr(v2.cod_material, 3, 2)) <> ''
+                )
+                """
+            )
+
+            # Update descripcion_pieza for finished products (40XX00YYYYY) from Vision
+            con.execute(
+                """
+                UPDATE core_material_master
+                SET descripcion_pieza = COALESCE(
+                    (
+                        SELECT v.descripcion_material
+                        FROM core_sap_vision_snapshot v
+                        WHERE substr(v.cod_material, 1, 2) = '40'
+                          AND substr(v.cod_material, 5, 2) = '00'
+                          AND substr(v.cod_material, 7, 5) = core_material_master.part_code
+                          AND v.descripcion_material IS NOT NULL
+                          AND TRIM(v.descripcion_material) <> ''
+                        ORDER BY v.fecha_de_pedido ASC, v.pedido ASC, v.posicion ASC
+                        LIMIT 1
+                    ),
+                    descripcion_pieza
+                )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM core_sap_vision_snapshot v2
+                    WHERE substr(v2.cod_material, 1, 2) = '40'
+                      AND substr(v2.cod_material, 5, 2) = '00'
+                      AND substr(v2.cod_material, 7, 5) = core_material_master.part_code
+                      AND v2.descripcion_material IS NOT NULL
+                      AND TRIM(v2.descripcion_material) <> ''
                 )
                 """
             )
@@ -2751,12 +3131,14 @@ class DataRepositoryImpl:
 
         moldes_rows: list[tuple] = []  # WIP (no demolding_date)
         piezas_rows: list[tuple] = []  # Completed (with demolding_date)
+        snapshot_rows: list[tuple] = []  # Raw snapshot rows for compatibility
         
         for _, r in df.iterrows():
             material_raw = str(r.get("material", "")).strip()  # "Pieza" column
             tipo_pieza_raw = str(r.get("tipo_pieza", "")).strip()  # "Tipo pieza" column
             lote = str(r.get("lote", "")).strip()
             flask_id_raw = str(r.get("flask_id", "")).strip()
+            flask_id_trim = flask_id_raw[:3] if flask_id_raw else ""
             cancha_raw = str(r.get("cancha", "")).strip()
             demolding_date_raw = r.get("demolding_date")
             demolding_time = str(r.get("demolding_time", "")).strip() or None
@@ -2769,12 +3151,9 @@ class DataRepositoryImpl:
             if mold_qty is None or mold_qty <= 0:
                 mold_qty = 1.0  # Default: 1 pieza = 1 caja completa
 
-            if not flask_id_raw:
-                continue
-            
             # Filter by cancha
             cancha_upper = cancha_raw.upper()
-            if cancha_upper not in valid_canchas:
+            if cancha_upper and cancha_upper not in valid_canchas:
                 continue
 
             # Try to parse demolding_date (handles None, NaN, NaT, empty strings)
@@ -2799,20 +3178,32 @@ class DataRepositoryImpl:
                 except Exception:
                     poured_date = None
 
-            # For WIP molds (no demolding_date): extract material code from tipo_pieza
+            # Extract material code from tipo_pieza field (11 digits)
+            cancha_value = cancha_raw or "UNKNOWN"
+            
+            import re
+            material_match = re.search(r'(\d{11})(?:\D|$)', tipo_pieza_raw)
+            material = material_match.group(1) if material_match else material_raw
+            
+            # Extract part_code (YYYYY) from material code
+            part_code = extract_part_code(material) if material else None
+            
+            # Skip rows without valid part code (log for debugging)
+            if not part_code:
+                logger.warning(f"Desmoldeo: Skipping row without valid material code. tipo_pieza={tipo_pieza_raw[:50]}, material={material}")
+                continue
+            
+            tipo_pieza = tipo_pieza_raw
+
             if not demolding_date:
-                import re
-                material_match = re.search(r'(\d{11})(?:\D|$)', tipo_pieza_raw)
-                material = material_match.group(1) if material_match else material_raw
-                tipo_pieza = tipo_pieza_raw
-                
                 # WIP molds: no demolding_date, no demolding_time
                 molde_row = (
                     material,
+                    part_code,
                     tipo_pieza,
                     lote or None,
                     flask_id_raw,
-                    cancha_raw or None,
+                    cancha_value,
                     mold_type,
                     poured_date,
                     poured_time,
@@ -2821,17 +3212,14 @@ class DataRepositoryImpl:
                 )
                 moldes_rows.append(molde_row)
             else:
-                # Completed pieces: use values as-is from Excel
-                material = material_raw
-                tipo_pieza = tipo_pieza_raw
-                
                 # Completed pieces: include demolding_date and demolding_time
                 pieza_row = (
                     material,
+                    part_code,
                     tipo_pieza,
                     lote or None,
                     flask_id_raw,
-                    cancha_raw or None,
+                    cancha_value,
                     demolding_date,
                     demolding_time,
                     cooling_hours,
@@ -2842,20 +3230,43 @@ class DataRepositoryImpl:
                 )
                 piezas_rows.append(pieza_row)
 
+            def _to_iso(val):
+                try:
+                    return val.isoformat()  # type: ignore[call-arg]
+                except Exception:
+                    return str(val) if val else None
+
+            snapshot_rows.append(
+                (
+                    material,  # Use extracted material, not material_raw
+                    lote or None,
+                    flask_id_trim,
+                    cancha_value,
+                    _to_iso(demolding_date),
+                    demolding_time,
+                    mold_type,
+                    _to_iso(poured_date),
+                    poured_time,
+                    cooling_hours,
+                    mold_qty,
+                )
+            )
+
         with self.db.connect() as con:
             # Clear both tables
             con.execute("DELETE FROM core_moldes_por_fundir")
             con.execute("DELETE FROM core_piezas_fundidas")
+            con.execute("DELETE FROM core_sap_demolding_snapshot")
             
             # Insert WIP molds (no demolding_date)
             if moldes_rows:
                 con.executemany(
                     """
                     INSERT INTO core_moldes_por_fundir(
-                        material, tipo_pieza, lote, flask_id, cancha,
+                        material, part_code, tipo_pieza, lote, flask_id, cancha,
                         mold_type, poured_date, poured_time, cooling_hours, mold_quantity
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     moldes_rows,
                 )
@@ -2865,12 +3276,24 @@ class DataRepositoryImpl:
                 con.executemany(
                     """
                     INSERT INTO core_piezas_fundidas(
-                        material, tipo_pieza, lote, flask_id, cancha, demolding_date, demolding_time,
+                        material, part_code, tipo_pieza, lote, flask_id, cancha, demolding_date, demolding_time,
                         cooling_hours, mold_type, poured_date, poured_time, mold_quantity
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     piezas_rows,
+                )
+
+            if snapshot_rows:
+                con.executemany(
+                    """
+                    INSERT INTO core_sap_demolding_snapshot(
+                        material, lote, flask_id, cancha, demolding_date, demolding_time,
+                        mold_type, poured_date, poured_time, cooling_hours, mold_quantity
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    snapshot_rows,
                 )
 
         self.log_audit("DATA_LOAD", "Demolding report imported", 
@@ -2887,15 +3310,25 @@ class DataRepositoryImpl:
                 SET flask_size = (
                     SELECT SUBSTR(ds.flask_id, 1, 3)
                     FROM core_piezas_fundidas ds
-                    WHERE ds.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(ds.material, 1, 2) = '40' AND substr(ds.material, 5, 2) = '00' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 4) = '4310' AND substr(ds.material, 10, 2) = '01' THEN substr(ds.material, 5, 5)
+                        WHEN substr(ds.material, 1, 3) = '435' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 3) = '436' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                    END) = core_material_master.part_code
                       AND ds.flask_id IS NOT NULL AND ds.flask_id <> ''
                     ORDER BY ds.demolding_date DESC
                     LIMIT 1
                 ),
-                tiempo_enfriamiento_molde_dias = (
+                tiempo_enfriamiento_molde_horas = (
                     SELECT CAST(ds.cooling_hours AS INTEGER)
                     FROM core_piezas_fundidas ds
-                    WHERE ds.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(ds.material, 1, 2) = '40' AND substr(ds.material, 5, 2) = '00' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 4) = '4310' AND substr(ds.material, 10, 2) = '01' THEN substr(ds.material, 5, 5)
+                        WHEN substr(ds.material, 1, 3) = '435' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 3) = '436' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                    END) = core_material_master.part_code
                       AND ds.cooling_hours IS NOT NULL
                     ORDER BY ds.demolding_date DESC
                     LIMIT 1
@@ -2903,7 +3336,12 @@ class DataRepositoryImpl:
                 piezas_por_molde = (
                     SELECT CAST(ROUND(1.0 / ds.mold_quantity) AS INTEGER)
                     FROM core_piezas_fundidas ds
-                    WHERE ds.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(ds.material, 1, 2) = '40' AND substr(ds.material, 5, 2) = '00' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 4) = '4310' AND substr(ds.material, 10, 2) = '01' THEN substr(ds.material, 5, 5)
+                        WHEN substr(ds.material, 1, 3) = '435' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                        WHEN substr(ds.material, 1, 3) = '436' AND substr(ds.material, 6, 1) = '0' THEN substr(ds.material, 7, 5)
+                    END) = core_material_master.part_code
                       AND ds.mold_quantity IS NOT NULL AND ds.mold_quantity > 0
                     ORDER BY ds.demolding_date DESC
                     LIMIT 1
@@ -2911,7 +3349,12 @@ class DataRepositoryImpl:
                 WHERE EXISTS (
                     SELECT 1
                     FROM core_piezas_fundidas ds2
-                    WHERE ds2.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(ds2.material, 1, 2) = '40' AND substr(ds2.material, 5, 2) = '00' THEN substr(ds2.material, 7, 5)
+                        WHEN substr(ds2.material, 1, 4) = '4310' AND substr(ds2.material, 10, 2) = '01' THEN substr(ds2.material, 5, 5)
+                        WHEN substr(ds2.material, 1, 3) = '435' AND substr(ds2.material, 6, 1) = '0' THEN substr(ds2.material, 7, 5)
+                        WHEN substr(ds2.material, 1, 3) = '436' AND substr(ds2.material, 6, 1) = '0' THEN substr(ds2.material, 7, 5)
+                    END) = core_material_master.part_code
                 )
                 """
             )
@@ -2924,7 +3367,12 @@ class DataRepositoryImpl:
                 SET flask_size = (
                     SELECT SUBSTR(wip.flask_id, 1, 3)
                     FROM core_moldes_por_fundir wip
-                    WHERE wip.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(wip.material, 1, 2) = '40' AND substr(wip.material, 5, 2) = '00' THEN substr(wip.material, 7, 5)
+                        WHEN substr(wip.material, 1, 4) = '4310' AND substr(wip.material, 10, 2) = '01' THEN substr(wip.material, 5, 5)
+                        WHEN substr(wip.material, 1, 3) = '435' AND substr(wip.material, 6, 1) = '0' THEN substr(wip.material, 7, 5)
+                        WHEN substr(wip.material, 1, 3) = '436' AND substr(wip.material, 6, 1) = '0' THEN substr(wip.material, 7, 5)
+                    END) = core_material_master.part_code
                       AND wip.flask_id IS NOT NULL AND wip.flask_id <> ''
                     ORDER BY wip.poured_date DESC
                     LIMIT 1
@@ -2933,7 +3381,12 @@ class DataRepositoryImpl:
                   AND EXISTS (
                     SELECT 1
                     FROM core_moldes_por_fundir wip2
-                    WHERE wip2.material = core_material_master.material
+                    WHERE (CASE
+                        WHEN substr(wip2.material, 1, 2) = '40' AND substr(wip2.material, 5, 2) = '00' THEN substr(wip2.material, 7, 5)
+                        WHEN substr(wip2.material, 1, 4) = '4310' AND substr(wip2.material, 10, 2) = '01' THEN substr(wip2.material, 5, 5)
+                        WHEN substr(wip2.material, 1, 3) = '435' AND substr(wip2.material, 6, 1) = '0' THEN substr(wip2.material, 7, 5)
+                        WHEN substr(wip2.material, 1, 3) = '436' AND substr(wip2.material, 6, 1) = '0' THEN substr(wip2.material, 7, 5)
+                    END) = core_material_master.part_code
                 )
                 """
             )
@@ -3077,11 +3530,14 @@ class DataRepositoryImpl:
             material_times = {}
             if pieces:
                 unique_materials = {material for _, _, material, _ in pieces.keys()}
-                placeholders = ','.join('?' * len(unique_materials))
-                time_rows = con.execute(
-                    f"SELECT material FROM core_material_master WHERE material IN ({placeholders})",
-                    list(unique_materials)
-                ).fetchall()
+                # Extract part_codes from materials
+                part_codes = {extract_part_code(m) for m in unique_materials if extract_part_code(m)}
+                if part_codes:
+                    placeholders = ','.join('?' * len(part_codes))
+                    time_rows = con.execute(
+                        f"SELECT part_code FROM core_material_master WHERE part_code IN ({placeholders})",
+                        list(part_codes)
+                    ).fetchall()
         
         # tiempo_proceso_min is legacy field (not used by dispatcher or planner), always NULL
         for (pedido, posicion, material, is_test), lotes in pieces.items():
@@ -3212,5 +3668,6 @@ class DataRepositoryImpl:
         try:
             self.rebuild_orders_from_sap_for(process=process)
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error rebuilding orders for {process}: {e}", exc_info=True)
             return False

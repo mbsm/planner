@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from foundryplan.data.repo_utils import logger
+from foundryplan.data.material_codes import extract_part_code
 
 if TYPE_CHECKING:
     from foundryplan.data.db import Db
@@ -180,9 +181,9 @@ class PlannerRepositoryImpl:
         
         Creates daily availability baseline for:
         - Flask types (from planner_flask_types config)
-        - Molding capacities (from molding_per_shift × turnos_día)
-        - Same mold capacities (from same_mold_per_shift × turnos_día)
-        - Pouring capacity (from pour_per_shift × turnos_día)
+        - Molding capacities (molding_per_shift × shifts_per_day)
+        - Same mold capacities (same_mold_per_shift × shifts_per_day)
+        - Pouring capacity (pour_per_shift × shifts_per_day)
         
         Uses shift configuration and holidays to determine working days.
         Horizon is min(config_horizon, days_to_cover_all_vision_orders).
@@ -273,7 +274,7 @@ class PlannerRepositoryImpl:
         
         # Get molding/pouring capacities per shift
         molding_per_shift = int(resource_row["molding_max_per_shift"] or 0)
-        same_mold_per_shift = int(resource_row["molding_max_same_part_per_day"] or 0)
+        same_mold_per_shift = int(resource_row["molding_max_same_part_per_day"] or 0)  # Config stores per-shift value
         pour_max_per_shift = float(resource_row["pour_max_ton_per_shift"] or 0.0)
         
         # Generate daily records for horizon
@@ -296,6 +297,7 @@ class PlannerRepositoryImpl:
             pour_shifts_count = pour_shifts.get(day_name, 0)
             
             # Calculate daily capacities (capacity_per_shift × number_of_shifts)
+            # All capacities are per-shift and get multiplied by shifts_per_day
             daily_molding_capacity = molding_per_shift * molding_shifts_count
             daily_same_mold_capacity = same_mold_per_shift * molding_shifts_count
             daily_pour_tons = pour_max_per_shift * pour_shifts_count
@@ -448,17 +450,17 @@ class PlannerRepositoryImpl:
         with self.db.connect() as con:
             material_master = con.execute(
                 """
-                SELECT material, peso_unitario_ton, tiempo_enfriamiento_molde_dias
+                SELECT part_code, peso_unitario_ton, tiempo_enfriamiento_molde_horas
                 FROM core_material_master
                 """
             ).fetchall()
         
         material_data = {}
         for row in material_master:
-            material = str(row["material"] or "").strip()
+            part_code = str(row["part_code"] or "").strip()
             peso_unitario_ton = float(row["peso_unitario_ton"] or 0.0)
-            cooling_hours = float(row["tiempo_enfriamiento_molde_dias"] or 72.0)  # Default 72h
-            material_data[material] = {"peso_unitario_ton": peso_unitario_ton, "cooling_hours": cooling_hours}
+            cooling_hours = float(row["tiempo_enfriamiento_molde_horas"] or 72.0)  # Default 72h
+            material_data[part_code] = {"peso_unitario_ton": peso_unitario_ton, "cooling_hours": cooling_hours}
         
         # Get moldes_por_fundir (not yet poured)
         with self.db.connect() as con:
@@ -509,7 +511,12 @@ class PlannerRepositoryImpl:
             if not material or not flask_id:
                 continue
             
-            mat_data = material_data.get(material)
+            # Extract part_code from full material
+            part_code = extract_part_code(material)
+            if not part_code:
+                continue
+            
+            mat_data = material_data.get(part_code)
             if not mat_data:
                 continue
             
@@ -615,7 +622,7 @@ class PlannerRepositoryImpl:
             con.executemany(
                 """
                 INSERT INTO planner_parts(
-                    scenario_id, part_id, flask_size, cool_hours, finish_hours, min_finish_hours,
+                    scenario_id, part_id, flask_size, cool_hours, finish_days, min_finish_days,
                     pieces_per_mold, net_weight_ton, alloy
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -661,7 +668,7 @@ class PlannerRepositoryImpl:
         with self.db.connect() as con:
             rows = con.execute(
                 """
-                SELECT part_id, flask_size, cool_hours, finish_hours, min_finish_hours,
+                SELECT part_id, flask_size, cool_hours, finish_days, min_finish_days,
                        pieces_per_mold, net_weight_ton, alloy
                 FROM planner_parts
                 WHERE scenario_id = ?
@@ -673,8 +680,8 @@ class PlannerRepositoryImpl:
                 "part_id": str(r[0]),
                 "flask_type": str(r[1] or ""),
                 "cool_hours": float(r[2] or 0.0),
-                "finish_hours": float(r[3] or 0.0),
-                "min_finish_hours": float(r[4] or 0.0),
+                "finish_days": int(r[3] or 0),
+                "min_finish_days": int(r[4] or 0),
                 "pieces_per_mold": float(r[5] or 0.0),
                 "net_weight_ton": float(r[6] or 0.0),
                 "alloy": str(r[7]) if r[7] is not None else None,
@@ -715,7 +722,8 @@ class PlannerRepositoryImpl:
             row = con.execute(
                 """
                 SELECT molding_max_per_day, molding_max_same_part_per_day, pour_max_ton_per_day, notes,
-                       molding_max_per_shift, molding_shifts_json, pour_max_ton_per_shift, pour_shifts_json
+                       molding_max_per_shift, molding_shifts_json, pour_max_ton_per_shift, pour_shifts_json,
+                       heats_per_shift, tons_per_heat, max_placement_search_days, allow_molding_gaps
                 FROM planner_resources
                 WHERE scenario_id = ?
                 """,
@@ -759,6 +767,10 @@ class PlannerRepositoryImpl:
             "molding_shifts": molding_shifts,
             "pour_max_ton_per_shift": float(row["pour_max_ton_per_shift"] or 0.0),
             "pour_shifts": pour_shifts,
+            "heats_per_shift": float(row["heats_per_shift"] or 0.0),
+            "tons_per_heat": float(row["tons_per_heat"] or 0.0),
+            "max_placement_search_days": int(row["max_placement_search_days"] or 365),
+            "allow_molding_gaps": bool(row["allow_molding_gaps"] or 0),
             "notes": str(row["notes"] or ""),
             "flask_types": [
                 {
@@ -805,6 +817,10 @@ class PlannerRepositoryImpl:
         molding_shifts: dict | None = None,
         pour_max_ton_per_shift: float | None = None,
         pour_shifts: dict | None = None,
+        heats_per_shift: float | None = None,
+        tons_per_heat: float | None = None,
+        max_placement_search_days: int | None = None,
+        allow_molding_gaps: bool | None = None,
         notes: str | None = None,
     ) -> None:
         import json
@@ -825,8 +841,12 @@ class PlannerRepositoryImpl:
                     molding_shifts_json,
                     pour_max_ton_per_shift,
                     pour_shifts_json,
+                    heats_per_shift,
+                    tons_per_heat,
+                    max_placement_search_days,
+                    allow_molding_gaps,
                     notes
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scenario_id) DO UPDATE SET
                     molding_max_per_day=COALESCE(excluded.molding_max_per_day, molding_max_per_day),
                     molding_max_same_part_per_day=COALESCE(excluded.molding_max_same_part_per_day, molding_max_same_part_per_day),
@@ -835,6 +855,10 @@ class PlannerRepositoryImpl:
                     molding_shifts_json=COALESCE(excluded.molding_shifts_json, molding_shifts_json),
                     pour_max_ton_per_shift=COALESCE(excluded.pour_max_ton_per_shift, pour_max_ton_per_shift),
                     pour_shifts_json=COALESCE(excluded.pour_shifts_json, pour_shifts_json),
+                    heats_per_shift=COALESCE(excluded.heats_per_shift, heats_per_shift),
+                    tons_per_heat=COALESCE(excluded.tons_per_heat, tons_per_heat),
+                    max_placement_search_days=COALESCE(excluded.max_placement_search_days, max_placement_search_days),
+                    allow_molding_gaps=COALESCE(excluded.allow_molding_gaps, allow_molding_gaps),
                     notes=excluded.notes
                 """,
                 (
@@ -846,6 +870,10 @@ class PlannerRepositoryImpl:
                     molding_shifts_json,
                     float(pour_max_ton_per_shift) if pour_max_ton_per_shift is not None else None,
                     pour_shifts_json,
+                    float(heats_per_shift) if heats_per_shift is not None else None,
+                    float(tons_per_heat) if tons_per_heat is not None else None,
+                    int(max_placement_search_days) if max_placement_search_days is not None else None,
+                    1 if allow_molding_gaps else 0 if allow_molding_gaps is not None else None,
                     str(notes).strip() if notes else None,
                 ),
             )
@@ -927,11 +955,119 @@ class PlannerRepositoryImpl:
                 updates[mat] = size
         
         if updates:
-            with self.db.connect() as con:
-                con.executemany(
-                    "UPDATE core_material_master SET flask_size = COALESCE(flask_size, ?) WHERE material = ?",
-                    [(size, mat) for mat, size in updates.items()]
-                )
+            # Extract part_codes from materials
+            updates_with_part_code: list[tuple[str, str]] = []
+            for mat, size in updates.items():
+                part_code = extract_part_code(mat)
+                if part_code:
+                    updates_with_part_code.append((size, part_code))
+            
+            if updates_with_part_code:
+                with self.db.connect() as con:
+                    con.executemany(
+                        "UPDATE core_material_master SET flask_size = COALESCE(flask_size, ?) WHERE part_code = ?",
+                        updates_with_part_code
+                    )
+
+    # ---------- Initial conditions helpers ----------
+    def get_planner_initial_order_progress(self, *, asof_date: date) -> list[dict]:
+        """Compute remaining molds per order from Visión + master data.
+
+        remaining_molds = ceil(x_fundir / piezas_por_molde); if piezas_por_molde <= 0 use 1.
+        """
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT
+                    v.pedido,
+                    v.posicion,
+                    COALESCE(v.solicitado, 0) AS qty_fundir,
+                    COALESCE(mm.piezas_por_molde, 0) AS ppm
+                FROM core_sap_vision_snapshot v
+                LEFT JOIN core_material_master mm ON mm.part_code = (CASE
+                    WHEN substr(v.cod_material, 1, 2) = '40' AND substr(v.cod_material, 5, 2) = '00' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 4) = '4310' AND substr(v.cod_material, 10, 2) = '01' THEN substr(v.cod_material, 5, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '435' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                    WHEN substr(v.cod_material, 1, 3) = '436' AND substr(v.cod_material, 6, 1) = '0' THEN substr(v.cod_material, 7, 5)
+                END)
+                WHERE v.pedido IS NOT NULL AND TRIM(v.pedido) <> ''
+                  AND v.posicion IS NOT NULL AND TRIM(v.posicion) <> ''
+                GROUP BY v.pedido, v.posicion
+                """,
+            ).fetchall()
+
+        out: list[dict] = []
+        asof_iso = asof_date.isoformat()
+        for r in rows:
+            pedido = str(r["pedido"]).strip()
+            posicion = str(r["posicion"]).strip()
+            if not pedido or not posicion:
+                continue
+            qty = float(r["qty_fundir"] or 0.0)
+            ppm = float(r["ppm"] or 0.0)
+            if ppm <= 0:
+                ppm = 1.0
+            remaining_molds = int(math.ceil(qty / ppm)) if qty > 0 else 0
+            out.append(
+                {
+                    "asof_date": asof_iso,
+                    "order_id": f"{pedido}/{posicion}",
+                    "remaining_molds": remaining_molds,
+                }
+            )
+        return out
+
+    def replace_planner_initial_order_progress(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        with self.db.connect() as con:
+            con.execute("DELETE FROM planner_initial_order_progress WHERE scenario_id = ?", (scenario_id,))
+            con.executemany(
+                """
+                INSERT INTO planner_initial_order_progress (scenario_id, asof_date, order_id, remaining_molds)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def get_planner_initial_order_progress_rows(self, *, scenario_id: int, asof_date) -> list[dict]:
+        asof_iso = asof_date.isoformat() if hasattr(asof_date, "isoformat") else str(asof_date)
+        with self.db.connect() as con:
+            rows = con.execute(
+                """
+                SELECT asof_date, order_id, remaining_molds
+                FROM planner_initial_order_progress
+                WHERE scenario_id = ?
+                ORDER BY order_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+
+        if not rows:
+            # Fallback: compute on the fly (non-persistent) so planner still runs
+            return self.get_planner_initial_order_progress(asof_date=asof_date)
+
+        return [
+            {
+                "asof_date": str(r["asof_date"] or asof_iso),
+                "order_id": str(r["order_id"]),
+                "remaining_molds": int(r["remaining_molds"] or 0),
+            }
+            for r in rows
+        ]
+
+    def get_planner_initial_patterns_loaded(self, *, scenario_id: int, asof_date) -> list[dict]:
+        """Return currently loaded patterns (patterns already on line).
+        
+        Currently returns empty - future enhancement could read from line state table.
+        Used by heuristic to prioritize continuation of in-progress orders.
+        """
+        # TODO: Implement line state tracking if needed
+        # For now, return empty list (all orders start fresh)
+        return []
+
+    def replace_planner_initial_patterns_loaded(self, *, scenario_id: int, rows: list[tuple]) -> None:
+        """Persist loaded patterns state (stub for future line state tracking)."""
+        # Currently no-op since we don't track line state yet
+        pass
 
     def sync_planner_inputs_from_sap(
         self,
@@ -992,7 +1128,7 @@ class PlannerRepositoryImpl:
             for r in prio_rows:
                 prio_map[(str(r[0]).strip(), str(r[1]).strip())] = str(r[2] or "").strip().lower()
 
-        orders_out: list[tuple] = []
+            orders_out: list[tuple] = []
         max_due = None
         for r in orders_rows:
             pedido = str(r["pedido"]).strip()
@@ -1004,12 +1140,13 @@ class PlannerRepositoryImpl:
                 continue
             order_id = f"{pedido}/{posicion}"
             kind = prio_map.get((pedido, posicion), "")
+            # Alineado con dispatcher: 1=test, 2=urgente, 3=normal
             if kind == "test":
                 priority = 1
             elif kind:
-                priority = 10
+                priority = 2
             else:
-                priority = 100
+                priority = 3
             orders_out.append((scenario_id, order_id, material, qty, due, priority))
             try:
                 d = date.fromisoformat(due)
@@ -1023,25 +1160,42 @@ class PlannerRepositoryImpl:
 
         # Parts from core_material_master for referenced materials
         materials = sorted({o[2] for o in orders_out})
+        
+        # Extract part_codes from materials
+        material_to_part_code = {}
+        part_codes = set()
+        for mat in materials:
+            pc = extract_part_code(mat)
+            if pc:
+                material_to_part_code[mat] = pc
+                part_codes.add(pc)
+        
         with self.db.connect() as con:
             rows = con.execute(
                 f"""
                 SELECT
-                    material,
+                    part_code,
                     flask_size,
-                    tiempo_enfriamiento_molde_dias,
+                    tiempo_enfriamiento_molde_horas,
                     peso_unitario_ton,
                     aleacion,
                     piezas_por_molde,
                     finish_hours,
                     min_finish_hours
                 FROM core_material_master
-                WHERE material IN ({','.join(['?'] * len(materials))})
+                WHERE part_code IN ({','.join(['?'] * len(part_codes))})
                 """,
-                materials,
+                sorted(part_codes),
             ).fetchall()
 
-        part_map = {str(r[0]): r for r in rows}
+        # Build map from material (11-digit) to row data via part_code
+        part_code_map = {str(r[0]): r for r in rows}
+        part_map = {}
+        for mat in materials:
+            pc = material_to_part_code.get(mat)
+            if pc and pc in part_code_map:
+                part_map[mat] = part_code_map[pc]
+        
         missing_parts: list[str] = []
         parts_out: list[tuple] = []
         max_lag_days = 0
@@ -1051,26 +1205,17 @@ class PlannerRepositoryImpl:
                 missing_parts.append(mat)
                 continue
             flask_size = str(r[1] or "").strip().upper()
-            cool_hours = float(r[2] or 0.0)  # Now stored as hours directly
+            cool_hours = float(r[2] or 0.0)  # Stored as hours directly
             weight = float(r[3] or 0.0)
             alloy = str(r[4] or "").strip() or None
             pieces_per_mold = float(r[5] or 0.0)
-            finish_hours = float(r[6] or 0.0) * 24.0  # Convert days to hours
-            min_finish_hours = float(r[7] or 0.0) * 24.0  # Convert days to hours
+            finish_days = int(r[6] or 0)  # Stored as days (NO conversion)
+            min_finish_days = int(r[7] or 0)  # Stored as days (NO conversion)
             
-            # Apply defaults for missing/invalid data to avoid skipping orders
-            if not flask_size:
-                flask_size = "UNKNOWN"
-            if cool_hours <= 0:
-                cool_hours = 24.0
-            if pieces_per_mold <= 0:
-                pieces_per_mold = 1.0
-            if finish_hours <= 0:
-                finish_hours = 24.0
-            if min_finish_hours <= 0:
-                min_finish_hours = 24.0
-            if min_finish_hours > finish_hours:
-                min_finish_hours = finish_hours
+            # NO aplicar defaults - si falta dato, se marcará en planner como inválido
+            # Validación mínima solo para evitar crashes
+            if min_finish_days > finish_days and finish_days > 0:
+                min_finish_days = finish_days
 
             parts_out.append(
                 (
@@ -1078,14 +1223,15 @@ class PlannerRepositoryImpl:
                     mat,
                     flask_size,
                     cool_hours,
-                    finish_hours,
-                    min_finish_hours,
+                    finish_days,  # Almacenado como días
+                    min_finish_days,  # Almacenado como días
                     pieces_per_mold,
                     weight,
                     alloy,
                 )
             )
-            lag_days = 1 + int(math.ceil(cool_hours / 24.0)) + 1 + int(math.ceil(finish_hours / 24.0)) + 1
+            # Calcular lag máximo usando días directamente
+            lag_days = 1 + int(math.ceil(cool_hours / 24.0)) + 1 + finish_days + 1
             if lag_days > max_lag_days:
                 max_lag_days = lag_days
         
@@ -1125,53 +1271,11 @@ class PlannerRepositoryImpl:
         progress_rows = self.get_planner_initial_order_progress(asof_date=asof_date)
         progress_out = [(scenario_id, r["asof_date"], r["order_id"], int(r["remaining_molds"])) for r in progress_rows]
 
-        # Initial flask in use: from Reporte Desmoldeo (required - tracks actual shakeout dates)
-        flask_rows = self.get_planner_initial_flask_inuse_from_demolding(
-            asof_date=asof_date,
-            flask_codes_map=flask_codes_map,
-        )
-
-        flask_out = [
-            (
-                scenario_id,
-                r["asof_date"],
-                r.get("flask_type") or r.get("flask_size"),
-                int(r["release_workday_index"]),
-                int(r["qty_inuse"]),
-            )
-            for r in flask_rows
-        ]
-
-        # Initial pour load: forward-fill WIP molds from MB52
-        wip_molds = self.get_planner_initial_pour_load(asof_date=asof_date)
-
-        # Forward-fill: allocate WIP to earliest workdays
-        pour_load_by_day: dict[int, float] = {}
-        day_idx = 0
-        for mold_info in wip_molds:
-            metal = float(mold_info["metal_per_mold"])
-            cnt = int(mold_info["cnt"])
-            total_metal = metal * cnt
-            while total_metal > 0:
-                capacity_left = max_pour - pour_load_by_day.get(day_idx, 0.0)
-                allocated = min(total_metal, capacity_left)
-                pour_load_by_day[day_idx] = pour_load_by_day.get(day_idx, 0.0) + allocated
-                total_metal -= allocated
-                if total_metal > 0:
-                    day_idx += 1
-
-        pour_out = [
-            (scenario_id, asof_date.isoformat(), idx, tons)
-            for idx, tons in sorted(pour_load_by_day.items())
-        ]
-
-        # Persist all
+        # Persist all (flask/pour state now managed by planner_daily_resources)
         self.replace_planner_parts(scenario_id=scenario_id, rows=parts_out)
         self.replace_planner_orders(scenario_id=scenario_id, rows=orders_out)
         self.replace_planner_calendar(scenario_id=scenario_id, rows=workdays)
         self.replace_planner_initial_order_progress(scenario_id=scenario_id, rows=progress_out)
-        self.replace_planner_initial_flask_inuse(scenario_id=scenario_id, rows=flask_out)
-        self.replace_planner_initial_pour_load(scenario_id=scenario_id, rows=pour_out)
 
         return {
             "scenario_id": int(scenario_id),
@@ -1253,7 +1357,12 @@ class PlannerRepositoryImpl:
                 """
                 SELECT w.flask_id, SUM(COALESCE(mm.peso_unitario_ton, 0.0)) AS tons
                 FROM core_moldes_por_fundir w
-                LEFT JOIN core_material_master mm ON mm.material = w.material
+                LEFT JOIN core_material_master mm ON mm.part_code = (CASE
+                    WHEN substr(w.material, 1, 2) = '40' AND substr(w.material, 5, 2) = '00' THEN substr(w.material, 7, 5)
+                    WHEN substr(w.material, 1, 4) = '4310' AND substr(w.material, 10, 2) = '01' THEN substr(w.material, 5, 5)
+                    WHEN substr(w.material, 1, 3) = '435' AND substr(w.material, 6, 1) = '0' THEN substr(w.material, 7, 5)
+                    WHEN substr(w.material, 1, 3) = '436' AND substr(w.material, 6, 1) = '0' THEN substr(w.material, 7, 5)
+                END)
                 WHERE w.flask_id IS NOT NULL AND TRIM(w.flask_id) <> ''
                 GROUP BY w.flask_id
                 """
@@ -1340,3 +1449,19 @@ class PlannerRepositoryImpl:
             breakdown[flask_type]['total_occupied'] += qty
         
         return breakdown
+
+    def get_latest_schedule_result(self, *, scenario_id: int | None = None) -> dict | None:
+        """Get the latest saved planner schedule result from database.
+        
+        Args:
+            scenario_id: Planner scenario ID (defaults to 1)
+            
+        Returns:
+            Dict with schedule result or None if no result found
+        """
+        from foundryplan.planner.persist import get_latest_schedule_result
+        
+        if scenario_id is None:
+            scenario_id = self.ensure_planner_scenario(name="default")
+        
+        return get_latest_schedule_result(self.db, scenario_id=scenario_id)

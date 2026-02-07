@@ -40,7 +40,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
     # We need a valid material to join with master if the query relies on it.
     
     repo.upsert_part_master(
-        material="40200001",
+        material="40330012345",
         family_id="F1",
         peso_unitario_ton=1.5
     )
@@ -51,7 +51,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (
-                'PED1', '10', '40200001', '2025-01-01',
+                'PED1', '10', '40330012345', '2025-01-01',
                 10, 0, 0, 1.5
             )
         """)
@@ -60,7 +60,7 @@ def test_upsert_vision_kpi_daily_execution(temp_db):
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton
             ) VALUES (
-                'PED2', '10', '40200002', '2025-02-01',
+                'PED2', '10', '40330012345', '2025-02-01',
                 5, 0, 0, 2.0
             )
         """)

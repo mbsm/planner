@@ -85,6 +85,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
         "config",
         "config_lineas",
         "config_familias",
+        "config_aleaciones",
         "config_materiales",
         "config_pedidos",
         "config_planner",
@@ -156,6 +157,11 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                             if active_key == "config_familias"
                             else "Familias"
                         )
+                        label_aleaciones = (
+                            "✓ Aleaciones"
+                            if active_key == "config_aleaciones"
+                            else "Aleaciones"
+                        )
                         label_materiales = (
                             "✓ Maestro materiales"
                             if active_key == "config_materiales"
@@ -181,6 +187,7 @@ def render_nav(active: str | None = None, repo: Repository | None = None) -> Non
                         ui.menu_item(label_lineas, on_click=lambda: ui.navigate.to("/config"))
                         ui.menu_item(label_dispatcher, on_click=lambda: ui.navigate.to("/config/dispatcher"))
                         ui.menu_item(label_familias, on_click=lambda: ui.navigate.to("/familias"))
+                        ui.menu_item(label_aleaciones, on_click=lambda: ui.navigate.to("/config/aleaciones"))
                         ui.menu_item(label_materiales, on_click=lambda: ui.navigate.to("/config/materiales"))
                         ui.menu_item(label_planner, on_click=lambda: ui.navigate.to("/config/planner"))
                         ui.separator()

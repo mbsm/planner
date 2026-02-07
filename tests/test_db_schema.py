@@ -78,12 +78,15 @@ def test_material_master_structure(temp_db):
         columns = {row[1]: row[2] for row in cursor.fetchall()}  # name: type
 
     expected_columns = {
-        "material": "TEXT",
+        "part_code": "TEXT",
+        "descripcion_pieza": "TEXT",
         "family_id": "TEXT",
         "aleacion": "TEXT",
         "flask_size": "TEXT",
         "piezas_por_molde": "REAL",
-        "tiempo_enfriamiento_molde_dias": "INTEGER",
+        "tiempo_enfriamiento_molde_horas": "INTEGER",
+        "finish_days": "INTEGER",
+        "min_finish_days": "INTEGER",
         "vulcanizado_dias": "INTEGER",
         "mecanizado_dias": "INTEGER",
         "inspeccion_externa_dias": "INTEGER",

@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import math
 from datetime import date, datetime, timedelta
 
 from nicegui import ui
 
 from foundryplan.dispatcher.scheduler import generate_dispatch_program
+from foundryplan.planner.api import run_planner
 from foundryplan.data.repository import Repository
 from foundryplan.ui.widgets import page_container, render_line_tables, render_nav
+
+logger = logging.getLogger(__name__)
 
 
 def register_pages(repo: Repository) -> None:
@@ -29,8 +33,7 @@ def register_pages(repo: Repository) -> None:
         try:
             if repo.data.count_orders(process=process) == 0:
                 return False
-            if repo.data.count_missing_parts_from_orders(process=process) > 0:
-                return False
+            # Don't block on missing parts - let scheduler handle them as errors
             # tiempo_proceso_min is legacy field, not used by dispatcher (start_by calculated from Part.vulcanizado_dias/mecanizado_dias/inspeccion_externa_dias)
             lines = repo.dispatcher.get_dispatch_lines_model(process=process)
             if not lines:
@@ -69,13 +72,19 @@ def register_pages(repo: Repository) -> None:
         """Best-effort: rebuild orders per process (from current MB52+Visión+almacenes) then regenerate programs."""
         rebuilt: list[str] = []
         updated: list[str] = []
+        failed: list[str] = []
+        
         for p in list(repo.data.processes.keys()):
             try:
                 ok = await asyncio.to_thread(lambda pp=p: repo.data.try_rebuild_orders_from_sap_for(process=pp))
                 if ok:
                     rebuilt.append(p)
-            except Exception:
+                else:
+                    failed.append(p)
+            except Exception as e:
                 # Keep going even if one process has missing config.
+                logger.error(f"Error refreshing process {p}: {e}")
+                failed.append(p)
                 continue
 
         for p in rebuilt:
@@ -86,11 +95,18 @@ def register_pages(repo: Repository) -> None:
                 continue
 
         if notify:
-            if updated:
-                labels = [((repo.data.processes.get(p, {}) or {}).get("label", p)) for p in updated]
-                ui.notify(f"Programas actualizados: {', '.join(labels)}")
-            else:
-                ui.notify("Datos SAP actualizados. Programas no regenerados (faltan líneas/maestro/tiempos).", color="warning")
+            try:
+                if updated:
+                    labels = [((repo.data.processes.get(p, {}) or {}).get("label", p)) for p in updated]
+                    ui.notify(f"Programas actualizados: {', '.join(labels)}")
+                elif failed:
+                    failed_labels = [((repo.data.processes.get(p, {}) or {}).get("label", p)) for p in failed]
+                    ui.notify(f"Error reconstruyendo rangos: {', '.join(failed_labels)}. Revisa logs.", color="warning")
+                else:
+                    ui.notify("Datos SAP actualizados. Programas no regenerados (faltan líneas/maestro/tiempos).", color="warning")
+            except RuntimeError:
+                # Client disconnected - can't show notification
+                pass
 
     def kick_refresh_from_sap_all(*, notify: bool = True) -> None:
         async def _runner() -> None:
@@ -102,14 +118,14 @@ def register_pages(repo: Repository) -> None:
     def dashboard() -> None:
         render_nav(repo=repo)
         with page_container():
-            ui.label("Home").classes("text-2xl font-semibold")
+            ui.label("Pedidos").classes("text-2xl font-semibold")
             ui.separator()
 
             kpi_rows = repo.data.get_vision_kpi_daily_rows(limit=180)
             dates: list[str] = []
             atrasadas: list[float] = []
 
-            ui.label("Histórico (Visión Planta): toneladas atrasadas").classes("text-lg font-semibold")
+            ui.label("Pedidos Atrasados").classes("text-lg font-semibold")
             ui.label("Snapshot diario cuando se sube Visión Planta.").classes("text-sm text-slate-600")
 
             if kpi_rows:
@@ -811,6 +827,9 @@ def register_pages(repo: Repository) -> None:
             
             # Container for resources/capacity table - SEGUNDO
             resources_container = ui.column().classes("w-full mt-4")
+
+            # Container for plan output (weekly table)
+            plan_container = ui.column().classes("w-full mt-4")
             
             def _render_resources_table(scenario_name: str) -> None:
                 """Render weekly resources and capacity availability FROM planner_daily_resources table."""
@@ -1013,19 +1032,333 @@ def register_pages(repo: Repository) -> None:
                     with initial_conditions_container:
                         ui.label(f"Error calculando condiciones iniciales: {ex}").classes("text-red-600")
             
-            with ui.row().classes("items-center gap-2"):
-                scenario = ui.input("Scenario", value="default")
+            def _render_last_saved_plan(scenario_name: str) -> None:
+                """Render last saved planner schedule result from database."""
+                plan_container.clear()
                 
-                # Initial render - PRIMERO condiciones iniciales, LUEGO recursos
+                try:
+                    scenario_id = repo.planner.ensure_planner_scenario(name=scenario_name)
+                    result = repo.planner.get_latest_schedule_result(scenario_id=scenario_id)
+                    
+                    if not result:
+                        with plan_container:
+                            ui.label("Plan de Producción").classes("text-lg font-semibold mb-2")
+                            ui.label("No hay plan guardado. Presione 'Regenerar y planificar' para ejecutar el planner.").classes("text-sm text-slate-500")
+                        return
+                    
+                    # Get supporting data
+                    calendar_rows = repo.planner.get_planner_calendar_rows(scenario_id=scenario_id)
+                    orders_rows = repo.planner.get_planner_orders_rows(scenario_id=scenario_id)
+                    parts_rows = repo.planner.get_planner_parts_rows(scenario_id=scenario_id)
+                    
+                    workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
+                    
+                    # Build part lookup
+                    part_map = {}
+                    for pr in parts_rows:
+                        pid = str(pr["part_id"])
+                        part_map[pid] = {
+                            "pieces_per_mold": float(pr.get("pieces_per_mold") or 0.0),
+                            "net_weight_ton": float(pr.get("net_weight_ton") or 0.0),
+                            "flask_type": str(pr.get("flask_type") or "").upper(),
+                        }
+                    
+                    # Week mapping
+                    week_labels: list[str] = []
+                    day_to_week: dict[int, str] = {}
+                    for idx, d in enumerate(workdays):
+                        week_start = d - timedelta(days=d.weekday())
+                        label = week_start.strftime("%Y-%m-%d")
+                        if label not in week_labels:
+                            week_labels.append(label)
+                        day_to_week[idx] = label
+                    
+                    # Aggregates
+                    molds_schedule = result.get("molds_schedule") or {}
+                    week_molds: dict[str, int] = {}
+                    week_tons: dict[str, float] = {}
+                    week_flask: dict[str, dict[str, int]] = {}
+                    
+                    for order_id, day_map in molds_schedule.items():
+                        # Find part
+                        part_id = None
+                        for row in orders_rows:
+                            if str(row.get("order_id")) == str(order_id):
+                                part_id = str(row.get("part_id"))
+                                break
+                        part = part_map.get(part_id or "")
+                        weight_per_mold = 0.0
+                        flask_type = ""
+                        if part:
+                            weight_per_mold = float(part.get("net_weight_ton") or 0.0) * float(part.get("pieces_per_mold") or 0.0)
+                            flask_type = str(part.get("flask_type") or "")
+                        
+                        for day_idx, qty in day_map.items():
+                            week = day_to_week.get(int(day_idx))
+                            if week is None:
+                                continue
+                            
+                            week_molds[week] = week_molds.get(week, 0) + qty
+                            week_tons[week] = week_tons.get(week, 0.0) + (qty * weight_per_mold)
+                            if flask_type:
+                                if week not in week_flask:
+                                    week_flask[week] = {}
+                                week_flask[week][flask_type] = week_flask[week].get(flask_type, 0) + qty
+                    
+                    # Build table
+                    rows = []
+                    rows.append({
+                        "item": "Total Moldes",
+                        **{wk: week_molds.get(wk, 0) for wk in week_labels[:8]}
+                    })
+                    rows.append({
+                        "item": "Toneladas",
+                        **{wk: round(week_tons.get(wk, 0.0), 1) for wk in week_labels[:8]}
+                    })
+                    
+                    # Flask usage by type
+                    all_flask_types = sorted({ft for wk_flasks in week_flask.values() for ft in wk_flasks.keys()})
+                    for ft in all_flask_types:
+                        rows.append({
+                            "item": f"Cajas {ft}",
+                            **{wk: week_flask.get(wk, {}).get(ft, 0) for wk in week_labels[:8]}
+                        })
+                    
+                    columns = [{"name": "item", "label": "Item", "field": "item", "align": "left"}]
+                    for wk in week_labels[:8]:
+                        label = date.fromisoformat(wk)
+                        columns.append({
+                            "name": wk,
+                            "label": label.strftime("%d-%b"),
+                            "field": wk,
+                            "align": "center",
+                        })
+                    
+                    with plan_container:
+                        run_ts = result.get("run_timestamp", "")
+                        ui.label("Plan Guardado (semanal)").classes("text-lg font-semibold mb-2")
+                        ui.label(f"Última ejecución: {run_ts}").classes("text-xs text-slate-500 mb-2")
+                        ui.table(columns=columns, rows=rows, row_key="item").classes("w-full").props("dense flat bordered")
+                        
+                        # Show errors if any
+                        result_errors = result.get("errors") or []
+                        skipped = result.get("skipped_orders", 0)
+                        if result_errors or skipped > 0:
+                            ui.separator().classes("my-3")
+                            ui.label("Errores y Órdenes Omitidas").classes("text-lg font-semibold text-red-600 mb-2")
+                            if skipped > 0:
+                                ui.label(f"⚠️ {skipped} órdenes omitidas por falta de capacidad de cajas (revisar maestro de materiales)").classes("text-sm text-orange-600")
+                            if result_errors:
+                                error_rows = [{"error": err} for err in result_errors]
+                                ui.table(
+                                    columns=[{"name": "error", "label": "Mensaje", "field": "error", "align": "left"}],
+                                    rows=error_rows,
+                                    row_key="error",
+                                ).classes("w-full").props("dense flat bordered")
+                
+                except Exception as ex:
+                    with plan_container:
+                        ui.label(f"Error cargando último plan: {ex}").classes("text-red-600")
+            
+            with ui.row().classes("items-center gap-3"):
+                scenario = ui.input("Scenario", value="default")
+
+                # Initial render - PRIMERO condiciones iniciales, LUEGO recursos, FINALMENTE último plan guardado
                 _render_initial_conditions_table(str(scenario.value or "default").strip() or "default")
                 _render_resources_table(str(scenario.value or "default").strip() or "default")
-                
+                _render_last_saved_plan(str(scenario.value or "default").strip() or "default")
+
                 def _refresh_tables() -> None:
                     scenario_name = str(scenario.value or "default").strip() or "default"
                     _render_initial_conditions_table(scenario_name)
                     _render_resources_table(scenario_name)
-                
+
+                async def _replan() -> None:
+                    scenario_name = str(scenario.value or "default").strip() or "default"
+                    try:
+                        plan_container.clear()
+                    except RuntimeError:
+                        # Client disconnected before we started
+                        return
+                    
+                    try:
+                        def _run_planner_job():
+                            sid = repo.planner.ensure_planner_scenario(name=scenario_name)
+                            repo.planner.rebuild_daily_resources_from_config(scenario_id=sid)
+                            repo.planner.update_daily_resources_from_demolding(scenario_id=sid)
+                            result_local = run_planner(
+                                repo.planner,
+                                asof_date=date.today(),
+                                scenario_name=scenario_name,
+                            )
+                            calendar_rows_local = repo.planner.get_planner_calendar_rows(scenario_id=sid)
+                            orders_rows_local = repo.planner.get_planner_orders_rows(scenario_id=sid)
+                            parts_rows_local = repo.planner.get_planner_parts_rows(scenario_id=sid)
+                            return sid, result_local, calendar_rows_local, orders_rows_local, parts_rows_local
+
+                        scenario_id, result, calendar_rows, orders_rows, parts_rows = await asyncio.to_thread(
+                            _run_planner_job
+                        )
+                        workdays = [date.fromisoformat(r["date"]) for r in calendar_rows]
+
+                        # Build part lookup
+                        part_map = {}
+                        for pr in parts_rows:
+                            pid = str(pr["part_id"])
+                            part_map[pid] = {
+                                "pieces_per_mold": float(pr.get("pieces_per_mold") or 0.0),
+                                "net_weight_ton": float(pr.get("net_weight_ton") or 0.0),
+                                "flask_type": str(pr.get("flask_type") or "").upper(),
+                            }
+
+                        # Week mapping
+                        week_labels: list[str] = []
+                        day_to_week: dict[int, str] = {}
+                        for idx, d in enumerate(workdays):
+                            week_start = d - timedelta(days=d.weekday())
+                            label = week_start.strftime("%Y-%m-%d")
+                            if label not in week_labels:
+                                week_labels.append(label)
+                            day_to_week[idx] = label
+
+                        # Aggregates
+                        molds_schedule = result.get("molds_schedule") or {}
+                        completion_days = result.get("completion_days") or {}
+                        late_days = result.get("late_days") or {}
+
+                        week_molds: dict[str, int] = {}
+                        week_tons: dict[str, float] = {}
+                        week_flask: dict[str, dict[str, int]] = {}
+
+                        for order_id, day_map in molds_schedule.items():
+                            # Find part
+                            part_id = None
+                            for row in orders_rows:
+                                if str(row.get("order_id")) == str(order_id):
+                                    part_id = str(row.get("part_id"))
+                                    break
+                            part = part_map.get(part_id or "")
+                            weight_per_mold = 0.0
+                            flask_type = ""
+                            if part:
+                                weight_per_mold = float(part.get("net_weight_ton") or 0.0) * float(part.get("pieces_per_mold") or 0.0)
+                                flask_type = str(part.get("flask_type") or "")
+
+                            for day_idx, qty in day_map.items():
+                                week = day_to_week.get(int(day_idx))
+                                if week is None:
+                                    continue
+                                week_molds[week] = week_molds.get(week, 0) + int(qty)
+                                week_tons[week] = week_tons.get(week, 0.0) + weight_per_mold * int(qty)
+                                if flask_type:
+                                    wf = week_flask.setdefault(week, {})
+                                    wf[flask_type] = wf.get(flask_type, 0) + int(qty)
+
+                        # Build rows
+                        rows: list[dict] = []
+
+                        def _row(label: str) -> dict:
+                            base = {"item": label}
+                            for wk in week_labels:
+                                base[wk] = None
+                            return base
+
+                        total_molds_row = _row("Total moldes")
+                        total_tons_row = _row("Toneladas")
+                        # Flask rows per type
+                        flask_types_all: set[str] = set()
+                        for wf in week_flask.values():
+                            flask_types_all.update(wf.keys())
+                        flask_rows = {ft: _row(f"Cajas {ft}") for ft in sorted(flask_types_all)}
+
+                        for wk, val in week_molds.items():
+                            total_molds_row[wk] = val
+                        for wk, val in week_tons.items():
+                            total_tons_row[wk] = round(val, 2)
+                        for wk, mp in week_flask.items():
+                            for ft, val in mp.items():
+                                flask_rows[ft][wk] = val
+
+                        rows.extend([total_molds_row, total_tons_row, *flask_rows.values()])
+
+                        # Per-order rows
+                        for ord_row in orders_rows:
+                            order_id = str(ord_row.get("order_id"))
+                            part_id = str(ord_row.get("part_id"))
+                            part = part_map.get(part_id)
+                            day_map = molds_schedule.get(order_id, {})
+                            complete_day = completion_days.get(order_id)
+                            deliver_day = complete_day + 1 if complete_day is not None else None
+                            row = _row(order_id)
+                            for day_idx, qty in day_map.items():
+                                wk = day_to_week.get(int(day_idx))
+                                if wk is None:
+                                    continue
+                                existing = row.get(wk)
+                                row[wk] = int(qty) + (existing or 0)
+                            for wk in week_labels:
+                                marks = ""
+                                if complete_day is not None and day_to_week.get(int(complete_day)) == wk:
+                                    marks += "F"
+                                if deliver_day is not None and day_to_week.get(int(deliver_day)) == wk:
+                                    marks += "*"
+                                if marks:
+                                    base = row.get(wk)
+                                    row[wk] = f"{base or ''}{marks}"
+                            row["late"] = int(late_days.get(order_id, 0) or 0)
+                            if part:
+                                row["flask"] = str(part.get("flask_type") or "")
+                            rows.append(row)
+
+                        # Columns: Item + week labels
+                        columns = [{"name": "item", "label": "Item", "field": "item", "align": "left"}]
+                        for wk in week_labels:
+                            label = date.fromisoformat(wk)
+                            columns.append({
+                                "name": wk,
+                                "label": label.strftime("%d-%b"),
+                                "field": wk,
+                                "align": "center",
+                            })
+
+                        try:
+                            with plan_container:
+                                ui.label("Plan heurístico (semanal)").classes("text-lg font-semibold mb-2")
+                                ui.table(columns=columns, rows=rows, row_key="item").classes("w-full").props("dense flat bordered")
+                                ui.label("Se regeneran recursos diarios y condiciones iniciales antes de planificar.").classes("text-xs text-slate-500 mt-1")
+
+                                # Show errors if any
+                                result_errors = result.get("errors") or []
+                                skipped = result.get("skipped_orders", 0)
+                                if result_errors or skipped > 0:
+                                    ui.separator().classes("my-3")
+                                    ui.label("Errores y Órdenes Omitidas").classes("text-lg font-semibold text-red-600 mb-2")
+                                    if skipped > 0:
+                                        ui.label(f"⚠️ {skipped} órdenes omitidas por falta de capacidad de cajas (revisar maestro de materiales)").classes("text-sm text-orange-600")
+                                    if result_errors:
+                                        error_rows = [{"error": err} for err in result_errors]
+                                        ui.table(
+                                            columns=[{"name": "error", "label": "Mensaje", "field": "error", "align": "left"}],
+                                            rows=error_rows,
+                                            row_key="error",
+                                        ).classes("w-full").props("dense flat bordered")
+
+                            # Refresh resource views with regenerated data
+                            _render_initial_conditions_table(scenario_name)
+                            _render_resources_table(scenario_name)
+                        except RuntimeError:
+                            # Client disconnected during UI update - nothing to do
+                            return
+                    except Exception as ex:
+                        try:
+                            plan_container.clear()
+                            ui.notify(f"Error al planificar: {ex}", color="negative")
+                        except RuntimeError:
+                            # Client disconnected - can't show notification
+                            pass
+
                 ui.button(on_click=_refresh_tables).props("icon=refresh flat round dense").tooltip("Actualizar Vistas")
+                ui.button("Regenerar y planificar", icon="play_arrow", on_click=_replan).props("color=primary")
 
     @ui.page("/audit")
     def audit_log() -> None:
@@ -1075,16 +1408,12 @@ def register_pages(repo: Repository) -> None:
                             value=repo.data.get_config(key="planta", default="Planta Rancagua") or "Planta Rancagua",
                         ).classes("w-full")
                         
-                        with ui.row().classes("w-full gap-2"):
-                            centro_in = ui.input(
-                                "Centro SAP",
-                                value=repo.data.get_config(key="sap_centro", default="4000") or "4000",
-                            ).classes("flex-1")
-                            vision_prefixes_in = ui.input(
-                                "Prefijos Material (Visión Planta)",
-                                value=repo.data.get_config(key="sap_vision_material_prefixes", default="401,402,403,404") or "401,402,403,404",
-                                placeholder="Ej: 401,402,403,404 o *",
-                            ).props("hint='Separa con comas. Solo Visión Planta'").classes("flex-[2]")
+                        centro_in = ui.input(
+                            "Centro SAP",
+                            value=repo.data.get_config(key="sap_centro", default="4000") or "4000",
+                        ).classes("w-full")
+                        
+                        ui.label("Filtro Visión Planta: Solo materiales tipo Pieza (40XX00YYYYY) con aleaciones activas del catálogo.").classes("text-xs text-slate-400 italic")
 
                         ui.separator().classes("my-2")
                         allow_move_line_chk = ui.checkbox(
@@ -1118,7 +1447,6 @@ def register_pages(repo: Repository) -> None:
                     repo.data.set_config(key="planta", value=str(planta_in.value or "").strip())
                     repo.data.set_config(key="sap_centro", value=str(centro_in.value or "").strip())
                     repo.data.set_config(key="sap_almacen_terminaciones", value=str(almacen_in.value or "").strip())
-                    repo.data.set_config(key="sap_vision_material_prefixes", value=str(vision_prefixes_in.value or "").strip())
                     repo.data.set_config(key="sap_almacen_toma_dureza", value=str(dura_in.value or "").strip())
                     repo.data.set_config(key="sap_almacen_mecanizado", value=str(mec_in.value or "").strip())
                     repo.data.set_config(key="sap_almacen_mecanizado_externo", value=str(mec_ext_in.value or "").strip())
@@ -1190,17 +1518,21 @@ def register_pages(repo: Repository) -> None:
 
                         # Check for missing master data (MB52 or Visión)
                         if kind in {"mb52", "sap_mb52", "vision", "vision_planta", "sap_vision"}:
-                            missing_by_material: dict[str, dict] = {}
+                            missing_by_part: dict[str, dict] = {}
                             
                             # Check MB52 missing parts
                             for proc in repo.data.processes.keys():
                                 for it in repo.data.get_missing_parts_from_mb52_for(process=proc):
+                                    part_code = it.get("part_code")  # Can be None
                                     material = str(it.get("material", "")).strip()
                                     if not material:
                                         continue
-                                    rec = missing_by_material.setdefault(
-                                        material,
+                                    # Group by part_code if available, otherwise by full material
+                                    group_key = part_code if part_code else material
+                                    rec = missing_by_part.setdefault(
+                                        group_key,
                                         {
+                                            "part_code": part_code,
                                             "material": material,
                                             "texto_breve": str(it.get("texto_breve", "") or "").strip(),
                                             "processes": set(),
@@ -1218,19 +1550,23 @@ def register_pages(repo: Repository) -> None:
                                         "aleacion",
                                         "piezas_por_molde",
                                         "peso_unitario_ton",
-                                        "tiempo_enfriamiento_molde_dias",
+                                        "tiempo_enfriamiento_molde_horas",
                                     ]:
                                         if key not in rec:
                                             rec[key] = it.get(key)
                             
                             # Check Visión missing parts
                             for it in repo.data.get_missing_parts_from_vision_for():
+                                part_code = it.get("part_code")  # Can be None
                                 material = str(it.get("material", "")).strip()
                                 if not material:
                                     continue
-                                rec = missing_by_material.setdefault(
-                                    material,
+                                # Group by part_code if available, otherwise by full material
+                                group_key = part_code if part_code else material
+                                rec = missing_by_part.setdefault(
+                                    group_key,
                                     {
+                                        "part_code": part_code,
                                         "material": material,
                                         "texto_breve": str(it.get("texto_breve", "") or "").strip(),
                                         "processes": set(),
@@ -1247,14 +1583,26 @@ def register_pages(repo: Repository) -> None:
                                     "sobre_medida_mecanizado",
                                     "aleacion",
                                     "piezas_por_molde",
-                                    "tiempo_enfriamiento_molde_dias",
+                                    "tiempo_enfriamiento_molde_horas",
                                 ]:
                                     if key not in rec:
                                         rec[key] = it.get(key)
 
-                            missing_master = [missing_by_material[k] for k in sorted(missing_by_material.keys())]
+                            missing_master = [missing_by_part[k] for k in sorted(missing_by_part.keys())]
                             if missing_master:
                                 families = repo.data.list_families() or ["Parrillas", "Lifters", "Corazas", "Otros"]
+                                
+                                # Get configured flask types from planner
+                                flask_options = []  # Must be configured in planner settings
+                                try:
+                                    planner_res = repo.planner.get_planner_resources(scenario_id=1)
+                                    if planner_res:
+                                        flask_types = planner_res.get("flask_types", []) or []
+                                        if flask_types:
+                                            flask_options = sorted([ft["flask_type"] for ft in flask_types])
+                                except Exception:
+                                    pass
+                                
                                 # persistent: prevents closing on backdrop click or ESC
                                 dialog = ui.dialog().props("persistent backdrop-filter='blur(4px)'")
                                 entries: dict[str, dict] = {}
@@ -1268,6 +1616,7 @@ def register_pages(repo: Repository) -> None:
 
                                         with ui.element("div").classes("max-h-[65vh] overflow-y-auto w-full"):
                                             for it in missing_master:
+                                                part_code = it.get("part_code")  # Can be None
                                                 material = str(it.get("material", "")).strip()
                                                 desc = str(it.get("texto_breve", "")).strip()
                                                 procs = sorted(list(it.get("processes") or []))
@@ -1276,7 +1625,12 @@ def register_pages(repo: Repository) -> None:
 
                                                 with ui.row().classes("items-end w-full gap-3 py-1"):
                                                     with ui.column().classes("w-64"):
-                                                        ui.label(material).classes("font-medium")
+                                                        # Show part_code if extracted, otherwise full material
+                                                        if part_code:
+                                                            ui.label(f"Pieza: {part_code}").classes("font-medium")
+                                                            ui.label(f"Ej: {material}").classes("text-xs text-slate-500 leading-tight")
+                                                        else:
+                                                            ui.label(material).classes("font-medium")
                                                         if desc:
                                                             ui.label(desc).classes("text-xs text-slate-600 leading-tight")
                                                         if procs:
@@ -1290,7 +1644,7 @@ def register_pages(repo: Repository) -> None:
                                                     sm_val = bool(int(it.get("sobre_medida_mecanizado") or 0))
                                                     aleacion_val = str(it.get("aleacion") or "")
                                                     ppm_val = float(it.get("piezas_por_molde") or 0.0)
-                                                    tenfr_val = int(it.get("tiempo_enfriamiento_molde_dias") or 0)
+                                                    tenfr_val = int(it.get("tiempo_enfriamiento_molde_horas") or 0)
 
                                                     # Layout:
                                                     # Row 1: Familia, Aleacion, Piezas/Molde, Enfriamiento
@@ -1300,7 +1654,7 @@ def register_pages(repo: Repository) -> None:
                                                             fam = ui.select(families, value=fam_val, label="Familia").classes("w-40")
                                                             ale = ui.input("Aleación", value=aleacion_val).classes("w-28")
                                                             flask_val = str(it.get("flask_size") or "").strip().upper()
-                                                            flask = ui.select(["S", "M", "L"], value=flask_val or None, label="Flask").classes("w-20")
+                                                            flask = ui.select(flask_options, value=flask_val or None, label="Flask").classes("w-20")
                                                             ppm = ui.number("Pza/Molde", value=ppm_val, min=0, step=0.1).classes("w-24")
                                                             tenfr = ui.number("Enfr (d)", value=tenfr_val, min=0, step=1).classes("w-20")
 
@@ -1311,7 +1665,10 @@ def register_pages(repo: Repository) -> None:
                                                             mpi = ui.checkbox("Mec perf incl.", value=mpi_val).props("dense")
                                                             sm = ui.checkbox("Sobre medida", value=sm_val).props("dense")
                                                     
-                                                        entries[material] = {
+                                                        # Store using group_key (part_code or material) but keep material for saving
+                                                        group_key = part_code if part_code else material
+                                                        entries[group_key] = {
+                                                            "material": material,
                                                             "fam": fam, "v": v, "m": m, "i": i,
                                                             "mpi": mpi, "sm": sm,
                                                             "ale": ale, "flask": flask, "ppm": ppm, "tenfr": tenfr
@@ -1323,8 +1680,12 @@ def register_pages(repo: Repository) -> None:
                                             ui.button("Cerrar", on_click=dialog.close).props("flat")
 
                                             def save_all() -> None:
-                                                try:
-                                                    for material, w in entries.items():
+                                                successes = 0
+                                                failures = []
+                                                for part_code, w in entries.items():
+                                                    try:
+                                                        # Use example material to derive part_code (upsert_part_master extracts it)
+                                                        material = w["material"]
                                                         fam_val = str(w["fam"].value or "Otros").strip() or "Otros"
                                                         repo.data.upsert_part_master(
                                                             material=material,
@@ -1337,16 +1698,30 @@ def register_pages(repo: Repository) -> None:
                                                             aleacion=str(w["ale"].value or "").strip(),
                                                             flask_size=str(w["flask"].value or "").strip(),
                                                             piezas_por_molde=float(w["ppm"].value or 0.0),
-                                                            tiempo_enfriamiento_molde_dias=int(w["tenfr"].value or 0),
+                                                            tiempo_enfriamiento_molde_horas=int(w["tenfr"].value or 0),
                                                         )
+                                                        successes += 1
+                                                    except Exception as ex:
+                                                        failures.append((part_code, str(ex)))
 
-                                                    ui.notify("Maestro actualizado")
+                                                # Report summary
+                                                if successes > 0:
+                                                    msg = f"✓ {successes} material{'es' if successes != 1 else ''} agregado{'s' if successes != 1 else ''}"
+                                                    if failures:
+                                                        msg += f", ⚠️ {len(failures)} error{'es' if len(failures) != 1 else ''}"
+                                                    ui.notify(msg, color="positive" if not failures else "warning")
                                                     asyncio.create_task(refresh_from_sap_all(notify=False))
-
                                                     dialog.close()
-                                                    ui.navigate.to("/actualizar")
-                                                except Exception as ex:
-                                                    ui.notify(f"Error guardando maestro: {ex}", color="negative")
+                                                    # Navigate to materials master table to show updated data
+                                                    ui.navigate.to("/config/materiales")
+                                                elif failures:
+                                                    err_msg = f"⚠️ Error guardando {len(failures)} material{'es' if len(failures) != 1 else ''}"
+                                                    ui.notify(err_msg, color="negative")
+                                                    # Show first error detail
+                                                    if failures:
+                                                        ui.notify(f"Ejemplo: {failures[0][0]} - {failures[0][1]}", color="negative")
+                                                else:
+                                                    ui.notify("No hubo cambios", color="info")
 
                                             ui.button("Guardar todo", on_click=save_all).props("unelevated color=primary")
 
@@ -1374,8 +1749,15 @@ def register_pages(repo: Repository) -> None:
                             ui.notify(f"Hay {missing_proc} números de parte sin tiempos. Ve a Config > Maestro materiales")
                         auto_generate_and_save_all(notify=False)
                         ui.navigate.to("/actualizar")
+                    except RuntimeError:
+                        # Client disconnected - can't show error notification
+                        pass
                     except Exception as ex:
-                        ui.notify(f"Error importando {kind}: {ex}", color="negative")
+                        try:
+                            ui.notify(f"Error importando {kind}: {ex}", color="negative")
+                        except RuntimeError:
+                            # Client disconnected - can't show error notification
+                            pass
 
                 ui.upload(label=label, on_upload=handle_upload).props("accept=.xlsx max-files=1")
 
@@ -1606,6 +1988,207 @@ def register_pages(repo: Repository) -> None:
             tbl.on("rowDblClick", on_row_event)
             tbl.on("rowDblclick", on_row_event)
 
+    @ui.page("/config/aleaciones")
+    def config_aleaciones() -> None:
+        render_nav(active="config_aleaciones", repo=repo)
+        with page_container():
+            ui.label("Aleaciones").classes("text-2xl font-semibold")
+            ui.label("Mantén el catálogo de aleaciones activas para filtrado de Vision.").classes("pt-subtitle")
+
+            ui.separator()
+            ui.label("Catálogo").classes("text-lg font-semibold")
+
+            rows_all = repo.data.list_alloys()
+            q = ui.input("Buscar aleación", placeholder="Ej: CM2, 32").classes("w-72")
+
+            def filtered_rows() -> list[dict]:
+                needle = str(q.value or "").strip().lower()
+                if not needle:
+                    return list(rows_all)
+                return [
+                    r for r in rows_all
+                    if needle in str(r.get("alloy_code", "")).lower()
+                    or needle in str(r.get("alloy_name", "")).lower()
+                ]
+
+            def refresh_rows() -> None:
+                nonlocal rows_all
+                rows_all = repo.data.list_alloys()
+                tbl.rows = filtered_rows()
+                tbl.update()
+
+            tbl = ui.table(
+                columns=[
+                    {"name": "alloy_code", "label": "Código", "field": "alloy_code", "align": "left"},
+                    {"name": "alloy_name", "label": "Nombre", "field": "alloy_name", "align": "left"},
+                    {"name": "is_active", "label": "Activo", "field": "is_active", "align": "center"},
+                ],
+                rows=filtered_rows(),
+                row_key="alloy_code",
+            ).props("dense flat bordered")
+
+            tbl.add_slot(
+                "body-cell-is_active",
+                r"""
+<q-td :props="props">
+    <q-badge v-if="Number(props.value) === 1" color="green" label="Sí" />
+    <q-badge v-else color="grey" label="No" />
+</q-td>
+""",
+            )
+
+            q.on(
+                "update:model-value",
+                lambda *_: (
+                    setattr(tbl, "rows", filtered_rows()),
+                    tbl.update(),
+                ),
+            )
+
+            dialog = ui.dialog().props("persistent")
+            state = {"mode": "add", "current_code": ""}
+
+            with dialog:
+                with ui.card().classes("bg-white p-6").style("width: 92vw; max-width: 720px;"):
+                    mode_label = ui.label("").classes("text-xl font-semibold")
+                    current_label = ui.label("").classes("font-mono text-slate-700")
+                    ui.separator()
+
+                    with ui.row().classes("w-full items-end gap-4"):
+                        code_input = ui.input("Código (2 dígitos)", placeholder="32").classes("w-40")
+                        name_input = ui.input("Nombre", placeholder="CM2").classes("w-60")
+                        code_input.props("outlined dense")
+                        name_input.props("outlined dense")
+
+                    with ui.row().classes("w-full items-center gap-2 pt-2"):
+                        active_chk = ui.checkbox("Activo", value=True)
+                        ui.label("(se usa para filtrar materiales en Vision)").classes("text-sm text-slate-600")
+
+                    ui.separator()
+
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancelar", on_click=dialog.close).props("flat")
+
+                        def do_delete() -> None:
+                            if state["mode"] == "add":
+                                ui.notify("No hay nada que eliminar", color="warning")
+                                return
+                            try:
+                                repo.data.delete_alloy(alloy_code=state["current_code"])
+                                ui.notify("Aleación eliminada")
+                            except Exception as ex:
+                                ui.notify(f"Error eliminando: {ex}", color="negative")
+                                return
+                            dialog.close()
+                            refresh_rows()
+
+                        ui.button("Eliminar", color="negative", on_click=do_delete).props("outline")
+
+                        def do_save() -> None:
+                            code = str(code_input.value or "").strip()
+                            name = str(name_input.value or "").strip()
+                            if not code:
+                                ui.notify("Código vacío", color="negative")
+                                return
+                            if len(code) != 2 or not code.isdigit():
+                                ui.notify("Código debe ser 2 dígitos (ej: 32)", color="negative")
+                                return
+                            if not name:
+                                ui.notify("Nombre vacío", color="negative")
+                                return
+                            try:
+                                repo.data.upsert_alloy(
+                                    alloy_code=code,
+                                    alloy_name=name,
+                                    is_active=bool(active_chk.value),
+                                )
+                                ui.notify("Aleación guardada")
+                            except Exception as ex:
+                                ui.notify(f"Error guardando: {ex}", color="negative")
+                                return
+                            dialog.close()
+                            refresh_rows()
+
+                        ui.button("Guardar", on_click=do_save).props("unelevated color=primary")
+
+            def open_dialog(*, mode: str, row: dict | None = None) -> None:
+                state["mode"] = mode
+                if mode == "add":
+                    mode_label.text = "Nueva aleación"
+                    current_label.text = ""
+                    code_input.value = ""
+                    name_input.value = ""
+                    active_chk.value = True
+                    code_input.set_enabled(True)
+                else:
+                    mode_label.text = "Editar aleación"
+                    state["current_code"] = str(row.get("alloy_code", "") if row else "")
+                    current_label.text = state["current_code"]
+                    code_input.value = state["current_code"]
+                    name_input.value = str(row.get("alloy_name", "") if row else "")
+                    active_chk.value = bool(int(row.get("is_active", 1)) if row else 1)
+                    code_input.set_enabled(False)  # Don't allow changing PK
+                dialog.open()
+
+            with ui.row().classes("items-end w-full gap-3"):
+                ui.button("Nueva aleación", icon="add", on_click=lambda: open_dialog(mode="add")).props(
+                    "unelevated color=primary"
+                )
+
+                def toggle_active() -> None:
+                    selected = tbl.selected
+                    if not selected:
+                        ui.notify("Selecciona una aleación", color="warning")
+                        return
+                    for row in selected:
+                        code = str(row.get("alloy_code", "")).strip()
+                        if code:
+                            try:
+                                repo.data.toggle_alloy_active(alloy_code=code)
+                            except Exception as ex:
+                                ui.notify(f"Error: {ex}", color="negative")
+                    refresh_rows()
+                    tbl.selected = []
+
+                ui.button("Activar/Desactivar", icon="toggle_on", on_click=toggle_active).props("outline")
+
+            def on_row_event(e):
+                args = getattr(e, "args", None)
+
+                def _walk(obj):
+                    if isinstance(obj, dict):
+                        yield obj
+                        for v_ in obj.values():
+                            yield from _walk(v_)
+                    elif isinstance(obj, (list, tuple)):
+                        for it in obj:
+                            yield from _walk(it)
+
+                def _pick_row(obj) -> dict | None:
+                    # Handle NiceGUI event format: can be [evt, row_dict, ...] or {args: {row: ...}}
+                    if isinstance(obj, (list, tuple)) and len(obj) >= 2:
+                        # Try position 1 (second element) as row dict
+                        if isinstance(obj[1], dict) and "alloy_code" in obj[1]:
+                            return obj[1]
+                    
+                    if isinstance(obj, dict):
+                        if "alloy_code" in obj:
+                            return obj
+                        for d in _walk(obj):
+                            if "alloy_code" in d:
+                                return d
+                    return None
+
+                row = _pick_row(args)
+                if not row:
+                    ui.notify("No se pudo leer la fila seleccionada", color="negative")
+                    return
+                open_dialog(mode="edit", row=row)
+
+            tbl.on("rowDblClick", on_row_event)
+            tbl.on("rowDblclick", on_row_event)
+            tbl.props("selection=multiple")
+
     @ui.page("/config/tiempos")
     def config_tiempos() -> None:
         render_nav(active="config_materiales", repo=repo)
@@ -1691,34 +2274,36 @@ def register_pages(repo: Repository) -> None:
                     return [_decorate_row(r) for r in rows_all]
                 out = []
                 for r in rows_all:
-                    if needle in str(r.get("material", "")).lower():
+                    part_code = str(r.get("part_code", "")).lower()
+                    desc = str(r.get("descripcion_pieza", "")).lower()
+                    if needle in part_code or needle in desc:
                         out.append(_decorate_row(r))
                 return out
 
             tbl = ui.table(
                 columns=[
-                    {"name": "material", "label": "Material", "field": "material"},
-                    {"name": "descripcion", "label": "Descripción", "field": "descripcion_material"},
-                    {"name": "familia", "label": "Familia", "field": "family_id"},
-                    {"name": "aleacion", "label": "Aleación", "field": "aleacion"},
-                    {"name": "flask", "label": "Flask", "field": "flask_size"},
-                    {"name": "ppm", "label": "Pza/Molde", "field": "piezas_por_molde"},
-                    {"name": "enfr", "label": "Enfr (h)", "field": "tiempo_enfriamiento_molde_dias"},
-                    {"name": "finish_d", "label": "Finish (d)", "field": "finish_days"},
-                    {"name": "min_finish_d", "label": "Min Finish (d)", "field": "min_finish_days"},
-                    {"name": "vulcanizado_dias", "label": "Vulc (d)", "field": "vulcanizado_dias"},
-                    {"name": "mecanizado_dias", "label": "Mec (d)", "field": "mecanizado_dias"},
-                    {"name": "inspeccion_externa_dias", "label": "Insp ext (d)", "field": "inspeccion_externa_dias"},
-                    {"name": "peso_ton", "label": "Peso Unitario", "field": "peso_unitario_ton"},
-                    {"name": "mec_perf_inclinada", "label": "Mec perf incl.", "field": "mec_perf_inclinada"},
-                    {"name": "sobre_medida", "label": "Sobre medida", "field": "sobre_medida_mecanizado"},
+                    {"name": "part_code", "label": "Pieza", "field": "part_code", "align": "left"},
+                    {"name": "descripcion", "label": "Descripción", "field": "descripcion_pieza", "align": "left"},
+                    {"name": "familia", "label": "Familia", "field": "family_id", "align": "left"},
+                    {"name": "aleacion", "label": "Aleación", "field": "aleacion", "align": "center"},
+                    {"name": "flask", "label": "Flask", "field": "flask_size", "align": "center"},
+                    {"name": "ppm", "label": "Pza/Molde", "field": "piezas_por_molde", "align": "right"},
+                    {"name": "enfr", "label": "Enfr (h)", "field": "tiempo_enfriamiento_molde_horas", "align": "right"},
+                    {"name": "finish_d", "label": "Finish (d)", "field": "finish_days", "align": "right"},
+                    {"name": "min_finish_d", "label": "Min Finish (d)", "field": "min_finish_days", "align": "right"},
+                    {"name": "vulcanizado_dias", "label": "Vulc (d)", "field": "vulcanizado_dias", "align": "right"},
+                    {"name": "mecanizado_dias", "label": "Mec (d)", "field": "mecanizado_dias", "align": "right"},
+                    {"name": "inspeccion_externa_dias", "label": "Insp ext (d)", "field": "inspeccion_externa_dias", "align": "right"},
+                    {"name": "peso_ton", "label": "Peso Unitario (t)", "field": "peso_unitario_ton", "align": "right"},
+                    {"name": "mec_perf_inclinada", "label": "Mec perf incl.", "field": "mec_perf_inclinada", "align": "center"},
+                    {"name": "sobre_medida", "label": "Sobre medida", "field": "sobre_medida_mecanizado", "align": "center"},
                 ],
                 rows=filtered_rows(),
-                row_key="material",
+                row_key="part_code",
             ).props("dense flat bordered")
 
             tbl.add_slot(
-                "body-cell-material",
+                "body-cell-part_code",
                 r"""
 <q-td :props="props">
   <span :class="props.row && props.row._missing_times ? 'text-negative font-medium' : ''">{{ props.value }}</span>
@@ -1817,7 +2402,16 @@ def register_pages(repo: Repository) -> None:
 
                     with ui.row().classes("w-full items-end gap-4 pt-2"):
                         ale = ui.input("Aleación", value="").classes("w-40")
-                        flask = ui.select(["S", "M", "L"], value=None, label="Flask").classes("w-24")
+                        
+                        # Read configured flask types from planner config
+                        flask_options = []  # Must be configured in planner settings
+                        planner_res = repo.planner.get_planner_resources(scenario_id=1)
+                        if planner_res:
+                            flask_types = planner_res.get("flask_types", []) or []
+                            if flask_types:
+                                flask_options = sorted([ft["flask_type"] for ft in flask_types])
+                        
+                        flask = ui.select(flask_options, value=None, label="Flask").classes("w-24")
                         ppm = ui.number("Pza/Molde", value=0, min=0, step=0.1).classes("w-32")
                         tenfr = ui.number("Enfr (h)", value=0, min=0, step=0.5).classes("w-32")
                         ale.props("outlined dense")
@@ -1859,7 +2453,7 @@ def register_pages(repo: Repository) -> None:
                                     aleacion=str(ale.value or "").strip(),
                                     flask_size=str(flask.value or "").strip(),
                                     piezas_por_molde=float(ppm.value) if ppm.value is not None else None,
-                                    tiempo_enfriamiento_molde_dias=int(tenfr.value) if tenfr.value is not None else None,
+                                    tiempo_enfriamiento_molde_horas=int(tenfr.value) if tenfr.value is not None else None,
                                     finish_days=int(finish_d.value) if finish_d.value is not None else None,
                                     min_finish_days=int(min_finish_d.value) if min_finish_d.value is not None else None,
                                 )
@@ -1892,30 +2486,28 @@ def register_pages(repo: Repository) -> None:
 
                         ui.button("Eliminar", color="negative", on_click=do_delete_one).props("unelevated")
 
-            def _find_row_by_np(numero_parte: str) -> dict | None:
-                np_s = str(numero_parte).strip()
-                if not np_s:
+            def _find_row_by_part_code(part_code: str) -> dict | None:
+                pc_s = str(part_code).strip()
+                if not pc_s:
                     return None
                 for r in rows_all:
-                    if str(r.get("material", "")).strip() == np_s:
+                    if str(r.get("part_code", "")).strip() == pc_s:
                         return r
                 return None
 
-            def open_editor(*, numero_parte: str, row: dict | None = None) -> None:
-                np_s = str(numero_parte or "").strip()
-                if not np_s:
+            def open_editor(*, part_code: str, row: dict | None = None) -> None:
+                pc_s = str(part_code or "").strip()
+                if not pc_s:
                     ui.notify("Fila inválida", color="negative")
                     return
-                row_data = row if isinstance(row, dict) else _find_row_by_np(np_s)
+                row_data = row if isinstance(row, dict) else _find_row_by_part_code(pc_s)
                 if row_data is None:
                     ui.notify("Fila inválida", color="negative")
                     return
 
-                np_label.text = np_s
-                try:
-                    np_desc.text = repo.data.get_mb52_texto_breve(material=np_s)
-                except Exception:
-                    np_desc.text = ""
+                # Store material_example for upsert/delete (needs 11-digit material code)
+                np_label.text = str(row_data.get("material_example", "") or "").strip()
+                np_desc.text = str(row_data.get("descripcion_pieza", "") or "").strip()
                 fam_sel.value = str(row_data.get("family_id") or "Otros")
                 v.value = row_data.get("vulcanizado_dias") if row_data.get("vulcanizado_dias") is not None else 0
                 m.value = row_data.get("mecanizado_dias") if row_data.get("mecanizado_dias") is not None else 0
@@ -1929,8 +2521,8 @@ def register_pages(repo: Repository) -> None:
                 flask.value = str(row_data.get("flask_size") or "").strip().upper() or None
                 ppm.value = row_data.get("piezas_por_molde") if row_data.get("piezas_por_molde") is not None else 0
                 tenfr.value = (
-                    row_data.get("tiempo_enfriamiento_molde_dias")
-                    if row_data.get("tiempo_enfriamiento_molde_dias") is not None
+                    row_data.get("tiempo_enfriamiento_molde_horas")
+                    if row_data.get("tiempo_enfriamiento_molde_horas") is not None
                     else 0
                 )
                 finish_d.value = row_data.get("finish_days") if row_data.get("finish_days") is not None else 15
@@ -1964,6 +2556,19 @@ def register_pages(repo: Repository) -> None:
                         s = str(obj).strip()
                         return None, (s if s else None), None
 
+                    # Direct list/tuple handling (common in newer NiceGUI)
+                    # Format: [event, row_dict, ...]
+                    if isinstance(obj, (list, tuple)) and len(obj) >= 2:
+                        if isinstance(obj[1], dict):
+                            # Second element is often the row dict
+                            candidate = obj[1]
+                            if any(k in candidate for k in ("part_code", "material", "numero_parte", "family_id")):
+                                row_found = candidate
+                                # Try to extract key from row
+                                if "part_code" in candidate:
+                                    key_found = str(candidate.get("part_code", "")).strip() or None
+                                return row_found, key_found, idx_found
+
                     for d in _walk(obj):
                         # unwrap nested args dict
                         if isinstance(d.get("args"), dict):
@@ -1988,7 +2593,7 @@ def register_pages(repo: Repository) -> None:
                             row_found = d.get("row")
 
                         # sometimes the payload dict itself is the row
-                        if row_found is None and any(k in d for k in ("numero_parte", "material", "Material")):
+                        if row_found is None and any(k in d for k in ("part_code", "numero_parte", "material", "Material")):
                             row_found = d
 
                         if key_found is None:
@@ -2011,17 +2616,18 @@ def register_pages(repo: Repository) -> None:
                 row, key, row_index = _pick_row_and_key(args)
 
                 if isinstance(row, dict):
-                    np = (
-                        row.get("numero_parte")
+                    pc = (
+                        row.get("part_code")
+                        or row.get("numero_parte")
                         or row.get("material")
                         or row.get("Material")
                         or row.get("numeroParte")
                     )
-                    open_editor(numero_parte=str(np or "").strip(), row=row)
+                    open_editor(part_code=str(pc or "").strip(), row=row)
                     return
 
                 if key is not None:
-                    open_editor(numero_parte=str(key).strip(), row=None)
+                    open_editor(part_code=str(key).strip(), row=None)
                     return
 
                 if row_index is not None:
@@ -2029,8 +2635,8 @@ def register_pages(repo: Repository) -> None:
                         current_rows = list(getattr(tbl, "rows", []) or [])
                         if 0 <= row_index < len(current_rows) and isinstance(current_rows[row_index], dict):
                             r0 = current_rows[row_index]
-                            np_val = r0.get("material") or r0.get("numero_parte") or ""
-                            open_editor(numero_parte=str(np_val).strip(), row=r0)
+                            pc_val = r0.get("part_code") or r0.get("material") or r0.get("numero_parte") or ""
+                            open_editor(part_code=str(pc_val).strip(), row=r0)
                             return
                     except Exception:
                         pass
@@ -2074,7 +2680,8 @@ def register_pages(repo: Repository) -> None:
                     _, res = _load_resources(str(scenario_in.value or "default"))
                     molding_same.value = int(res.get("molding_max_same_part_per_day") or 0)
                     molding_shift.value = int(res.get("molding_max_per_shift") or 0)
-                    pour_shift.value = float(res.get("pour_max_ton_per_shift") or 0.0)
+                    heats_per_shift.value = float(res.get("heats_per_shift") or 0.0)
+                    tons_per_heat.value = float(res.get("tons_per_heat") or 0.0)
                     
                     # Load shifts
                     molding_shifts_dict = res.get("molding_shifts") or {}
@@ -2091,9 +2698,11 @@ def register_pages(repo: Repository) -> None:
                     horizon_days.value = int(repo.data.get_config(key="planner_horizon_days", default="30") or 30)
                     horizon_buffer.value = int(repo.data.get_config(key="planner_horizon_buffer_days", default="10") or 10)
                     demolding_cancha.value = str(repo.data.get_config(key="planner_demolding_cancha", default="TCF-L1400") or "TCF-L1400")
-                    for w in (molding_same, molding_shift, pour_shift, notes, holidays):
+                    max_search_days.value = int(res.get("max_placement_search_days") or 365)
+                    allow_gaps.value = bool(res.get("allow_molding_gaps") or False)
+                    for w in (molding_same, molding_shift, heats_per_shift, tons_per_heat, notes, holidays):
                         w.update()
-                    for w in (horizon_days, horizon_buffer, demolding_cancha):
+                    for w in (horizon_days, horizon_buffer, demolding_cancha, max_search_days, allow_gaps):
                         w.update()
                     for inp in molding_shifts_inputs.values():
                         inp.update()
@@ -2115,7 +2724,7 @@ def register_pages(repo: Repository) -> None:
                             molding_shift = ui.number("Moldes por turno", value=int(res.get("molding_max_per_shift") or 0), min=0, step=1).classes("w-full")
                             molding_shift.props("outlined dense")
                             molding_same = ui.number(
-                                "Máx. mismo material/día",
+                                "Máx. mismo material por turno",
                                 value=int(res.get("molding_max_same_part_per_day") or 0),
                                 min=0,
                                 step=1,
@@ -2124,8 +2733,10 @@ def register_pages(repo: Repository) -> None:
                         
                         with ui.column().classes("flex-1"):
                             ui.label("Fusión").classes("text-sm font-semibold text-slate-600 mb-1")
-                            pour_shift = ui.number("Toneladas por turno", value=float(res.get("pour_max_ton_per_shift") or 0.0), min=0, step=0.1).classes("w-full")
-                            pour_shift.props("outlined dense")
+                            heats_per_shift = ui.number("Coladas por turno", value=float(res.get("heats_per_shift") or 0.0), min=0, step=0.1).classes("w-full")
+                            heats_per_shift.props("outlined dense")
+                            tons_per_heat = ui.number("Ton por colada", value=float(res.get("tons_per_heat") or 0.0), min=0, step=0.1).classes("w-full")
+                            tons_per_heat.props("outlined dense")
                     
                     ui.separator().classes("my-2")
                     ui.label("Turnos por día de la semana").classes("text-sm font-medium text-slate-600 mb-2")
@@ -2135,6 +2746,49 @@ def register_pages(repo: Repository) -> None:
                     
                     molding_shifts_inputs = {}
                     pour_shifts_inputs = {}
+                    molding_cap_labels = {}
+                    pour_cap_labels = {}
+                    
+                    # Labels para totales semanales (se asignarán después de crear los widgets)
+                    weekly_labels = {"molding": None, "pour": None, "molding_shifts": None, "pour_shifts": None, "heats_total": None}
+                    
+                    def update_capacity_displays():
+                        """Recalcular y actualizar las capacidades mostradas."""
+                        total_molding = 0
+                        total_pour = 0.0
+                        total_molding_shifts = 0
+                        total_pour_shifts = 0
+                        total_heats = 0.0
+                        
+                        for day_name in day_names:
+                            # Capacidad de moldeo = turnos × moldes_por_turno
+                            molding_turns = int(molding_shifts_inputs[day_name].value or 0)
+                            moldes_per_shift = int(molding_shift.value or 0)
+                            molding_cap = molding_turns * moldes_per_shift
+                            molding_cap_labels[day_name].text = f"{molding_cap} moldes"
+                            total_molding += molding_cap
+                            total_molding_shifts += molding_turns
+                            
+                            # Capacidad de fusión = turnos × (coladas_por_turno × ton_por_colada)
+                            pour_turns = int(pour_shifts_inputs[day_name].value or 0)
+                            heats = float(heats_per_shift.value or 0.0)
+                            tons = float(tons_per_heat.value or 0.0)
+                            day_heats = pour_turns * heats
+                            pour_cap = day_heats * tons
+                            pour_cap_labels[day_name].text = f"{day_heats:.1f} col / {pour_cap:.1f} ton"
+                            total_pour += pour_cap
+                            total_pour_shifts += pour_turns
+                            total_heats += day_heats
+                        
+                        # Actualizar totales semanales
+                        if weekly_labels["molding"]:
+                            weekly_labels["molding"].text = f"{total_molding} moldes"
+                        if weekly_labels["pour"]:
+                            weekly_labels["pour"].text = f"{total_heats:.1f} col / {total_pour:.1f} ton"
+                        if weekly_labels["molding_shifts"]:
+                            weekly_labels["molding_shifts"].text = str(total_molding_shifts)
+                        if weekly_labels["pour_shifts"]:
+                            weekly_labels["pour_shifts"].text = str(total_pour_shifts)
                     
                     with ui.column().classes("w-full gap-1"):
                         with ui.row().classes("w-full items-center gap-2 mb-1"):
@@ -2153,6 +2807,7 @@ def register_pages(repo: Repository) -> None:
                                     min=0,
                                     max=3,
                                     step=1,
+                                    on_change=update_capacity_displays,
                                 ).classes("w-16").props("outlined dense hide-bottom-space")
                                 molding_shifts_inputs[day_name].tooltip("Turnos de moldeo")
                                 pour_shifts_inputs[day_name] = ui.number(
@@ -2161,16 +2816,55 @@ def register_pages(repo: Repository) -> None:
                                     min=0,
                                     max=3,
                                     step=1,
+                                    on_change=update_capacity_displays,
                                 ).classes("w-16").props("outlined dense hide-bottom-space")
                                 pour_shifts_inputs[day_name].tooltip("Turnos de fusión")
                                 
-                                # Capacidad calculada de moldeo
+                                # Capacidad calculada de moldeo (reactiva)
                                 molding_cap = int(molding_shifts_dict.get(day_name, 0)) * int(res.get("molding_max_per_shift") or 0)
-                                ui.label(f"{molding_cap} moldes").classes("flex-1 text-sm text-right text-slate-600")
+                                molding_cap_labels[day_name] = ui.label(f"{molding_cap} moldes").classes("flex-1 text-sm text-right text-slate-600")
                                 
-                                # Capacidad calculada de fusión
-                                pour_cap = int(pour_shifts_dict.get(day_name, 0)) * float(res.get("pour_max_ton_per_shift") or 0.0)
-                                ui.label(f"{pour_cap:.1f} ton").classes("flex-1 text-sm text-right text-slate-600")
+                                # Capacidad calculada de fusión (reactiva)
+                                heats = float(res.get("heats_per_shift") or 0.0)
+                                tons = float(res.get("tons_per_heat") or 0.0)
+                                day_heats = int(pour_shifts_dict.get(day_name, 0)) * heats
+                                pour_cap = day_heats * tons
+                                pour_cap_labels[day_name] = ui.label(f"{day_heats:.1f} col / {pour_cap:.1f} ton").classes("flex-1 text-sm text-right text-slate-600")
+                        
+                        # Fila de totales semanales
+                        ui.separator().classes("my-2")
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label("Total Semana").classes("w-20 text-sm font-bold text-slate-700")
+                            
+                            # Total turnos de moldeo
+                            total_molding_shifts = sum(int(molding_shifts_dict.get(day, 0)) for day in day_names)
+                            weekly_labels["molding_shifts"] = ui.label(str(total_molding_shifts)).classes("w-16 text-center text-sm font-bold text-slate-700")
+                            
+                            # Total turnos de fusión
+                            total_pour_shifts = sum(int(pour_shifts_dict.get(day, 0)) for day in day_names)
+                            weekly_labels["pour_shifts"] = ui.label(str(total_pour_shifts)).classes("w-16 text-center text-sm font-bold text-slate-700")
+                            
+                            # Calcular totales de capacidad
+                            total_molding = sum(
+                                int(molding_shifts_dict.get(day, 0)) * int(res.get("molding_max_per_shift") or 0)
+                                for day in day_names
+                            )
+                            heats = float(res.get("heats_per_shift") or 0.0)
+                            tons = float(res.get("tons_per_heat") or 0.0)
+                            total_heats = sum(
+                                int(pour_shifts_dict.get(day, 0)) * heats
+                                for day in day_names
+                            )
+                            total_pour = total_heats * tons
+                            
+                            weekly_labels["molding"] = ui.label(f"{total_molding} moldes").classes("flex-1 text-sm text-right font-bold text-slate-700")
+                            weekly_labels["pour"] = ui.label(f"{total_heats:.1f} col / {total_pour:.1f} ton").classes("flex-1 text-sm text-right font-bold text-slate-700")
+                            weekly_labels["pour"] = ui.label(f"{total_pour:.1f} ton").classes("flex-1 text-sm text-right font-bold text-slate-700")
+                    
+                    # Conectar cambios en capacidades por turno para actualizar displays
+                    molding_shift.on_value_change(update_capacity_displays)
+                    heats_per_shift.on_value_change(update_capacity_displays)
+                    tons_per_heat.on_value_change(update_capacity_displays)
             
             with ui.row().classes("w-full gap-6 items-start pt-3"):
                 with ui.card().classes("w-full p-4"):
@@ -2316,6 +3010,27 @@ def register_pages(repo: Repository) -> None:
                     
                     ui.label("Se usa el mínimo entre este valor y los días para cubrir todos los pedidos Vision.").classes("text-xs text-slate-500 mt-1")
 
+            with ui.row().classes("w-full gap-6 items-start pt-3"):
+                with ui.card().classes("flex-1 min-w-[320px] p-4"):
+                    ui.label("Algoritmo de Placement").classes("text-lg font-medium text-slate-700 mb-2")
+                    ui.label("Controla el comportamiento de búsqueda de ventanas para colocar moldes.").classes("text-xs text-slate-500 mb-2")
+                    
+                    max_search_days = ui.number(
+                        "Búsqueda máxima (días)",
+                        value=int(res.get("max_placement_search_days") or 365),
+                        min=30,
+                        max=730,
+                        step=1,
+                    ).classes("w-full")
+                    max_search_days.props("outlined dense")
+                    ui.label("Máximo número de días hacia adelante para buscar ventanas de moldeo válidas.").classes("text-xs text-slate-500 mt-1")
+                    
+                    allow_gaps = ui.checkbox(
+                        "Permitir huecos en moldeo",
+                        value=bool(res.get("allow_molding_gaps") or False),
+                    ).classes("mt-3")
+                    ui.label("Si activo, permite moldear en días no consecutivos para un mismo pedido.").classes("text-xs text-slate-500 mt-1")
+
             ui.separator().classes("my-4")
 
             with ui.row().classes("w-full gap-6 items-start"):
@@ -2342,9 +3057,13 @@ def register_pages(repo: Repository) -> None:
                     molding_shifts = {day_name: int(molding_shifts_inputs[day_name].value or 0) for day_name in day_names}
                     pour_shifts = {day_name: int(pour_shifts_inputs[day_name].value or 0) for day_name in day_names}
                     
-                    # Calculate max per day based on shifts (no longer stored separately)
+                    # Calculate derived values
+                    heats = float(heats_per_shift.value or 0.0)
+                    tons = float(tons_per_heat.value or 0.0)
+                    pour_tons_per_shift = heats * tons
+                    
                     molding_max_per_day = max(molding_shifts.values()) * int(molding_shift.value or 0)
-                    pour_max_ton_per_day = max(pour_shifts.values()) * float(pour_shift.value or 0.0)
+                    pour_max_ton_per_day = max(pour_shifts.values()) * pour_tons_per_shift
                     
                     repo.planner.upsert_planner_resources(
                         scenario_id=scenario_id,
@@ -2353,8 +3072,12 @@ def register_pages(repo: Repository) -> None:
                         pour_max_ton_per_day=pour_max_ton_per_day,
                         molding_max_per_shift=int(molding_shift.value or 0),
                         molding_shifts=molding_shifts,
-                        pour_max_ton_per_shift=float(pour_shift.value or 0.0),
+                        pour_max_ton_per_shift=pour_tons_per_shift,
                         pour_shifts=pour_shifts,
+                        heats_per_shift=heats,
+                        tons_per_heat=tons,
+                        max_placement_search_days=int(max_search_days.value or 365),
+                        allow_molding_gaps=bool(allow_gaps.value or False),
                         notes=str(notes.value or "").strip() or None,
                     )
                     repo.data.set_config(
@@ -2994,6 +3717,7 @@ def register_pages(repo: Repository) -> None:
         with page_container():
             ui.label(title).classes("text-2xl font-semibold")
 
+            # Auto-rebuild orders if missing but SAP data is available
             if repo.data.count_orders(process=process) == 0:
                 mb = repo.data.count_sap_mb52()
                 vis = repo.data.count_sap_vision()
@@ -3009,97 +3733,62 @@ def register_pages(repo: Repository) -> None:
                             "flat color=primary"
                         )
                     return
-
-                diag = repo.data.get_sap_rebuild_diagnostics(process=process)
                 
-                with ui.card().classes("w-full bg-amber-50 border border-amber-200 p-6"):
-                    with ui.row().classes("items-center gap-2 mb-4"):
-                         ui.icon("warning", color="amber-9").classes("text-2xl")
-                         ui.label("Programa no generado").classes("text-lg font-bold text-amber-900")
-                    
-                    ui.label("No se han podido construir rangos de trabajo. Revisa el diagnóstico de cruce de datos:").classes("text-amber-800 mb-4")
-
-                    with ui.grid(columns=5).classes("w-full gap-4"):
-                        def _metric(label: str, val: int, color="slate"):
-                            with ui.column().classes("bg-white p-3 rounded shadow-sm border border-slate-100 items-center justify-center"):
-                                ui.label(str(val)).classes(f"text-2xl font-bold text-{color}-700")
-                                ui.label(label).classes("text-xs text-slate-500 text-center leading-tight")
-
-                        _metric("Total MB52", mb)
-                        _metric("Total Visión", vis)
-                        _metric("Piezas Usables (Stock)", diag['usable_total'], "blue")
-                        _metric("Con Claves (Ped/Pos/Lote)", diag['usable_with_keys'], "blue")
-                        _metric("Match Visión (Final)", diag['usable_with_keys_and_vision'], "green")
-
-                # Helpful hint when MB52 doesn't include the configured almacen for this process.
+                # Try to auto-rebuild orders from available SAP data
                 try:
-                    centro_cfg = (repo.data.get_config(key="sap_centro", default="4000") or "").strip()
-                    almacenes = repo.data.get_sap_mb52_almacen_counts(centro=centro_cfg, limit=10)
-                    present = [a["almacen"] for a in almacenes if a.get("almacen")]
-                    if present and str(diag.get("almacen") or "") not in set(present):
-                        ui.label(
-                            f"MB52 cargado no contiene el almacén configurado ({diag.get('almacen')}). "
-                            f"Almacenes presentes (top): {', '.join(present)}"
-                        ).classes("text-amber-700")
-                        ui.label(
-                            "Sugerencia: si exportas MB52 por almacén, activa 'acumular por almacén' en /actualizar y sube los otros MB52 (4049/4050/4046/4047/4048)."
-                        ).classes("text-slate-600")
-                except Exception:
-                    pass
-                if diag.get("distinct_orderpos_missing_vision"):
-                    ui.label(
-                        f"Pedido/posición sin match en Visión: {diag['distinct_orderpos_missing_vision']} (sobre {diag['distinct_orderpos']})."
-                    ).classes("text-amber-700")
+                    n = repo.data.rebuild_orders_from_sap_for(process=process)
+                    if n > 0:
+                        diag = repo.data.get_sap_rebuild_diagnostics(process=process)
+                        msg = f"Rangos generados automáticamente: {n}"
+                        if diag.get("distinct_orderpos_missing_vision"):
+                            msg += f" | {diag['distinct_orderpos_missing_vision']} sin match en Visión"
+                        ui.notify(msg, color="info")
+                    else:
+                        # No orders could be generated - show diagnostic
+                        diag = repo.data.get_sap_rebuild_diagnostics(process=process)
+                        with ui.row().classes("items-center gap-2 pb-2"):
+                            ui.icon("info", size="sm").classes("text-blue-600")
+                            ui.label(
+                                f"No se generaron rangos (Cruzan con Visión: {diag['usable_with_keys_and_vision']}). "
+                                "Revisa Vista previa en Actualizar."
+                            ).classes("text-blue-700")
+                            ui.button(
+                                "Ver Vista previa",
+                                on_click=lambda: ui.navigate.to("/actualizar"),
+                                icon="visibility"
+                            ).props("flat dense color=blue-8")
+                except Exception as ex:
+                    # Show error but don't stop - will fall through to show empty program
+                    ui.notify(f"Error reconstruyendo rangos: {ex}", color="warning")
 
-                async def _rebuild_now() -> None:
-                    ui.notify("Reconstruyendo rangos...")
-                    try:
-                        n = await asyncio.to_thread(lambda: repo.data.rebuild_orders_from_sap_for(process=process))
-                        if n > 0:
-                            diag2 = repo.data.get_sap_rebuild_diagnostics(process=process)
-                            extra = (
-                                f" | sin match en Visión: {diag2['distinct_orderpos_missing_vision']}"
-                                if diag2.get("distinct_orderpos_missing_vision")
-                                else ""
-                            )
-                            ui.notify(f"Rangos generados: {n}{extra}")
-                            ui.navigate.reload()
-                        else:
-                            d = repo.data.get_sap_rebuild_diagnostics(process=process)
-                            ui.notify(
-                                f"No se generaron rangos (Cruzan con Visión: {d['usable_with_keys_and_vision']}). Revisa Vista previa.",
-                                color="warning",
-                            )
-                    except Exception as ex:
-                        ui.notify(f"Error reconstruyendo rangos: {ex}", color="negative")
-
-                with ui.row().classes("gap-2 pt-2"):
-                    ui.button("Reconstruir rangos", on_click=_rebuild_now).props("unelevated color=primary")
-                    ui.button("Ver Vista previa", on_click=lambda: ui.navigate.to("/actualizar")).props(
-                        "flat color=primary"
-                    )
-                    ui.button("Config > Parámetros", on_click=lambda: ui.navigate.to("/config")).props(
-                        "flat color=primary"
-                    )
-                return
-
+            # Check for missing data - show warnings but don't block program generation
+            # The scheduler will properly handle these cases as errors
+            warnings = []
             missing = repo.data.count_missing_parts_from_orders(process=process)
             if missing:
-                ui.label(f"Hay {missing} partes sin familia. Completa Config > Familias.").classes("text-amber-700")
-                return
-
+                warnings.append(f"{missing} partes sin familia")
+            
             missing_proc = repo.data.count_missing_process_times_from_orders(process=process)
             if missing_proc:
-                ui.label(
-                    f"Hay {missing_proc} partes sin tiempos. Completa Config > Maestro materiales."
-                ).classes("text-amber-700")
-                return
-
+                warnings.append(f"{missing_proc} partes sin tiempos")
+            
             if len(repo.dispatcher.get_lines(process=process)) == 0:
-                ui.label(
-                    "Falta configurar líneas. Completa Parámetros > Líneas y familias permitidas."
-                ).classes("text-amber-700")
-                return
+                warnings.append("Sin líneas configuradas")
+            
+            if warnings:
+                with ui.row().classes("items-center gap-2 pb-2"):
+                    ui.icon("warning", size="sm").classes("text-amber-600")
+                    ui.label(" • ".join(warnings)).classes("text-amber-700")
+                    ui.button(
+                        "Config > Familias",
+                        on_click=lambda: ui.navigate.to("/familias"),
+                        icon="settings"
+                    ).props("flat dense color=amber-8")
+                    ui.button(
+                        "Config > Maestro",
+                        on_click=lambda: ui.navigate.to("/config/materiales"),
+                        icon="database"
+                    ).props("flat dense color=amber-8")
 
             # Check cache first to avoid slow regeneration on every render
             last = repo.dispatcher.load_last_program(process=process)

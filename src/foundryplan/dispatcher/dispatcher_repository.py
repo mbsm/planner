@@ -88,11 +88,11 @@ class DispatcherRepositoryImpl:
     def get_parts_model(self) -> list[Part]:
         with self.db.connect() as con:
             rows = con.execute(
-                "SELECT material, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM core_material_master"
+                "SELECT part_code, family_id, vulcanizado_dias, mecanizado_dias, inspeccion_externa_dias, peso_unitario_ton, mec_perf_inclinada, sobre_medida_mecanizado FROM core_material_master"
             ).fetchall()
         return [
             Part(
-                material=str(r[0]),
+                material=str(r[0]),  # part_code is now the identifier
                 family_id=str(r[1]),
                 vulcanizado_dias=r[2],
                 mecanizado_dias=r[3],

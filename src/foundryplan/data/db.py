@@ -8,6 +8,7 @@ from foundryplan.data.schema import (
     ensure_data_schema,
     ensure_dispatcher_schema,
     ensure_planner_schema,
+    seed_alloy_catalog,
 )
 
 
@@ -36,6 +37,7 @@ class Db:
             con.execute("PRAGMA foreign_keys=ON;")
 
             ensure_data_schema(con)
+            seed_alloy_catalog(con)
             ensure_dispatcher_schema(con)
             ensure_planner_schema(con)
         finally:

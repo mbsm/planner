@@ -294,56 +294,53 @@ def test_create_jobs_multiple_processes(temp_db):
 
 
 def test_update_jobs_from_vision(temp_db):
-    """Test that jobs are updated with fecha_de_pedido from Vision."""
+    """Test that jobs are updated with fecha_de_pedido from Vision using real data fixtures."""
     db, _ = temp_db
     repo = Repository(db)
     
-    # First import MB52
-    mb52_rows = [
-        {
-            "material": "40233021531",
-            "centro": "4000",
-            "almacen": "4035",
-            "lote": "001-001",
-            "libre_utilizacion": 1,
-            "documento_comercial": "1010044531",
-            "posicion_sd": "10",
-            "en_control_calidad": 0,
-        },
-        {
-            "material": "40233021531",
-            "centro": "4000",
-            "almacen": "4035",
-            "lote": "001-002",
-            "libre_utilizacion": 1,
-            "documento_comercial": "1010044531",
-            "posicion_sd": "10",
-            "en_control_calidad": 0,
-        },
-    ]
+   # Import real data fixture from sample_data
+    from fixtures_real_data import FIXTURE_MB52_MULTI_REAL, FIXTURE_VISION_MULTI_REAL
     
-    mb52_bytes = create_mock_mb52_excel(mb52_rows)
+    # First import MB52 using real data
+    mb52_bytes = create_mock_mb52_excel(FIXTURE_MB52_MULTI_REAL)
     repo.data.import_sap_mb52_bytes(content=mb52_bytes, mode="replace")
     
-    # Create Vision Excel
+    # Verify jobs were created from MB52 (almacen 4046 = inspeccion_externa)
+    with db.connect() as con:
+        job_before = con.execute(
+            """
+            SELECT pedido, posicion, qty, fecha_de_pedido
+            FROM dispatcher_job
+            WHERE process_id = 'inspeccion_externa'
+              AND pedido = ?
+              AND posicion = ?
+            """,
+            (FIXTURE_VISION_MULTI_REAL['pedido'], FIXTURE_VISION_MULTI_REAL['posicion'])
+        ).fetchone()
+    
+    assert job_before is not None, "Job should be created from MB52"
+    assert job_before["qty"] == 3, "Should have 3 lotes from MB52"
+    assert job_before["fecha_de_pedido"] is None, "fecha_de_pedido should be NULL before Vision import"
+    
+    # Create Vision Excel with real data
     vision_wb = openpyxl.Workbook()
     vision_ws = vision_wb.active
     
     vision_headers = [
         "Pedido", "Pos.", "Cod. Material", "Descripción Material",
         "Fecha de pedido", "Fecha Entrega", "Solicitado",
-        "Terminación"
+        "Status Comercial"
     ]
     vision_ws.append(vision_headers)
     vision_ws.append([
-        "1010044531",  # Pedido
-        "10",  # Pos
-        "40233021531",  # Cod Material
-        "TEST PART",  # Descripción
-        "2026-02-15",  # Fecha de pedido
+        FIXTURE_VISION_MULTI_REAL['pedido'],
+        FIXTURE_VISION_MULTI_REAL['posicion'],
+        FIXTURE_VISION_MULTI_REAL['cod_material'],
+        FIXTURE_VISION_MULTI_REAL['descripcion_material'],
+        FIXTURE_VISION_MULTI_REAL['fecha_de_pedido'],
         "2026-03-01",  # Fecha Entrega
-        "100",  # Solicitado
-        "50",  # Terminación (qty_completed)
+        FIXTURE_VISION_MULTI_REAL['solicitado'],
+        "1",  # Status Comercial (active)
     ])
     
     vision_buffer = io.BytesIO()
@@ -354,21 +351,24 @@ def test_update_jobs_from_vision(temp_db):
     # Import Vision
     repo.data.import_sap_vision_bytes(content=vision_bytes)
     
-    # Verify job was updated with fecha_de_pedido only
+    # Verify job was updated with fecha_de_pedido
     with db.connect() as con:
-        job = con.execute(
+        job_after = con.execute(
             """
             SELECT fecha_de_pedido, qty
             FROM dispatcher_job
-            WHERE process_id = 'terminaciones'
-              AND pedido = '1010044531'
-              AND posicion = '10'
-            """
+            WHERE process_id = 'inspeccion_externa'
+              AND pedido = ?
+              AND posicion = ?
+            """,
+            (FIXTURE_VISION_MULTI_REAL['pedido'], FIXTURE_VISION_MULTI_REAL['posicion'])
         ).fetchone()
     
-    assert job is not None
-    assert job["fecha_de_pedido"] == "2026-02-15", "Should update fecha_de_pedido from Vision"
-    assert job["qty"] == 2, "qty should remain as lote count from MB52"
+    assert job_after is not None
+    assert job_after["fecha_de_pedido"] == FIXTURE_VISION_MULTI_REAL['fecha_de_pedido'], \
+        "Should update fecha_de_pedido from Vision"
+    assert job_after["qty"] == 3, "qty should remain as lote count from MB52"
+
 
 
 def test_split_job_basic(temp_db):

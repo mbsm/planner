@@ -63,8 +63,8 @@ class DataRepository:
     def get_orders_overdue_rows(self, *, today=None, limit: int = 200) -> list[dict]:
         return self._repo.get_orders_overdue_rows(today=today, limit=limit)
 
-    def get_orders_due_soon_rows(self, *, days: int = 49, limit: int = 200) -> list[dict]:
-        return self._repo.get_orders_due_soon_rows(days=days, limit=limit)
+    def get_orders_due_soon_rows(self, *, today=None, days: int = 49, limit: int = 200) -> list[dict]:
+        return self._repo.get_orders_due_soon_rows(today=today, days=days, limit=limit)
 
     def get_orders_rows(self, limit: int = 200) -> list[dict]:
         return self._repo.get_orders_rows(limit=limit)
@@ -105,6 +105,22 @@ class DataRepository:
 
     def delete_family(self, *, name: str, force: bool = False) -> None:
         return self._repo.delete_family(name=name, force=force)
+
+    # Alloy catalog
+    def get_active_alloy_codes(self) -> list[str]:
+        return self._repo.get_active_alloy_codes()
+
+    def list_alloys(self) -> list[dict]:
+        return self._repo.list_alloys()
+
+    def upsert_alloy(self, *, alloy_code: str, alloy_name: str, is_active: bool = True) -> None:
+        return self._repo.upsert_alloy(alloy_code=alloy_code, alloy_name=alloy_name, is_active=is_active)
+
+    def delete_alloy(self, *, alloy_code: str) -> None:
+        return self._repo.delete_alloy(alloy_code=alloy_code)
+
+    def toggle_alloy_active(self, *, alloy_code: str) -> None:
+        return self._repo.toggle_alloy_active(alloy_code=alloy_code)
 
     # General config + KPI
     def get_config(self, *, key: str, default: str | None = None) -> str | None:
@@ -374,12 +390,6 @@ class PlannerRepository:
     def get_planner_initial_order_progress_rows(self, *, scenario_id: int, asof_date) -> list[dict]:
         return self._repo.get_planner_initial_order_progress_rows(scenario_id=scenario_id, asof_date=asof_date)
 
-    def get_planner_initial_flask_inuse_rows(self, *, scenario_id: int, asof_date) -> list[dict]:
-        return self._repo.get_planner_initial_flask_inuse_rows(scenario_id=scenario_id, asof_date=asof_date)
-
-    def get_planner_initial_pour_load_rows(self, *, scenario_id: int, asof_date) -> list[dict]:
-        return self._repo.get_planner_initial_pour_load_rows(scenario_id=scenario_id, asof_date=asof_date)
-
     def get_planner_initial_patterns_loaded(self, *, scenario_id: int, asof_date) -> list[dict]:
         return self._repo.get_planner_initial_patterns_loaded(scenario_id=scenario_id, asof_date=asof_date)
 
@@ -400,6 +410,10 @@ class PlannerRepository:
         molding_shifts: dict | None = None,
         pour_max_ton_per_shift: float | None = None,
         pour_shifts: dict | None = None,
+        heats_per_shift: float | None = None,
+        tons_per_heat: float | None = None,
+        max_placement_search_days: int | None = None,
+        allow_molding_gaps: bool | None = None,
         notes: str | None = None,
     ) -> None:
         return self._repo.upsert_planner_resources(
@@ -411,6 +425,10 @@ class PlannerRepository:
             molding_shifts=molding_shifts,
             pour_max_ton_per_shift=pour_max_ton_per_shift,
             pour_shifts=pour_shifts,
+            heats_per_shift=heats_per_shift,
+            tons_per_heat=tons_per_heat,
+            max_placement_search_days=max_placement_search_days,
+            allow_molding_gaps=allow_molding_gaps,
             notes=notes,
         )
 

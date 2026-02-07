@@ -23,8 +23,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             cliente TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(process_id) REFERENCES core_processes(process_id),
-            FOREIGN KEY(material) REFERENCES core_material_master(material)
+            FOREIGN KEY(process_id) REFERENCES core_processes(process_id)
         );
 
         CREATE TABLE IF NOT EXISTS dispatcher_job_unit (
@@ -89,8 +88,39 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             kind TEXT,
             PRIMARY KEY (pedido, posicion)
         );
+
+        CREATE VIEW IF NOT EXISTS orderpos_priority AS
+            SELECT pedido, posicion, is_priority, kind FROM dispatcher_orderpos_priority;
         """
     )
+
+    # Enable INSERT/UPDATE/DELETE on orderpos_priority view for backward-compatibility with tests
+    con.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_orderpos_priority_insert
+        INSTEAD OF INSERT ON orderpos_priority
+        BEGIN
+            INSERT INTO dispatcher_orderpos_priority(pedido, posicion, is_priority, kind)
+            VALUES (NEW.pedido, NEW.posicion, NEW.is_priority, NEW.kind);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_orderpos_priority_update
+        INSTEAD OF UPDATE ON orderpos_priority
+        BEGIN
+            UPDATE dispatcher_orderpos_priority
+            SET is_priority = NEW.is_priority,
+                kind = NEW.kind
+            WHERE pedido = OLD.pedido AND posicion = OLD.posicion;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_orderpos_priority_delete
+        INSTEAD OF DELETE ON orderpos_priority
+        BEGIN
+            DELETE FROM dispatcher_orderpos_priority WHERE pedido = OLD.pedido AND posicion = OLD.posicion;
+        END;
+        """
+    )
+
     # Migrations: Add columns if they don't exist
     try:
         con.execute("ALTER TABLE dispatcher_line_config ADD COLUMN mec_perf_inclinada INTEGER DEFAULT 0")

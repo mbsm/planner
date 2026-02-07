@@ -44,6 +44,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             molding_shifts_json TEXT,
             pour_max_ton_per_shift REAL,
             pour_shifts_json TEXT,
+            heats_per_shift REAL,
+            tons_per_heat REAL,
+            max_placement_search_days INTEGER,
+            allow_molding_gaps INTEGER,
             notes TEXT
         );
 
@@ -76,6 +80,34 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             pouring_tons_available REAL NOT NULL DEFAULT 0.0,
             PRIMARY KEY (scenario_id, day, flask_type)
         );
+
+        CREATE TABLE IF NOT EXISTS planner_initial_order_progress (
+            scenario_id INTEGER NOT NULL,
+            asof_date TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            remaining_molds INTEGER NOT NULL,
+            PRIMARY KEY (scenario_id, order_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS planner_schedule_results (
+            scenario_id INTEGER NOT NULL,
+            run_timestamp TEXT NOT NULL,
+            asof_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            suggested_horizon_days INTEGER,
+            actual_horizon_days INTEGER NOT NULL,
+            skipped_orders INTEGER NOT NULL DEFAULT 0,
+            horizon_exceeded INTEGER NOT NULL DEFAULT 0,
+            molds_schedule_json TEXT,
+            pour_days_json TEXT,
+            shakeout_days_json TEXT,
+            completion_days_json TEXT,
+            finish_days_json TEXT,
+            late_days_json TEXT,
+            errors_json TEXT,
+            objective REAL,
+            PRIMARY KEY (scenario_id, run_timestamp)
+        );
         """
     )
     
@@ -94,5 +126,60 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         pass
     try:
         con.execute("ALTER TABLE planner_resources ADD COLUMN pour_shifts_json TEXT")
+    except Exception:
+        pass
+    
+    # Add pouring breakdown columns
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN heats_per_shift REAL")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN tons_per_heat REAL")
+    except Exception:
+        pass
+    
+    # Add heuristic configuration columns
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN max_placement_search_days INTEGER DEFAULT 365")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN allow_molding_gaps INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    
+    # Add lag configuration columns
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN pour_lag_days INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_resources ADD COLUMN shakeout_lag_days INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    
+    # Migrate finish_hours to finish_days (add new columns, keep old for compatibility)
+    try:
+        con.execute("ALTER TABLE planner_parts ADD COLUMN finish_days INTEGER")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE planner_parts ADD COLUMN min_finish_days INTEGER")
+    except Exception:
+        pass
+    
+    # Migrate data if finish_days is NULL but finish_hours exists
+    try:
+        con.execute("""
+            UPDATE planner_parts 
+            SET finish_days = CAST(ROUND(finish_hours / 24.0) AS INTEGER)
+            WHERE finish_days IS NULL AND finish_hours IS NOT NULL
+        """)
+        con.execute("""
+            UPDATE planner_parts 
+            SET min_finish_days = CAST(ROUND(min_finish_hours / 24.0) AS INTEGER)
+            WHERE min_finish_days IS NULL AND min_finish_hours IS NOT NULL
+        """)
     except Exception:
         pass

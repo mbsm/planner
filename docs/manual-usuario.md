@@ -18,7 +18,7 @@ Si la aplicación no está corriendo en un servidor, ejecútela localmente:
 Se recomienda seguir este orden de operaciones:
 
 ### Paso 1: Carga de Datos (Menú "Actualizar")
-El sistema requiere dos archivos Excel exportados desde SAP para funcionar.
+El sistema requiere archivos Excel exportados desde SAP para funcionar.
 **Nota:** Cada carga **reemplaza** completamente la información anterior del mismo tipo.
 
 1.  **Vaya a la página "Actualizar"**.
@@ -26,15 +26,24 @@ El sistema requiere dos archivos Excel exportados desde SAP para funcionar.
 3.  **Subir MB52 (Stock)**:
     - Exporte la transacción MB52 desde SAP a Excel (`.xlsx`).
     - Arrastre el archivo al área "Cargar MB52".
-    - El sistema filtrará automáticamente el stock "Libre utilización" y disponible.
+    - El sistema filtrará automáticamente según configuración de cada proceso.
 4.  **Subir Visión Planta (Pedidos)**:
     - Exporte el reporte de Visión Planta (ZPP_VISION...) a Excel.
     - Arrastre el archivo al área "Cargar Visión Planta".
     - Esta es la fuente oficial de las fechas de entrega (`Fecha de pedido`) y cantidades pendientes.
+    - **Filtrado automático**: Solo se importan productos finales (Piezas: 40XX00YYYYY) con aleaciones configuradas.
+5.  **Subir Desmoldeo (Opcional - Para Planner)**:
+    - Exporte el reporte de Desmoldeo desde SAP a Excel.
+    - Arrastre el archivo al área "Cargar Desmoldeo".
+    - Define moldes en enfriamiento y flasks ocupadas.
+    - Se divide automáticamente en:
+      - **Moldes por Fundir**: Sin fecha de desmoldeo (WIP)
+      - **Piezas Fundidas**: Con fecha de desmoldeo (completadas)
 
 **Importante:**
-- El sistema cruza ambos archivos usando el número de "Pedido" y "Posición".
-- Si un material aparece en MB52 o Visión pero no existe en el maestro local, el sistema le pedirá configurarlo inmediatamente.
+- El sistema cruza MB52 y Visión usando "Pedido" y "Posición".
+- Los materiales nuevos generan alerta para clasificación en el maestro.
+- El desmoldeo actualiza automáticamente tiempos de enfriamiento y piezas por molde en el maestro.
 
 ### Paso 2: Gestión de Maestro de Materiales
 Si al cargar datos aparecen materiales nuevos, verá una ventana emergente o alerta en la página "Config > Maestro de Materiales".
@@ -53,14 +62,38 @@ En esta pantalla verá un resumen del estado de la planta:
 - **Lista de Pedidos**: Busque pedidos específicos, vea su estado de avance y stock.
 - **Prioridad**: Puede marcar manualmente pedidos como "Prioritarios" (casilla de verificación). Esto forzará al sistema a programarlos antes.
 
-### Paso 4: Planificación de Moldeo (Menú "Plan") - *Nuevo*
-Utilice esta herramienta los días Lunes para definir cuántos moldes fabricar por día.
-- El sistema propone un plan basado en la fecha de entrega y capacidad de moldeo.
-- Puede revisar y confirmar el plan semanal.
-- **Condiciones iniciales (moldeo)**: La tabla muestra las cajas ocupadas hoy según el reporte de desmoldeo, separadas por tipo de caja.
-    - **Moldes por Fundir (En Cancha)**: cada molde ocupa 1 caja; se redondea hacia arriba por tipo de caja.
-    - **Piezas Fundidas (Enfriando/Desmoldeo pendiente)**: usa la fracción `mold_quantity` y se redondea hacia arriba; si la fecha de desmoldeo es pasada o vacía, se considera ocupada hasta mañana; si es futura, hasta `fecha desmoldeo + 1`.
-    - **Tons por Fundir**: suma de `peso_unitario_ton` del maestro por molde en cancha, agrupado por tipo de caja.
+### Paso 4: Planificación de Moldeo (Menú "Plan")
+Utilice esta herramienta para definir cuántos moldes fabricar por día.
+
+**Configuración y Parámetros:**
+1. **Capacidades (Config > Planner)**:
+   - **Moldes por turno**: Capacidad nominal de moldeo
+   - **Mismo material/día**: Máximo del mismo material que se puede moldear en un día
+   - **Toneladas fusión por turno**: Capacidad de colada
+   - **Turnos por día**: Configurables por día de semana (lun-dom)
+
+2. **Algoritmo de Placement (Config > Planner)**:
+   - **Búsqueda máxima (días)**: Máximo número de días hacia adelante para buscar ventanas válidas (default: 365)
+   - **Permitir huecos en moldeo**: Si se activa, permite moldear en días no consecutivos para un mismo pedido (default: No)
+
+3. **Cajas (Flasks)**:
+   - Configure inventario total por tipo de caja (ej: 105, 120, 143)
+   - El sistema descuenta automáticamente cajas ocupadas desde desmoldeo
+
+**Funcionamiento:**
+- El planner propone un plan basado en:
+  - Fechas de entrega (due_date)
+  - Capacidad de moldeo diaria
+  - Disponibilidad de flasks por tipo
+  - Capacidad de colada (metal)
+  - Tiempos de enfriamiento
+- **Optimización automática**: El sistema puede reducir tiempos de terminación (finish_days) hasta el mínimo configurado (min_finish_days) para cumplir fechas de entrega
+- **Búsqueda de ventanas**: El algoritmo busca la primera ventana viable desde hoy, respetando contiguidad (si está configurado)
+
+**Condiciones Iniciales:**
+- Vista de flasks ocupadas por tipo de caja
+- Moldes en cancha (WIP desde desmoldeo)
+- Toneladas pendientes de fundir
 
 ### Paso 5: Programación de Despacho (Menú "Programa")
 Genera las colas de trabajo para las líneas productivas (Terminaciones, Mecanizado, etc.).
@@ -80,19 +113,57 @@ En el menú "Config" puede ajustar los parámetros operativos de la planta:
 - **Procesos y Líneas**: Defina qué líneas existen y qué familias pueden procesar.
 - **Familias**: Cree o edite agrupaciones de materiales.
 - **Maestro de Materiales**: Edición masiva de tiempos y atributos de partes.
-- **Planner**: Configuración de capacidades diarias de moldeo y tamaños de cajas (flasks).
+  - **Tiempos downstream** (vulcanizado, mecanizado, inspección): Solo para cálculo de start_by en dispatcher, **NO** afectan planner
+  - **Tiempos de moldeo** (finish_days, min_finish_days, tiempo_enfriamiento_molde_horas): Usados por planner
+  - **finish_days → min_finish_days**: El planner puede comprimir tiempos de terminación hasta el mínimo para cumplir fechas
+- **Planner (Moldeo)**:
+  - **Capacidades**: Moldes por turno, mismo material/día, toneladas fusión
+  - **Turnos por día**: Configurables lun-dom para moldeo y fusión
+  - **Algoritmo de Placement**:
+    - **Búsqueda máxima (días)**: Rango de búsqueda para ventanas de moldeo (30-730 días, default: 365)
+    - **Permitir huecos en moldeo**: Si activo, permite moldear en días no consecutivos (default: desactivado)
+  - **Cajas (Flasks)**: Inventario total por tipo de caja
+  - **Horizonte**: Días de planificación hacia adelante
+  - **Feriados**: Fechas no laborables
+- **Filtros de Disponibilidad**: Controla qué stock se considera "disponible" para cada proceso
+  - Terminaciones: Solo stock libre y sin QC
+  - Toma de dureza: Solo stock bloqueado o en QC
 
 ## 5. Preguntas Frecuentes
 
 **¿Por qué un pedido no aparece en el Programa?**
 - Verifique que el material tenga asignada una **Familia**.
 - Verifique que exista una **Línea** configurada para aceptar esa Familia.
-- Verifique que el stock esté en el almacén correcto (MB52) y tenga estatus "Libre utilización".
+- Verifique que el stock esté en el almacén correcto (MB52) y cumpla los filtros de disponibilidad del proceso.
 
 **¿Cómo maneja el sistema las "Pruebas"?**
-- Cualquier lote que contenga letras (alfanumérico) se consiera automáticamente una Prueba ("Test").
+- Cualquier lote que contenga letras (alfanumérico) se considera automáticamente una Prueba ("Test").
 - Las pruebas tienen la prioridad más alta en la cola, superior a la fecha.
 
 **¿Qué fecha usa el sistema para ordenar?**
 - Usa la `Fecha de pedido` (fecha comprometida con el cliente) del archivo Visión Planta.
-- Resta los días de `vulcanizado`, `mecanizado`, etc. configurados en el maestro para calcular cuándo debe comenzar el trabajo.
+- Resta los días de `vulcanizado`, `mecanizado`, etc. configurados en el maestro para calcular cuándo debe comenzar el trabajo (start_by).
+
+**¿Qué son vulcanizado_dias, mecanizado_dias e inspeccion_externa_dias?**
+- Son tiempos de procesos **downstream** (después de moldeo).
+- Solo se usan en el **Dispatcher** para calcular cuándo debe iniciar el trabajo (start_by).
+- **NO** afectan las restricciones ni fechas del **Planner** (moldeo).
+
+**¿Cómo funciona la optimización de tiempos de terminación?**
+- Cada material tiene configurado:
+  - `finish_days`: Tiempo nominal de terminación (ej: 15 días)
+  - `min_finish_days`: Tiempo mínimo permitido (ej: 5 días)
+- Si una orden se pasaría de la fecha de entrega con el tiempo nominal, el planner lo reduce hasta el mínimo.
+- Ejemplo: Orden con due_date en 10 días, finish_days=15, min_finish_days=5:
+  - El planner usará 10 días de finishing para cumplir la fecha.
+
+**¿Qué es "Búsqueda máxima (días)" en el Planner?**
+- Define hasta cuántos días hacia el futuro el algoritmo busca ventanas válidas para moldear.
+- Default: 365 días.
+- Si una orden no cabe en los primeros N días, el sistema intenta día a día hasta el límite.
+- Aumentar este valor permite encontrar ventanas más lejanas pero puede incrementar tiempo de cálculo.
+
+**¿Qué significa "Permitir huecos en moldeo"?**
+- **Desactivado (default)**: El moldeo de una orden debe ser en días consecutivos.
+- **Activado**: Permite moldear en días no consecutivos cuando no hay capacidad continua disponible.
+- Recomendación: Mantener desactivado para simplicidad operativa.

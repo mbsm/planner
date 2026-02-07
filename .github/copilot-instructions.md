@@ -23,15 +23,27 @@ Foundry Plan is a Windows-first production planning web app (NiceGUI + SQLite) w
 - **`src/foundryplan/data/db.py`**: Manages SQLite connection, WAL mode, schema migration.
   - *Constraint*: Do not call `Db.connect()` directly outside Repository implementations.
   - Schema split: `src/foundryplan/data/schema/` with `data_schema.py`, `dispatcher_schema.py`, `planner_schema.py`.
+- **Material Code System** (`src/foundryplan/data/material_codes.py`):
+  - **4 material types share same 5-digit part code**: Pieza (40XX00YYYYY), Molde (4310YYYYY01), Fundido (435XX0YYYYY), Trat.Term (436XX0YYYYY)
+  - **Master table keyed by part_code**: `core_material_master(part_code TEXT PRIMARY KEY)` - consolidates all 4 types into one record
+  - **Extraction utilities**: `extract_part_code()`, `extract_alloy_code()`, `get_material_type()`, `is_finished_product()`, `extract_part_code_sql(column)`
+  - **JOIN pattern**: Use `extract_part_code_sql()` for SQL queries - generates CASE expression to extract 5-digit code from 11-digit material
+  - **Example**: `LEFT JOIN core_material_master p ON p.part_code = {extract_part_code_sql('v.cod_material')}`
 
 **Database Table Naming Convention:**
 All database tables use module prefixes to indicate ownership:
 - **`core_*`**: Shared data layer (SAP snapshots, master data, config) - managed by `data_repository.py`
-  - Examples: `core_sap_mb52_snapshot`, `core_sap_vision_snapshot`, `core_material_master`, `core_orders`, `core_config`
+  - Examples: `core_sap_mb52_snapshot`, `core_sap_vision_snapshot`, `core_material_master`, `core_orders`, `core_config`, `core_alloy_catalog`
 - **`dispatcher_*`**: Dispatcher module tables - managed by `dispatcher_repository.py`
   - Examples: `dispatcher_job`, `dispatcher_job_unit`, `dispatcher_line_config`, `dispatcher_last_program`
 - **`planner_*`**: Planner module tables - managed by `planner_repository.py`
   - Examples: `planner_orders`, `planner_schedule`, `planner_daily_resources`, `planner_flask_types`
+
+**Material Master Schema (part_code-based):**
+- **PK**: `part_code TEXT PRIMARY KEY` (5 digits) - consolidates Pieza/Molde/Fundido/TratTerm into one record per part
+- **Key** columns**: `descripcion_pieza`, `family_id`, `aleacion`, `flask_size`, `piezas_por_molde`, process times (vulcanizado/mecanizado/inspeccion)
+- **Important**: Transactional tables (orders, mb52, vision) still store full 11-digit `material` codes; JOINs extract part_code on-the-fly
+- **Alloy Catalog**: `core_alloy_catalog` stores configured alloys (32=CM2, 33=CM3, 34=CM4, 37=WS170, 38=CMHC, 42=CM6, 21=SP1, 28=SPX)
 
 ### Dispatcher (Downstream Scheduling)
 - **`src/foundryplan/dispatcher/scheduler.py`**: Pure functional module.
@@ -63,13 +75,13 @@ All database tables use module prefixes to indicate ownership:
 ## Data Flow
 
 ### 1. Ingest (Upload)
-User uploads MB52 (stock snapshot) and Vision (orders) via page `/actualizar`:
+User uploads MB52 (stock snapshot), Vision (orders), and Desmoldeo (WIP/completed) via page `/actualizar`:
 - Excel columns normalized via `src/foundryplan/data/excel_io.py` (handles format coercion).
 - SAP keys (Documento Comercial, Posición SD) normalized via `_normalize_sap_key()`.
 - Tables stored in `core_sap_mb52_snapshot`, `core_sap_vision_snapshot`, `core_moldes_por_fundir`, `core_piezas_fundidas`.
 - **MB52**: No material prefix filtering (loads all materials).
-- **Vision**: Filters by `sap_vision_material_prefixes` config (default: 401,402,403,404).
-- **Desmoldeo**: Separates into `core_moldes_por_fundir` (WIP) and `core_piezas_fundidas` (completed). Auto-updates `core_material_master` and regenerates `planner_daily_resources`.
+- **Vision**: Filters by alloy catalog - only finished products (Pieza: `40XX00YYYYY`) with `XX` in active alloy codes (replaces old prefix config).
+- **Desmoldeo**: Extracts `part_code` from material using `extract_part_code()`, separates into `core_moldes_por_fundir` (WIP) and `core_piezas_fundidas` (completed). Auto-updates `core_material_master` with extracted part_code and regenerates `planner_daily_resources`.
 
 ### 2. Reconciliation
 `Repository.try_rebuild_orders_from_sap_for(process)`:
@@ -195,6 +207,23 @@ except Exception as e:
 ### Audit Trail
 - `repo.log_audit(category, message, details)` records all major operations (import, program gen, config change).
 - Safely handles DB failures (doesn't crash app).
+
+## Documentation Policy
+
+**CRITICAL**: All technical documentation for this project MUST be consolidated in the main development manual.
+
+- **Primary Document**: `docs/manual-desarrollo.md` - Complete technical specification, architecture, implementation details
+- **Supporting Documents**:
+  - `docs/modelo-datos.md` - Database schema reference (detailed table structures)
+  - `docs/manual-usuario.md` - End-user guide (UI workflows, business processes)
+- **Rule**: Do NOT create separate technical design documents. Always update `manual-desarrollo.md` with:
+  - Architecture changes
+  - New features or modules
+  - Data model updates
+  - Algorithm explanations
+  - GUI descriptions
+  - Change logs for major refactorings
+- **Exception**: Temporary design docs are OK during active development, but MUST be consolidated into main docs before completion.
 
 ## Important File Paths
 - **Entry**: `run_app.py`, `src/foundryplan/app.py`

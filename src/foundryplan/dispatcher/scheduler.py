@@ -23,10 +23,10 @@ def check_constraints(line: Line, part: Part) -> bool:
         # This allows lines with special capabilities to process both special AND normal parts.
         if isinstance(rule_value, bool):
             part_value = getattr(part, attr, False)
-            # If part requires the capability but line doesn't have it, reject
-            if part_value is True and rule_value is not True:
+            # Line declares it can handle a special capability; require part to match when constraint is True
+            if rule_value is True and part_value is not True:
                 return False
-            # If part doesn't require capability, accept (line can process normal parts)
+            # If constraint is False, accept any part (line has no restriction)
             continue
 
         # Generic attribute check on Part
@@ -104,6 +104,7 @@ def generate_dispatch_program(
         return None
 
     def get_part(material: str) -> Part | None:
+        # Direct lookup by material code (dispatcher uses full material code)
         return part_map.get(material)
 
     def calculate_start_by(job: Job) -> date:

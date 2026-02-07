@@ -12,7 +12,7 @@ Foundry Plan es una aplicación web (NiceGUI) con backend Python y persistencia 
 El sistema sigue una arquitectura modular en torno a un núcleo funcional:
 - **UI (Frontend/Backend)**: `src/foundryplan/ui/` (NiceGUI). Renderizado servidor.
 - **Dispatcher**: `src/foundryplan/dispatcher/` (Scheduler heurístico por proceso/recursos, genera colas ejecutables).
-- **Planner Module**: `src/foundryplan/planner/` (Scheduler heurístico por capacidad, sin solver CP-SAT).
+- **Planner Module**: `src/foundryplan/planner/` (Scheduler heurístico por capacidad).
 - **Data Access**: `src/foundryplan/data/` (Repositorio, DB Schema, Excel I/O).
 - **DB Schema split**: `src/foundryplan/data/schema/` (`data_schema.py`, `dispatcher_schema.py`, `planner_schema.py`).
 - **Persistencia**: SQLite local (`foundryplan.db`).
@@ -30,7 +30,7 @@ En UI, cualquier lectura de órdenes, stock, desmoldeo o maestro debe ir por `re
 - **Lenguaje**: Python 3.11+.
 - **UI Framework**: NiceGUI (basado en FastAPI/Vue).
 - **Base de Datos**: SQLite (con modo WAL estricto).
-- **Planner**: Hoy usa heurística greedy; **CP-SAT (OR-Tools)** está planificado a futuro (no implementado aún).
+- **Planner**: Heurística greedy basada en capacidad.
 - **Testing**: Pytest.
 
 ---
@@ -48,8 +48,8 @@ La aplicación ingiere archivos Excel crudos. La estrategia es "Snapshot de reem
 Representa stock físico por lote.
 - **Tabla DB**: `sap_mb52_snapshot`
 - **Mapeo Clave**:
-    - `material` (Número de parte)
-    - `material_base` (Material base mapeado desde Vision via pedido/posición, usado para mapear moldes a piezas)
+    - `material` (Código de semi-elaborado)
+    - `material_base` (Número de pieza - mapeado desde Vision via pedido/posición, usado para mapear moldes a piezas)
     - `centro`, `almacen` (Ubicación)
     - `lote` (Identificador único físico, usado para trazabilidad)
     - `documento_comercial`, `posicion_sd` (Enlace a pedido)
@@ -155,7 +155,7 @@ Tabla local editada por el usuario.
     - `family_id` (FK a `family_catalog`): Determina ruta de proceso.
     - `peso_unitario_ton` (Net Weight): Copiado/derivado de Visión, editable.
     - **Tiempos (días)**: `vulcanizado_dias`, `mecanizado_dias`, `inspeccion_externa_dias`.
-    - **Atributos Moldeo**: `flask_size` (S/M/L), `piezas_por_molde`, `tiempo_enfriamiento_molde_dias`, `aleacion`.
+    - **Atributos Moldeo**: `flask_size` (código numérico: 105, 120, 143, etc), `piezas_por_molde`, `tiempo_enfriamiento_molde_horas`, `aleacion`.
     - **Restricciones**: `mec_perf_inclinada`, `sobre_medida_mecanizado`.
 
 #### B. Configuración de Planta
@@ -240,7 +240,7 @@ Tabla clave que almacena disponibilidad real de recursos día a día, consideran
 - Al importar Desmoldeo → regenera baseline + aplica ocupación
 
 **Uso:**
-- Planner solver lee restricciones desde esta tabla
+- El planner lee restricciones desde esta tabla
 - UI muestra capacidades semanales agregando desde datos diarios
 - Ocupación visible en "Condiciones Iniciales" = Total - Disponible
 | Custom | null | 0 | Ignora libre, solo sin QC |
@@ -265,6 +265,22 @@ VALUES
 - Para cada proceso: editar Almacén, Libre utilización (dropdown), En control de calidad (dropdown)
 - Botón "Guardar Filtros de Proceso" actualiza `process.sap_almacen` y `process.availability_predicate_json`
 - Después de guardar, se ejecuta `kick_refresh_from_sap_all()` para regenerar jobs/programas
+
+**Prioridad (dispatcher_orderpos_priority)**: Tabla compartida entre Dispatcher y Planner
+- **Tabla DB:** `dispatcher_orderpos_priority` (accessed via view `orderpos_priority`)
+- **Primary Key:** `(pedido, posicion)`
+- **Campos:**
+  - `is_priority`: Booleano (0/1) indicando si la orden está marcada como urgente
+  - `kind`: Tipo de prioridad ("test", "manual", "" para normal)
+- **Mapeo a prioridad numérica** (compartido entre Dispatcher y Planner):
+  - `kind = "test"` → `priority = 1` (máxima urgencia - lotes de prueba)
+  - `is_priority = 1` (o `kind != ""` y no test) → `priority = 2` (urgente - marcadas manualmente)
+  - Resto → `priority = 3` (normal)
+- **Comportamiento:**
+  - Usuario marca órdenes como "urgentes" desde UI (cualquier vista)
+  - Marking se persiste en `dispatcher_orderpos_priority`
+  - Ambos Dispatcher y Planner consultan esta tabla para asignar prioridad
+  - Garantiza que órdenes urgentes se procesan primero en ambos módulos
 
 ---
 
@@ -363,96 +379,183 @@ Nota: los ítems marcados “en proceso” se muestran fijados en su línea y al
 Responsable de la planificación de *Moldeo* (nivel orden, semanal).
 
 - **Estado actual**: Implementado con heurística greedy (ver 3.2.2 Heurística). Usa capacidades diarias reales desde `planner_daily_resources` y condiciones iniciales.
-- **Futuro (no implementado aún)**: CP-SAT con OR-Tools conforme al diseño descrito más abajo; se mantiene como diseño de referencia pero **no está activo**.
-- **Ubicación**: `src/foundryplan/planner/`
-- **Objetivo (común)**: Decidir cuántos moldes producir por día por pedido, buscando cumplir fechas y respetar capacidades y cajas.
+
 - **Entradas**:
     - `PlannerOrder`: Pedidos pendientes (Visión) + `remaining_molds`.
     - `PlannerPart`: Atributos de moldeo (`flask_size`, `cool_hours`, `pieces_per_mold`, `finish_hours`, `min_finish_hours`).
     - `PlannerResource` / `planner_daily_resources`: Capacidades diarias (molding, same_mold, pouring, flasks) ya afectadas por desmoldeo.
     - `PlannerInitialConditions`: WIP actual (modelos cargados, flasks en uso, carga de colada).
 
-#### 3.2.1 Diseño CP-SAT (futuro, no implementado)
-Se mantiene como referencia para la evolución del planner, pero hoy no se ejecuta.
 
-- **`remaining_molds`**: moldes pendientes por pedido.
-- **Modelos (pattern) = `order_id`**: con penalidad por cambio de modelo y límite de modelos activos.
-- **Cajas**: bloqueos por tipo/tamaño, usando desmoldeo para fechas de liberación.
-- **Carga inicial de colada**: desde MB52 de moldes por fundir, forward-fill.
-- **Restricciones previstas**: capacidades de moldeo, mismo molde, metal diario, cajas, y límites `finish_hours` / `min_finish_hours`.
+#### 3.2.1 Heurística de Planificación con Sliding Window
 
-Este diseño CP-SAT quedará para una fase futura; la implementación actual usa heurística greedy (ver 3.2.2).
-    - **Regla blanda (soft)**: preferir terminar la orden antes de cambiar modelo; se modela como penalidad en el objetivo.
-    - **Límite duro**: máximo 6 modelos (órdenes) activos en paralelo.
-    - **Finish before switch**: una orden debe tener `remaining_molds = 0` antes de desactivar su modelo.
-- **Uso de cajas (flasks)**:
-    - **Fuente**: Reporte Desmoldeo (no MB52). La fecha de liberación de la caja se deriva del desmoldeo/enfriamiento reportado.
-    - **Persistencia**: se carga en `planner_initial_flask_inuse` con `release_workday_index`.
-- **Carga inicial de colada (pour load)**:
-    - Se calcula desde MB52 (todos los moldes fabricados **no fundidos**).
-    - **Metal por molde** = `net_weight_ton × pieces_per_mold`.
-    - Se distribuye **ASAP** llenando la capacidad diaria hacia adelante (forward fill) y se guarda en `planner_initial_pour_load`.
-- **Restricción de colada por día (hard)**:
-    - $$\sum_o \text{molds}_{o,d} \times (\text{net\_weight\_ton}_o \times \text{pieces\_per\_mold}_o) \le \text{pour\_max\_ton\_per\_day} - \text{initial\_pour\_load}_d$$
-- **Tiempos de terminación (flexible, dentro de límites)**:
-    - Cada orden tiene `finish_hours` nominal (fijo en `material_master`).
-    - Puede reducirse hasta `min_finish_hours` para respetar fecha comprometida.
-    - Si incluso con reducción máxima no se alcanza la fecha, la orden se marca **late (atrasada)**.
+**Ubicación:** `src/foundryplan/planner/solve.py` → `solve_planner_heuristic()`
 
-#### 3.2.2 Heurística actual (implementada)
-Ubicación: `src/foundryplan/planner/solve.py` (`solve_planner_heuristic`).
+**Algoritmo:**
 
-- **Capacidades por día**: lee `planner_daily_resources` ya descontado por desmoldeo. Para cada día usa:
-  - `molding_capacity`
-  - `same_mold_capacity`
-  - `pouring_tons_available`
-  - `flask_available` por tipo de caja
-- **Orden de prioridad** (estabilidad + urgencia):
-  1) patrones cargados inicialmente (`initial_patterns_loaded`) primero (para dar continuidad)
-  2) `priority` asc (1=prioritaria en GUI, 2=resto)
-  3) `start_by` asc (calculado con días de proceso: moldeo, fundición=1, enfriamiento=ceil(cool_hours/24), terminación=ceil(finish_hours/64), buffer fin de semana)
-- **Asignación (tramo contiguo)**: para cada pedido en ese orden, se busca el primer día donde exista un tramo contiguo de días con capacidad suficiente para alojar **todos** los moldes faltantes, respetando simultáneamente:
-  - capacidad de moldeo diaria
-  - límite `same_mold_capacity` diario por parte
-  - límite de metal diario: `molds * (net_weight_ton * pieces_per_mold) <= pouring_tons_available`
-  - cajas disponibles por tipo
-  Los moldes del pedido se colocan en bloque continuo desde ese día hacia adelante; no se re-fracciona si un día intermedio no tiene capacidad.
-- **Patrón fijo**: una vez que una orden se coloca, se asume que el patrón queda “cargado” hasta terminar la orden; no se rota a mitad de la asignación.
-- **Resultado**: `molds_schedule[order_id][day_idx] = qty`; marca `HEURISTIC_INCOMPLETE` si alguna orden queda con `qty_left > 0` (horizonte insuficiente).
-- **No modela**: penalidad explícita por cambio de patrón (se evita al fijar el patrón por orden), finish_hours flexible, ni CP-SAT.
+La heurística usa un enfoque **greedy con búsqueda de ventanas** (sliding window search) que intenta colocar cada orden lo más pronto posible respetando todas las restricciones.
 
-**Salida del planner (heurística):**
-- `status`: HEURISTIC o HEURISTIC_INCOMPLETE
-- `molds_schedule`: asignación de moldes por `order_id` y `day_idx` (índice de workday)
-- `errors`: lista de órdenes que no cupieron en el horizonte
-- No retorna todavía fechas de entrega ni penalidades; es una asignación día-a-día de moldes.
+**1. Ordenamiento de Órdenes**
 
-#### 3.2.3 Supuestos de calendario (flujo de proceso)
+Función: `sort_orders_for_planning()`
+
+Criterios de prioridad (orden lexicográfico):
+1. `priority` ASC (1=Urgente, 2=Normal)
+2. `order_id` ASC (desempate estable)
+
+
+**2. Capacidades Diarias**
+
+Lee `planner_daily_resources` (ya descontado por desmoldeo/enfriamiento):
+- `molding_capacity`: Capacidad total de moldeo por día
+- `same_mold_capacity`: Máximo del mismo material por día
+- `pouring_tons_available`: Toneladas de fusión disponibles
+- `flask_available[flask_type]`: Cajas disponibles por tipo
+
+**3. Búsqueda de Placement (Sliding Window)**
+
+Para cada orden en orden de prioridad:
+
+```python
+def find_placement_for_order(..., max_search_days=365):
+    """
+    Busca la primera ventana viable para moldear completo.
+    Intenta días: 0, 1, 2, ..., hasta max_search_days.
+    """
+    for attempt_day in range(0, min(horizon, max_search_days)):
+        result = try_place_order(start_day_idx=attempt_day, ...)
+        if result.success:
+            return result
+    return FAILURE
+```
+
+**4. Constraints de Placement**
+
+Función: `try_place_order(start_day_idx, ...)` 
+
+Valida simultáneamente:
+
+a) **Capacidad de moldeo general**: `qty_day <= molding_capacity[day]`
+
+b) **Capacidad mismo molde**: `qty_day <= same_mold_capacity[day]`
+
+c) **Capacidad de vaciado**: `qty_day × metal_per_mold <= pouring_tons[pour_day]`
+
+d) **Disponibilidad de flasks en TODA la ventana** (crítico):
+   ```python
+   pour_day = mold_day + pour_lag_days
+   release_day = pour_day + cooling_days + shakeout_lag_days
+   
+   # Valida disponibilidad desde mold_day hasta release_day (inclusive)
+   flask_window_min = min(
+       flask_available[flask_type][d] 
+       for d in range(mold_day, release_day + 1)
+   )
+   
+   qty_feasible = min(..., flask_window_min)
+   ```
+
+e) **Contiguidad** (si `allow_molding_gaps=False`):
+   - Una vez iniciado moldeo, debe continuar días consecutivos hasta completar
+   - Si un día no tiene capacidad → placement falla
+   - Si `allow_molding_gaps=True` → puede saltar días sin capacidad
+
+**Lags configurables:**
+- `pour_lag_days`: Moldeo → Fundición (default: 1)
+- `shakeout_lag_days`: Enfriamiento → Desmoldeo (default: 1)
+
+**5. Optimización de Finishing Hours**
+
+Función parte de `try_place_order()`:
+
+```python
+# Calcular completion con finish_hours nominal
+finish_days_nominal = ceil(finish_hours / 24)
+completion_nominal = last_release_day + finish_days_nominal
+
+# Si nos pasamos del due_date, comprimir hasta min_finish_hours
+if completion_nominal > due_day_idx:
+    available_finish_days = max(0, due_day_idx - last_release_day)
+    available_finish_hours = available_finish_days × 24
+    
+    # Comprimir pero no menos de min_finish_hours
+    finish_hours_effective = max(min_finish_hours, available_finish_hours)
+
+# Calcular completion_day con finish_hours_effective
+finish_days = ceil(finish_hours_effective / 24)
+completion_day = last_release_day + finish_days
+```
+
+**Casos de uso:**
+- **Tiempo suficiente**: `finish_hours_effective = finish_hours` (nominal)
+- **Compresión necesaria**: `finish_hours_effective` entre `min_finish_hours` y `finish_hours`
+- **Atraso inevitable**: Usa `min_finish_hours` pero `completion_day > due_date`
+
+**6. Parámetros Configurables**
+
+**Tabla:** `planner_resources`
+
+| Parámetro | Tipo | Descripción | Default |
+|-----------|------|-------------|---------|
+| `max_placement_search_days` | INTEGER | Máximo días de búsqueda de ventana | 365 |
+| `allow_molding_gaps` | INTEGER (0/1) | Permitir huecos en moldeo | 0 |
+
+Estos parámetros se configuran desde UI en Config > Planner > "Algoritmo de Placement".
+
+**7. Salida del Planner**
+
+```python
+{
+    "status": "HEURISTIC" | "HEURISTIC_INCOMPLETE",
+    "molds_schedule": {order_id: {day_idx: qty_molds}},
+    "pour_days": {order_id: [day_idx, ...]},
+    "shakeout_days": {order_id: day_idx},
+    "completion_days": {order_id: day_idx},
+    "finish_hours": {order_id: finish_hours_effective},  # ⭐ Puede ser < nominal
+    "late_days": {order_id: days_late},
+    "errors": ["Order X: reason", ...],
+}
+```
+
+**8. Ventajas de la Heurística**
+
+✅ **Simplicidad**: Greedy O(n log n), rápido incluso con cientos de órdenes  
+✅ **Explicabilidad**: Fácil entender por qué una orden se coloca en cierto día  
+✅ **Respeto de constraints**: Valida todas las restricciones en cada paso  
+✅ **Flexibilidad**: Parámetros configurables desde GUI  
+✅ **Optimización de tiempos**: Reduce finishing automáticamente para cumplir fechas  
+
+**9. Limitaciones**
+
+❌ **No óptimo globalmente**: Decisiones greedy pueden bloquear soluciones mejores  
+❌ **Sensible a orden**: El orden de priorización afecta resultado final  
+❌ **No backtracking**: Una vez asignada, no remueve decisiones previas  
+
+Para optimización global futura, ver Anexo A.
+
+#### 3.2.2 Supuestos de Calendario (Flujo de Proceso)
 - **Moldeo**: se moldean piezas el día $d$ (día hábil).
-- **Fundición**: se funde el **siguiente día hábil**.
-- **Enfriamiento**: desde el día de fundido, contar $\lceil \text{cool\_hours}/24 \rceil$ días **calendario**.
-- **Desmoldeo**: ocurre el día siguiente al término del enfriamiento; las cajas retornan ese día.
-- **Terminación**: desde desmoldeo, aplicar `finish_hours[o]` como **días hábiles**.
-    - Valor **nominal** (desde `material_master`).
-    - Reducible hasta `min_finish_hours[o]` (también desde `material_master`).
-- **Bodega**: al día siguiente de terminar, las piezas llegan a bodega de producto terminado.
-- **On-Time Delivery**: orden $o$ es **on-time** si todas sus piezas llegan a bodega en o antes de `due_date[o]`.
+- **Fundición**: ocurre en $d + \text{pour\_lag\_days}$ (default 1). El consumo de metal se descuenta solo ese día.
+- **Enfriamiento + Desmoldeo**: las cajas permanecen bloqueadas desde moldeo hasta $d + \text{pour\_lag\_days} + \lceil \text{cool\_hours}/24 \rceil + \text{shakeout\_lag\_days}$ (inclusive).
+- **Terminación**: desde el día de desmoldeo, se aplican `finish_hours[o]` como días hábiles; puede reducirse hasta `min_finish_hours[o]` para cumplir `due_date`.
+- **On-Time Delivery**: orden $o$ es **on-time** si su `completion_day` (terminación) ocurre en o antes de `due_date[o]`.
 
 #### 3.2.2b Implementación del Calendario (Días Hábiles vs Calendario)
 
 **Indexación de Tiempo:**
-El planner usa un sistema de **índices de días hábiles** (workdays). La lista `workdays: list[date]` contiene solo fechas de lunes a viernes (excluyendo feriados configurados). Todos los cálculos y decisiones usan el índice en esta lista, no fechas calendario.
+El planner usa un sistema de **índices de días hábiles** (workdays). La lista `workdays: list[date]` contiene solo fechas en que hay turnos configurados (excluyendo feriados configurados). Todos los cálculos y decisiones usan el índice en esta lista, no fechas calendario.
 
-**Ejemplo:**
+**Ejemplo (calendario con turnos lunes a viernes):**
 ```
 workdays[0] = 2026-02-02 (Lunes)
 workdays[1] = 2026-02-03 (Martes)
 workdays[2] = 2026-02-04 (Miércoles)
 workdays[3] = 2026-02-05 (Jueves)
 workdays[4] = 2026-02-06 (Viernes)
-(Sábado y domingo omitidos)
 workdays[5] = 2026-02-09 (Lunes siguiente)
 ```
+
+**Nota:** Si se configuran turnos para sábados en `planner_daily_resources`, esos días también aparecerán en `workdays`.
 
 **Ciclo de Vida del Molde (Workday-based):**
 
@@ -471,141 +574,77 @@ $$\text{lock\_duration\_wd} = 2 + \text{cool\_days}$$
 donde 2 = (moldeo + fundición) y `cool_days = ceil(cool_hours/24)`.
 
 **Supuesto Simplificador (Decisión de Diseño):**
-- **Moldeo, Fundición, Desmoldeo**: restricción de que ocurran en **días hábiles**
-  - Se ModeloEstructura: no se schedula moldes para fin de semana
+- **Moldeo, Fundición, Desmoldeo**: restricción de que ocurran en **días hábiles** (días con turnos configurados)
   - Fundición automáticamente salta al siguiente día hábil
 - **Enfriamiento**: tratado como **días hábiles** (no como días calendario)
-  - Ej: molde fundido viernes → enfriamiento viernes/lunes (salta fin de semana)
+  - Ej: si turnos lunes-viernes, molde fundido viernes → enfriamiento viernes/lunes (salta fin de semana)
   - Esto es **conservador** (supone enfriamiento más lento de lo que realmente es)
-  - Justificación: simplifica lógica CP-SAT y heurística; la precisión adicional de contabilizar fin de semana no compensa la complejidad
+  - Justificación: simplifica lógica heurística; la precisión adicional de contabilizar calendario completo no compensa la complejidad
 
 **Por Qué No Usar Calendario Completo para Enfriamiento:**
 
 Usar calendario completo (24/7) requeriría:
-1. Agregar lista de **todas las fechas calendario** (no solo hábiles) al solver
+1. Agregar lista de **todas las fechas calendario** (no solo hábiles) a la heurística
 2. Crear función `get_next_workday_after_calendar_date()` para mapear cuándo termina el enfriamiento y cuándo desmoldear
 3. Modificar constraint de flask: iterar sobre índices mixtos (hábil/calendario)
 4. Complejidad O(n²) en lugar de O(n)
 
 El trade-off: **Simplicidad vs Precisión**. Elegimos simplicidad porque:
-- La planificación es semanal (horizonte ~8 semanas): el buffer es bajo
-- La capacidad de flask raramente es bottleneck crítico
-- El enfriamiento es 24/7 de todas formas (la máquina no se apaga), así que overestimar 1-2 días por fin de semana es tolerable
+- La planificación es semanal
+- El enfriamiento es 24/7 de todas formas, así que overestimar 1-2 días por semana genera un poco mas de holgura en la operacion sin aumentar la complejidad de la implementación actual.
 
-**Gestión de Feriados:**
-- Config: `app_config.key='planner_holidays'` contiene lista JSON de fechas (ISO format: "2026-02-13", etc.)
+**Gestión de Calendario y Feriados:**
+- **Días laborables**: Determinados por `planner_daily_resources.workday=1` (días con turnos configurados)
+- **Feriados**: Config `app_config.key='planner_holidays'` contiene lista JSON de fechas (ISO format: "2026-02-13", etc.)
 - Función: `repository._planner_holidays() -> set[date]` carga la lista
-- Aplicación: al construir `workdays` en `prepare_and_sync()`, se itera calendario y solo agrega días `d.weekday() < 5 and d not in holidays`
+- Aplicación: al construir `workdays` en `prepare_and_sync()`, se itera calendario y solo agrega días con turnos configurados (excluyendo feriados)
 
-**Mapeo Demolding → Workday Index:**
+**Mapeo Desmoldeo Calendario → Workday Index:**
 Cuando se cargan moldes en proceso (Reporte Desmoldeo) con `demolding_date` (fecha real de desmoldeo):
 ```python
 # En repository.get_planner_initial_flask_inuse_from_demolding()
 release_date = demolding_date  # SAP ya da la fecha real de desmoldeo
 workday_idx = 0
 for d in date_range(asof_date, release_date):
-    if d.weekday() < 5 and d not in holidays:
+    if is_workday(d, daily_resources) and d not in holidays:
         workday_idx += 1
 release_workday_index = workday_idx  # Índice hábil mapeado desde fecha calendario
 ```
 
 **Archivos Relevantes:**
-- `src/foundryplan/planner/solve.py`: Lógica de constraint (CP-SAT y heurística) usando índices workday
+- `src/foundryplan/planner/solve.py`: Lógica heurística usando índices workday
 - `src/foundryplan/data/repository.py`: 
-  - `prepare_and_sync()` línea ~1888: construye lista `workdays` filtrando weekdays + holidays
+  - `prepare_and_sync()` línea ~1888: construye lista `workdays` desde `planner_daily_resources` (días con workday=1, excluyendo feriados)
   - `get_planner_initial_flask_inuse_from_demolding()` línea ~1378: mapea demolding_date → workday_index
   - `_planner_holidays()`: carga feriados desde config
 
-#### 3.2.3 Formulación matemática del Solver
+#### 3.2.3 Parámetros configurables (UI)
+Almacenados en `planner_resources` (tabla única de configuración):
 
-**Variables de decisión:**
-- `molds[o, d]` ∈ ℤ⁺ := moldes de orden $o$ a moldear el día hábil $d$
-- `finish_hours_real[o]` ∈ ℝ := horas de terminación **reales** asignadas a orden $o$
-  - Restricción: `min_finish_hours[o] ≤ finish_hours_real[o] ≤ nominal_finish_hours[o]`
-- `pattern_active[o, d]` ∈ {0,1} := modelo de orden $o$ activo en día $d$
-- `completion_day[o]` ∈ ℤ := día en que la última pieza de orden $o$ llega a bodega
-- `on_time[o]` ∈ {0,1} := 1 si `completion_day[o] ≤ due_date[o]`, 0 en caso contrario
+**Capacidades Diarias:**
+- `molding_per_shift`: Moldeos por turno (default: 8)
+- `same_mold_per_shift`: Moldeos mismo molde por turno (default: 4)
+- `pour_per_shift`: Toneladas fusión por turno (default: 10)
+- `shifts_per_day`: Turnos por día (default: 3)
+- `flask_total_{size}`: Cajas totales por tamaño (105, 120, 143, 161, 185, 210)
 
-**Restricciones Hard:**
+**Algoritmo de Placement:**
+- `max_placement_search_days`: Máximo días de búsqueda de ventana (default: 365)
+- `allow_molding_gaps`: Permitir huecos en moldeo (0/1, default: 0)
+- `pour_lag_days`: Días entre moldeo y fundición (default: 1)
+- `shakeout_lag_days`: Días entre fundición y desmoldeo (default: 1)
 
-1. **Cobertura de moldes**: 
-   $$\sum_d \text{molds}[o,d] = \text{remaining\_molds}[o] \quad \forall o$$
+**Horizonte y Calendario:**
+- `planner_horizon_days`: Horizonte de planificación (días hábiles, default: 30)
+- `planner_holidays`: Conjunto de fechas no laborales (JSON array)
 
-2. **Capacidad moldeo por día**: 
-   $$\sum_o \text{molds}[o,d] \le \text{molding\_max\_per\_day} \quad \forall d$$
-
-3. **Capacidad moldeo por part/día**: 
-   $$\text{molds}[o,d] \le \text{molding\_max\_same\_part\_per\_day} \quad \forall o, d$$
-
-4. **Capacidad metal por día (considerando WIP inicial)**:
-   $$\sum_o \text{molds}[o,d] \times (\text{net\_weight}[o] \times \text{pieces\_per\_mold}[o])$$
-   $$\le \text{pour\_max\_ton\_per\_day} - \text{initial\_pour\_load}[d] \quad \forall d$$
-
-5. **Disponibilidad de cajas por tamaño** (RESTRICCIÓN CRÍTICA - cuello de botella de planta):
-   - Existen $n$ tamaños de cajas independientes: `flask_size` ∈ {"800", "1200", "1600", ...}
-   - Cada tamaño tiene su inventario total: `flask_inventory[flask_size]` (ej: 50 cajas de "800", 30 de "1200")
-   - Cada parte usa **siempre** la misma caja: `part.flask_size` es fijo
-   - Las restricciones son **independientes** entre tamaños (las cajas no se comparten entre tamaños diferentes)
-   - Para cada tamaño $s$ y día $d$:
-     $$\text{initial\_flask\_inuse}[s,d] + \sum_{o \in \text{orders\_by\_flask}[s]} \sum_{p=0}^{d} \mathbb{1}[\text{is\_cooling}(o,p,d)] \times \text{molds}[o,p] \le \text{flask\_inventory}[s]$$
-6. **Modelo activo solo si hay moldes**:
-    - `pattern_active[o,d] = 1` ⟺ `molds[o,d] > 0`
-    - Esta variable se usa para contar cambios de modelo en la función objetivo
-7. **Finish hours bounds**:
-   $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
-
-8
-8. **Finish hours bounds**:
-   $$\text{min\_finish\_hours}[o] \le \text{finish\_hours\_real}[o] \le \text{nominal\_finish\_hours}[o] \quad \forall o$$
-
-9. **Completion day computation**:
-   - Sea `last_mold_day[o]` = último día en que se moldea molde de orden $o$
-   - Sea `pour_day[o]` = `last_mold_day[o] + 1` (día hábil siguiente)
-   - Sea `cool_calendar_days[o]` = $\lceil \text{cool\_hours}[o]/24 \rceil$
-   - Sea `demolding_day[o]` = `pour_day[o] + cool_calendar_days[o] + 1` (día calendario siguiente al enfriamiento)
-   - Sea `finish_workdays[o]` = $\lceil \text{finish\_hours\_real}[o]/24 / 8 \rceil$ (días hábiles, asumiendo 8h/día)
-   - Sea `finish_day[o]` = `demolding_day[o]` + `finish_workdays[o]` (convertir a días hábiles)
-   - `completion_day[o]` = `finish_day[o] + 1` (día siguiente a terminar, piezas en bodega)
-9. **Late days computation**:
-   $$\text{late\_days}[o] = \max(0, \text{completion\_day}[o] - \text{due\_day}[o]) \quad \forall o$$
-10. **On-Time definition**:
-    $$\text{on\_time}[o] = 1 \text{ si } \text{completion\_day}[o] \le \text{due\_date}[o] \text{, else } 0$$
-
-**Función Objetivo (MINIMIZAR, lineal):**
-
-$$\text{minimize} = w_{\text{late\_days}} \cdot \sum_o \text{late\_days}[o]$$
-$$+ w_{\text{finish\_reduction}} \cdot \sum_o (\text{nominal\_finish\_hours}[o] - \text{finish\_hours\_real}[o])$$
-$$+ w_{\text{pattern\_changes}} \cdot \text{num\_pattern\_switches}$$
-
-> Nota: se reemplaza **on-time delivery** por **late days** para mantener el problema **lineal y manejable** con el horizonte largo.
-
-Donde:
-- `late_days[o] = max(0, completion_day[o] - due_date[o])` (linealizable con variables auxiliares).
-- `num_pattern_switches` = número de veces que `pattern_active[o, d] = 1` y `pattern_active[o, d-1] = 0` (cambios de 0→1).
-- `w_late_days`, `w_finish_reduction`, `w_pattern_changes` son **parámetros configurables desde la GUI** (pesos/penalties).
-
-#### 3.2.4 Parámetros configurables (UI)
-Almacenados en `app_config` o tabla dedicada `planner_config`:
-- `planner_weight_late_days`: penalidad por días de atraso (default: 1000)
-- `planner_weight_finish_reduction`: penalidad por reducción de tiempos (default: 50)
-- `planner_weight_pattern_changes`: costo fijo por cambio de modelo (default: 100)
-- `planner_solver_time_limit`: tiempo máximo del solver (segundos, default: 30)
-- `planner_solver_num_workers`: número de workers CP-SAT (0 = auto, default: 0)
-- `planner_solver_relative_gap`: límite de gap relativo para convergencia (default: 0.01)
-- `planner_solver_log_progress`: log de búsqueda (0/1, default: 0)
-- `planner_horizon_days`: horizonte de planificación (días hábiles, default: 30)
-- `planner_horizon_buffer_days`: buffer calendario extra para cálculos (días, default: 10)
-- `planner_holidays`: conjunto de fechas no laborales (texto con fechas, separadas por coma o línea)
-
-**Auto-Horizonte (v2)**:
-- UI calcula automáticamente `horizonte_sugerido = index(última_due_date) + 10% buffer`
+**Auto-Horizonte:**
+- UI calcula automáticamente `horizonte_sugerido = días_hasta_última_orden + 10% buffer`
 - Usuario ve propuesta en label "📅 Horizonte sugerido: N días"
 - Puede aceptar o modificar manualmente
-- Retorno de `run_planner()` incluye:
-  - `suggested_horizon_days`: horizonte calculado desde órdenes
-  - `actual_horizon_days`: horizonte usado en ejecución
+- La consulta limita órdenes hasta `min(planner_horizon_days, días_hasta_última_orden)`
 
-#### 3.2.5 Implicancias en inputs
+#### 3.2.4 Implicancias en inputs
 - `planner_parts` debe incluir:
     - `pieces_per_mold` (moldes x piezas)
     - `finish_hours` (nominal, desde `material_master`)
@@ -613,27 +652,17 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
     - `cool_hours` (horas de enfriamiento en molde, desde `material_master`)
     - `net_weight_ton` (peso unitario en toneladas)
 - `planner_orders` incluye `due_date` para cálculo de `start_by` y entregas.
-- `planner_resources` incluye `molding_max_per_day`, `molding_max_same_part_per_day`, `pour_max_ton_per_day`, `flasks_S/M/L`.
+- `planner_resources` incluye `molding_max_per_day`, `molding_max_same_part_per_day`, `pour_max_ton_per_day`, cantidades por tipo de caja (105, 120, 143, etc).
 - `planner_initial_order_progress` → `remaining_molds` (derivado de Vision)
 - `planner_initial_patterns_loaded` → entrada del usuario (qué órdenes tienen modelo activo hoy)
 - `planner_initial_flask_inuse` → desde Reporte Desmoldeo
 - `planner_initial_pour_load` → desde MB52 (WIP no fundido)
 
-#### 3.2.6 Enfoques de planificación (Optimización vs Heurístico)
+#### 3.2.5 Enfoques de planificación (Heurístico)
 
-**A) Optimizador (OR-Tools)**
-- El backlog puede ser 14–18 semanas, pero el tiempo real de fabricación por orden es 3–6 semanas.
-- Se resuelve el plan en un horizonte configurable (30 días hábiles por defecto). *Arquitectura preparada para bloques secuenciales futuros.*
-- Cada bloque puede propagar su salida como condición inicial del siguiente:
-    - flasks en uso, carga de colada pendiente y órdenes parcialmente moldeadas.
-- Supuesto de complejidad: resolver **n problemas de tamaño t/n** suele ser más rápido que 1 problema de tamaño t.
-- Esto permite responder preguntas de negocio:
-    - “¿Cuándo puedo entregar este pedido?”
-    - “¿Qué pedidos se afectan si fuerzo uno nuevo a una fecha?”
+La implementación actual usa un algoritmo heurístico greedy basado en capacidad.
 
-**B) Heurístico (Greedy capacity-first con start_by mejorado)**
-
-*Algoritmo mejorado (v2)*:
+**Algoritmo heurístico (Greedy capacity-first con start_by mejorado)**:
 - **Cálculo de `start_by` por orden** (fecha de inicio recomendada):
   $$\text{start\_by} = \text{due\_date} - \left(\begin{array}{l}
     \lceil\frac{\text{remaining\_molds}}{\text{molding\_max\_same\_part\_per\_day}}\rceil + \\
@@ -651,14 +680,14 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
   - Weekend buffer = $\lceil\frac{\text{process\_days}}{7} \times 2\rceil$ (2 días por cada 7 de proceso)
 
 - **Orden de procesamiento** (prioridad de scheduling):
-  1. Órdenes con `start_by <= hoy` (atrasadas) — máxima urgencia
-  2. Órdenes con modelo/patrón activo (minimiza cambios)
-  3. Por prioridad ASC (1=urgente, 3=normal)
-  4. Por `start_by` ASC (fechas más próximas)
+  1. Por prioridad ASC (1=urgente/test, 2=normal)
+     - Prioridad compartida con Dispatcher (misma tabla `dispatcher_orderpos_priority`)
+     - Usuario marca órdenes urgentes desde UI → aplica en ambos módulos
+  2. Por `order_id` ASC (tiebreaker estable)
 
 - **Capacidad diaria**: 
   - Moldeo: `molding_max_per_day` global + `molding_max_same_part_per_day` por parte
-  - Cajas: Inventario S/M/L respetando días de enfriamiento
+  - Cajas: Inventario por código de caja (105, 120, 143, etc) respetando días de enfriamiento
   - Metal: `pour_max_ton_per_day` (menos WIP inicial)
 
 - **Garantía de cobertura**: 
@@ -671,44 +700,6 @@ Almacenados en `app_config` o tabla dedicada `planner_config`:
   - Usuario puede aceptar o modificar manualmente.
 
 Este enfoque es rápido (greedy O(n log n)) y explicable, aunque no garantiza optimalidad global.
-
-**C) Combinado (Heurístico + Solver)**
-- Ejecuta heurístico primero → extrae solución como warm-start hints para CP-SAT
-- Pasa hints a CP-SAT para refinamiento/optimización
-- Permite convergencia más rápida del solver con mejor punto inicial factible
-
-#### 3.2.7 Modelos/Patrones Cargados (Opcional)
-
-La sección **"Modelos Cargados"** en la UI (`/plan` → card "Modelos cargados") permite marcar órdenes que tienen un modelo activo en la línea de moldeo hoy. Esta entrada es **completamente opcional** y **graceful degradation** está asegurada.
-
-**Comportamiento:**
-
-1. **Cuando se cargan patrones** (`initial_patterns_loaded = {order_id_1, order_id_2, ...}`):
-   - **Heurístico**: Las órdenes en `initial_patterns_loaded` reciben `is_loaded = 0` en la función de ordenamiento (prioridad mayor).
-     - Efecto: esas órdenes se procesan antes, minimizando cambios de modelo innecesarios.
-   - **CP-SAT**: Las órdenes en `initial_patterns_loaded` no incurren en costo de "switch" el día 0 (si se activan ese día).
-     - Efecto: el objetivo penaliza menos los cambios para órdenes nuevas vs órdenes que continúan.
-
-2. **Cuando está vacío** (`initial_patterns_loaded = {}`):
-   - **Heurístico**: Todas las órdenes reciben `is_loaded = 1` (iguales respecto a carga de patrón).
-     - Efecto: la prioridad se define por `(overdue_status, priority, start_by)` solamente.
-   - **CP-SAT**: Todas las órdenes incurren en costo de switch el día 0 si se activan.
-     - Efecto: no hay reducción de costo para órdenes "anteriores"; todas compiten en igualdad de condiciones.
-   - **Resultado**: El planner procede sin preferencia de patrones. No hay error ni excepción.
-
-**UI:**
-- Card marcada como "Opcional" (badge visible).
-- Si el usuario no carga nada, mostrar lista vacía es válido.
-- Al guardar, guardar un conjunto vacío es permitido.
-- Próxima carga sin patrones sigue siendo graceful.
-
-**Ubicación en código:**
-- **Load/Save**: `src/foundryplan/ui/pages.py` línea ~906-1000
-- **Repository fetch**: `src/foundryplan/data/repository.py` línea ~1630 (`get_planner_initial_patterns_loaded`)
-- **Conversion to solver input**: `src/foundryplan/planner/api.py` línea ~157 (construye `initial_patterns_loaded` set)
-- **Usage in solvers**:
-  - Heurístico: `src/foundryplan/planner/solve.py` línea ~430 (función `_sort_key`)
-  - CP-SAT: `src/foundryplan/planner/solve.py` línea ~255-256 (conteo de switches día 0)
 
 ---
 
@@ -723,7 +714,7 @@ src/
         data/           # Capa de acceso a datos (Repository pattern)
             db.py       # Definición de Schema SQLite
             repository.py # Todas las queries SQL
-        planner/        # Módulo de planificación avanzada (OR-Tools)
+        planner/        # Módulo de planificación heurística
         ui/             # Componentes visuales y páginas
 ```
 
@@ -766,17 +757,32 @@ Todas las configuraciones globales se almacenan en la tabla `app_config` con par
 
 #### Configuraciones del Planner
 
-| Clave | Descripción | Default |
+**Tabla:** `planner_resources` (registro único con todas las configuraciones)
+
+**Capacidades:**
+
+| Campo | Descripción | Default |
 |-------|-------------|---------|
-| `planner_weight_late_days` | Penalidad por día de retraso | `1000` |
-| `planner_weight_finish_reduction` | Penalidad por reducir tiempo de finish | `50` |
-| `planner_weight_pattern_changes` | Penalidad por cambio de modelo/patrón | `100` |
-| `planner_solver_time_limit` | Tiempo máximo de solver (segundos) | `30` |
-| `planner_solver_num_workers` | Número de workers para solver (0=auto) | `0` |
-| `planner_solver_relative_gap` | Gap relativo de optimalidad | `0.01` |
-| `planner_solver_log_progress` | Mostrar log de solver (0/1) | `0` |
+| `molding_per_shift` | Moldeos por turno | `8` |
+| `same_mold_per_shift` | Moldeos mismo molde por turno | `4` |
+| `pour_per_shift` | Toneladas fusión por turno | `10` |
+| `shifts_per_day` | Turnos por día | `3` |
+| `flask_total_{size}` | Cajas totales (por tamaño: 105, 120, 143, 161, 185, 210) | Varía |
+
+**Algoritmo:**
+
+| Campo | Descripción | Default |
+|-------|-------------|---------|
+| `max_placement_search_days` | Máximo días búsqueda de ventana | `365` |
+| `allow_molding_gaps` | Permitir huecos en moldeo (0/1) | `0` |
+| `pour_lag_days` | Días moldeo → fundición | `1` |
+| `shakeout_lag_days` | Días fundición → desmoldeo | `1` |
+
+**Horizonte:**
+
+| Clave (app_config) | Descripción | Default |
+|-------|-------------|---------|
 | `planner_horizon_days` | Horizonte de planificación (días hábiles) | `30` |
-| `planner_horizon_buffer_days` | Buffer adicional al horizonte | `10` |
 | `planner_holidays` | Fechas de feriados (JSON array) | `[]` |
 
 #### Configuraciones de UI
@@ -850,32 +856,630 @@ Formato JSON para definir qué stock del MB52 se considera disponible para cada 
 
 #### Configuración del Planner (`/config/planner`)
 
-- Pesos de optimización (Late days, Finish reduction, Pattern changes)
-- Parámetros del solver (Time limit, Workers, Gap, Log)
-- Horizonte de planificación
+**Sección: Capacidades Diarias**
+- Moldeos por turno (general)
+- Moldeos mismo molde por turno
+- Toneladas fusión por turno
+- Turnos por día
+- Cajas totales por tamaño (105, 120, 143, 161, 185, 210)
+
+**Sección: Algoritmo de Placement**
+- Máximo días de búsqueda de ventana
+- Permitir huecos en moldeo (checkbox)
+- Días lag: Moldeo → Fundición, Fundición → Desmoldeo
+
+**Sección: Horizonte y Calendario**
+- Horizonte de planificación (días hábiles)
 - Feriados (lista editable de fechas)
+
+Botón "Guardar Configuración" actualiza `planner_resources` y regenera `planner_daily_resources`.
 
 ---
 
 ## 6. Especificaciones Detalladas (Planner Module)
 
-La implementación vigente usa la heurística descrita en 3.2.2 (capacidades diarias + tramo contiguo). El diseño CP-SAT completo se mantiene como referencia futura en el **Anexo A**.
+La implementación vigente usa la heurística descrita en 3.2.2 (capacidades diarias + tramo contiguo).
 
 Flujo actual (heurística):
 1. Extract: inputs y recursos diarios (`planner_daily_resources`).
 2. Solve: `solve_planner_heuristic` asigna moldes con las restricciones diarias ya descontadas.
 3. Persist/Output: `molds_schedule` por `order_id` y `day_idx`; estado HEURISTIC/INCOMPLETE.
+4. Persist: resultado completo se guarda en `planner_schedule_results` para visualización posterior.
 
-Para el diseño CP-SAT (futuro), ver Anexo A.
+
+
+### 6.1 Estructura de Salida del Planner (Schedule Result)
+
+El resultado de `solve_planner_heuristic()` y `run_planner()` es un diccionario que se **persiste automáticamente** en la tabla `planner_schedule_results`. Este diseño permite que la UI muestre siempre el último plan sin necesidad de re-ejecutar la heurística.
+
+#### Estructura del Dict Resultado
+
+```python
+result = {
+    # Meta información
+    "run_timestamp": str,  # ISO timestamp (solo en resultados cargados de DB)
+    "status": str,  # "HEURISTIC" | "HEURISTIC_INCOMPLETE"
+    "suggested_horizon_days": int | None,  # Horizonte calculado desde última due_date
+    "actual_horizon_days": int,  # Horizonte usado en ejecución
+    "skipped_orders": int,  # Cantidad de órdenes excluidas (sin flask capacity)
+    "horizon_exceeded": bool,  # True si hay errores (órdenes sin schedular)
+    
+    # Schedule principal (órdenes programadas)
+    "molds_schedule": {
+        "<order_id>": {
+            <day_idx>: <qty_molds>,  # int -> int (día de trabajo -> cantidad de moldes)
+            ...
+        },
+        ...
+    },
+    
+    # Días críticos por orden
+    "pour_days": {
+        "<order_id>": [<day_idx>, ...],  # Días de fundición (puede haber múltiples)
+    },
+    "shakeout_days": {
+        "<order_id>": <day_idx>,  # Día de desmoldeo (liberación de cajas)
+    },
+    "completion_days": {
+        "<order_id>": <day_idx>,  # Día de finalización (desmoldeo + finishing)
+    },
+    
+    # Métricas de calidad
+    "finish_days": {
+        "<order_id>": <days>,  # Días de finishing usados (int, puede ser < nominal si se comprimió)
+    },
+    "late_days": {
+        "<order_id>": <days>,  # Días de atraso vs due_date (0 si on-time)
+    },
+    
+    # Errores y diagnóstico
+    "errors": [
+        "Orden X: Dato faltante: flask_type",
+        "Orden Y: No se encontró ventana viable buscando 365 días desde HOY",
+        "Orden Z: Flask type 143 sin capacidad disponible (revisar maestro de materiales)",
+        ...
+    ],
+    
+    # Objetivo (siempre None en heurística)
+    "objective": None,  # Reservado para solver matemático futuro
+}
+```
+
+#### Persistencia en Base de Datos
+
+**Tabla: `planner_schedule_results`**
+
+```sql
+CREATE TABLE planner_schedule_results (
+    scenario_id INTEGER NOT NULL,
+    run_timestamp TEXT NOT NULL,              -- ISO timestamp de ejecución
+    asof_date TEXT NOT NULL,                  -- Fecha base del plan
+    status TEXT NOT NULL,                     -- "HEURISTIC" | "HEURISTIC_INCOMPLETE"
+    suggested_horizon_days INTEGER,
+    actual_horizon_days INTEGER NOT NULL,
+    skipped_orders INTEGER NOT NULL,
+    horizon_exceeded INTEGER NOT NULL,        -- 1 si hay errores, 0 si ok
+    molds_schedule_json TEXT,                 -- JSON: {order_id: {day_idx: qty}}
+    pour_days_json TEXT,
+    shakeout_days_json TEXT,
+    completion_days_json TEXT,
+    finish_days_json TEXT,
+    late_days_json TEXT,
+    errors_json TEXT,
+    objective REAL,
+    PRIMARY KEY (scenario_id, run_timestamp)
+);
+```
+
+**Funciones (planner/persist.py):**
+- `save_schedule_result()`: Guarda resultado completo tras `run_planner()`
+- `get_latest_schedule_result()`: Carga último schedule guardado
+- `delete_old_schedule_results()`: Auto-limpieza (mantiene últimos 10)
+
+**Flujo:**
+1. Usuario ejecuta "Regenerar y planificar" en UI (`/plan`)
+2. `run_planner()` ejecuta la heurística
+3. El resultado completo se guarda automáticamente en `planner_schedule_results`
+4. Se eliminan runs antiguos (mantiene últimos 10)
+5. Al abrir `/plan`, la UI carga y muestra el último schedule guardado
+
+#### Validación Fail-Fast (Sin Defaults)
+
+**CRÍTICO**: El planner NO asume defaults. Si falta un dato requerido, la orden va a `errors[]`:
+
+| Campo              | Validación                          | Error si Falta/Inválido |
+|--------------------|-------------------------------------|-------------------------|
+| `flask_type`       | `!= None and != ""`                 | "Dato faltante: flask_type" |
+| `cool_hours`       | `> 0`                               | "Dato faltante o inválido: cool_hours=X" |
+| `finish_days`      | `> 0`                               | "Dato faltante o inválido: finish_days=X" |
+| `min_finish_days`  | `> 0`                               | "Dato faltante o inválido: min_finish_days=X" |
+| `pieces_per_mold`  | `> 0`                               | "Dato faltante o inválido: pieces_per_mold=X" |
+| `net_weight_ton`   | `> 0`                               | "Dato faltante o inválido: net_weight_ton=X" |
+
+**Origen de datos:** `core_material_master` (por `part_code` consolidado).
+
+**Recomendación:** Antes de ejecutar planner, verificar que todas las piezas tengan datos completos en maestro.
 
 ---
 
-## Anexo A: Diseño CP-SAT (futuro, no implementado)
+## 7. Interfaz de Usuario (GUI)
 
-Se conserva como blueprint para una fase posterior. No está activo en código.
+La aplicación usa **NiceGUI** (framework basado en FastAPI + Vue) para renderizar todas las páginas. La UI es servidor-side rendering con componentes reactivos.
 
+### Arquitectura UI
+
+**Entry Point:** `src/foundryplan/ui/pages.py` - función `register_pages(repo: Repository)`
+- Cada página es una función decorada con `@ui.page("/ruta")`
+- Recibe `repo` via closure desde `app.py`
+- Renderiza usando componentes NiceGUI (`ui.label`, `ui.table`, `ui.button`, etc.)
+
+**Widgets Reutilizables:** `src/foundryplan/ui/widgets.py`
+- `render_nav()`: Barra de navegación superior
+- `page_container()`: Contenedor principal con padding/max-width
+- Tablas con double-click handlers, filtros, etc.
+
+### Páginas Principales
+
+#### `/` - Dashboard (Home)
+
+**Propósito:** Vista general del estado de producción semanal.
+
+**Funcionalidad:**
+- Muestra calendario semanal (semana actual + 5 semanas siguientes)
+- Filtra por proceso (terminaciones, mecanizado, mecanizado_externo, etc.)
+- Resalta pedidos atrasados (due_date < hoy)
+- Tabla para cada semana con columnas:
+  - Lote, Cantidad, Quincena a despachar, Urgencia, Días atrasados
+  - Iconos: 🔴 atrasado, ⚠️ test, 📦 en proceso
+- **Double-click en fila** → abre modal con breakdown SAP (MB52 + Vision)
+- Paginación: usa tabs de NiceGUI para navegar entre semanas
+
+**Elementos interactivos:**
+- Select process: dropdown con lista de procesos
+- Tabs semana_0 a semana_5
+- Tablas con sort/filter automático
+- Modal popup con detalle SAP al hacer double-click
+
+**Código:** `pages.py` línea ~117-817
+
+#### `/plan` - Planificador de Producción (Moldeo)
+
+**Propósito:** Ejecutar y visualizar el plan heurístico de moldeo.
+
+**Funcionalidad:**
+- **Condiciones Iniciales** (primera card):
+  - Muestra cajas ocupadas hoy por flask_type
+  - Basado en reporte de desmoldeo (moldes por fundir + piezas fundidas)
+  - Calcula release_date considerando cool_hours
+- **Recursos y Capacidades** (segunda card):
+  - Tabla semanal con capacidades disponibles
+  - Filas: Moldeo, Mismo molde, Colada (tons), Cajas por tipo
+  - Capacidades ya descontadas por ocupación inicial
+- **Plan Guardado** (tercera card):
+  - Muestra último schedule guardado en DB (`planner_schedule_results`)
+  - Tabla semanal: Total Moldes, Toneladas, Cajas por tipo
+  - Timestamp de última ejecución
+  - Lista de errores y órdenes omitidas
+- **Botón "Regenerar y planificar"**:
+  - Regenera `planner_daily_resources` desde config + desmoldeo
+  - Ejecuta `run_planner()` → heurística greedy
+  - Guarda resultado en DB
+  - Actualiza UI con nuevo plan
+
+**Elementos interactivos:**
+- Input scenario (default: "default")
+- Botón refresh (icon=refresh)
+- Botón "Regenerar y planificar" (color=primary)
+- 3 contenedores reactivos (initial_conditions, resources, plan)
+
+**Código:** `pages.py` línea ~818-1362
+
+#### `/actualizar` - Carga de Datos SAP
+
+**Propósito:** Importar snapshots de Excel (MB52, Vision, Desmoldeo).
+
+**Funcionalidad:**
+- **MB52 Upload**:
+  - Lee Excel (sheet "Hoja1")
+  - Normaliza columnas (`excel_io.normalize_excel_mb52`)
+  - Reemplaza `core_sap_mb52_snapshot`
+  - Genera automáticamente `core_orders` reconciliando con Vision
+- **Vision Upload**:
+  - Lee Excel (sheet "Hoja1")
+  - Normaliza columnas
+  - Reemplaza `core_sap_vision_snapshot`
+  - Filtra por alloy catalog (solo aleaciones configuradas)
+  - Regenera `core_orders`
+- **Desmoldeo Upload**:
+  - Lee Excel (sheets múltiples: "Moldes por Fundir", "Piezas Fundidas")
+  - Extrae `part_code` de material (5 dígitos)
+  - Auto-completa `core_material_master` con datos faltantes
+  - Reemplaza `core_moldes_por_fundir` y `core_piezas_fundidas`
+  - Regenera `planner_daily_resources`
+- **Botón "Actualizar Todo"**:
+  - Regenera orders desde MB52+Vision para todos los procesos
+  - Regenera programas Dispatcher para todos los procesos
+  - Muestra resumen de jobs generados
+
+**Elementos interactivos:**
+- 3 upload controls (MB52, Vision, Desmoldeo)
+- Botón "Actualizar Todo" (regenera orders + programs)
+- Logs de auditoría tras cada operación
+- Notificaciones de éxito/error
+
+**Código:** `pages.py` línea ~1467-1798
+
+#### `/familias` - Maestro de Familias
+
+**Propósito:** Gestionar agrupaciones de piezas por familia.
+
+**Funcionalidad:**
+- Tabla editable con familias existentes
+  - Columnas: family_id, nombre, descripción
+  - Edición inline con doble-click
+- CRUD completo:
+  - Agregar nueva familia (dialog modal)
+  - Editar nombre/descripción
+  - Eliminar familia (confirma si tiene parts asociados)
+- Auto-inferencia de familia desde descripción:
+  - Botón "Inferir Familias desde Descripción"
+  - Usa regex patterns para detectar familias en `descripcion_pieza`
+  - Propone asignaciones automáticas
+  - Usuario confirma antes de aplicar
+
+**Elementos interactivos:**
+- Tabla con columnas editables
+- Botón "Nueva Familia" → dialog
+- Botón "Inferir Familias" → proceso automático
+- Botón eliminar por fila
+
+**Código:** `pages.py` línea ~1799-1990
+
+#### `/config` - Configuración General
+
+**Propósito:** Administrar parámetros globales del sistema.
+
+**Funcionalidad:**
+- **Sección: Parámetros Generales** (`app_config`)
+  - Nombre de planta
+  - Centro SAP (filtro MB52)
+  - Prefijos material (Visión Planta)
+  - Aleaciones activas (multi-select desde catálogo)
+- **Sección: Mapeo de Almacenes SAP**
+  - Grid con inputs para cada proceso
+  - Define qué almacén SAP corresponde a cada proceso
+  - Ejemplo: terminaciones → "4040,4050"
+- **Sección: Filtros de Disponibilidad por Proceso**
+  - Define condición SQL para filtrar MB52
+  - Dropdowns: Libre utilización (Cualquiera/Sí/No), Control calidad (Cualquiera/Sí/No)
+  - Genera JSON: `{"libre_utilizacion": 1, "en_control_calidad": 0}`
+- **Botón "Guardar Cambios Globales"**:
+  - Actualiza todas las config en `core_config`
+  - Regenera filtros availability_predicate_json
+
+**Elementos interactivos:**
+- Inputs text para cada parámetro
+- Select para aleaciones
+- Grid de almacenes (proceso × almacén)
+- Dropdowns para filtros MB52
+- Botón guardar
+
+**Código:** `pages.py` línea ~1392-1466
+
+#### `/config/aleaciones` - Catálogo de Aleaciones
+
+**Propósito:** Gestionar aleaciones disponibles en planta.
+
+**Funcionalidad:**
+- Tabla con aleaciones del catálogo
+  - Columnas: alloy_code, nombre, descripción, activo
+  - Solo aleaciones activas se usan para filtrar Vision
+- CRUD completo:
+  - Agregar nueva aleación
+  - Editar nombre/descripción
+  - Activar/desactivar (checkbox)
+  - Eliminar aleación
+
+**Código:** `pages.py` línea ~1991-2191
+
+#### `/config/tiempos` - Tiempos de Proceso por Familia
+
+**Propósito:** Configurar tiempos estándar (vulcanizado, mecanizado, inspección) por familia.
+
+**Funcionalidad:**
+- Tabla con familias y sus tiempos en días
+  - Columnas editable inline
+  - Valores en días (INT)
+- Impacto: usado por Dispatcher para calcular `start_by` de jobs
+- Validación: días >= 0
+
+**Código:** `pages.py` línea ~2192-2204
+
+#### `/config/materiales` - Maestro de Materiales (part_code)
+
+**Propósito:** Gestionar datos maestros consolidados por código de parte (5 dígitos).
+
+**Funcionalidad:**
+- Búsqueda por part_code o descripción
+- Vista/edición de datos maestros:
+  - Pieza: descripción, familia, aleación
+  - Moldeo: flask_size, piezas_por_molde, cool_hours
+  - Terminación: finish_days, min_finish_days
+  - Mecanizado: mecanizado_dias, inspeccion_externa_dias
+  - Vulcanizado: vulcanizado_dias
+  - Peso: peso neto (tons)
+- **Auto-completado**:
+  - Al importar Desmoldeo → extrae part_code y crea registros faltantes
+  - Al guardar → valida consistencia
+- **Edición inline**:
+  - Doble-click en fila → modal de edición
+  - Inputs para cada campo
+  - Validación antes de guardar
+
+**Elementos interactivos:**
+- Input búsqueda (part_code / descripción)
+- Tabla con paginación
+- Modal edición con tabs (Pieza, Moldeo, Terminación, Mecanizado)
+- Botón guardar
+
+**Código:** `pages.py` línea ~2205-2658
+
+#### `/config/planner` - Configuración del Planner (Moldeo)
+
+**Propósito:** Configurar parámetros del scheduler heurístico de moldeo.
+
+**Funcionalidad:**
+- **Sección: Capacidades y Turnos**
+  - Moldeo por turno, Colada por turno
+  - Mismo molde por turno
+  - Turnos por día de semana (lun-dom)
+  - Capacidades diarias calculadas automáticamente (capacidad × turnos)
+- **Sección: Inventario de Cajas por Tipo**
+  - Tabla editable: flask_type, qty_total, codes_csv
+  - Códigos SAP (ej: "105,106,107")
+- **Sección: Algoritmo de Placement**
+  - Máximo días de búsqueda de ventana (`max_placement_search_days`)
+  - Permitir huecos en moldeo (checkbox)
+  - Días lag: Moldeo → Fundición, Fundición → Desmoldeo
+- **Sección: Horizonte y Calendario**
+  - Horizonte de planificación (días hábiles)
+  - Feriados (lista editable de fechas ISO: "2026-02-13")
+- **Sección: Ocupación de Recursos (Desmoldeo)**
+  - Configurar cancha para filtrar reporte desmoldeo
+  - Ejemplo: "TCF-L1000,TCF-L1100,TCF-L1200"
+- **Botón "Guardar Configuración"**:
+  - Actualiza `planner_resources`
+  - Regenera `planner_daily_resources` desde config
+
+**Elementos interactivos:**
+- Inputs numéricos para capacidades
+- Grid de turnos (día × shifts)
+- Tabla de cajas (editable)
+- Input horizonte (días)
+- Textarea feriados (comma-separated)
+- Checkboxes para algoritmo
+
+**Código:** `pages.py` línea ~2659-3015
+
+#### `/config/dispatcher` - Configuración de Líneas Dispatcher
+
+**Propósito:** Configurar líneas de trabajo y restricciones para Dispatcher.
+
+**Funcionalidad:**
+- **Por proceso** (terminaciones, mecanizado, etc.):
+  - Tabla de líneas (line_id, label, familias permitidas, orden)
+  - CRUD completo: agregar, editar, eliminar, reordenar
+  - Familias permitidas: multi-select (restringe qué jobs puede tomar cada línea)
+- **Validación**:
+  - line_id único por proceso
+  - Orden de líneas afecta prioridad de asignación en scheduler
+- **Impacto**:
+  - Dispatcher usa esta config para generar colas ejecutables
+  - Jobs van solo a líneas con familia compatible
+
+**Código:** `pages.py` línea ~3016-3300
+
+#### `/programa/<proceso>` - Programas de Producción (Dispatcher)
+
+**Propósito:** Visualizar colas de trabajo generadas por Dispatcher.
+
+**Rutas:**
+- `/programa` (redirige a terminaciones)
+- `/programa/toma-de-dureza`
+- `/programa/mecanizado`
+- `/programa/mecanizado-externo`
+- `/programa/inspeccion-externa`
+- `/programa/por-vulcanizar`
+- `/programa/en-vulcanizado`
+
+**Funcionalidad:**
+- **Vista principal:**
+  - Una card por línea (ej: "T1 - Terminaciones Línea 1")
+  - Tabla de jobs en orden de ejecución
+  - Columnas: Lote, Cantidad, Quincena, Urgencia, Start By, Días p/ entregar
+- **Pestañas:**
+  - Programa: jobs asignados por línea
+  - No programadas: jobs sin línea compatible (errores)
+  - Detalles: errors del scheduler
+- **Jobs "En Proceso"**:
+  - Fijados al inicio de su línea (pin icon 📌)
+  - No se reordenan en re-generación
+  - Usuario puede marcar/desmarcar "en proceso" desde tabla
+- **Timestamp:**
+  - "Última regeneración: 2026-02-07 14:30:15"
+- **Botón "Forzar Regeneración"**:
+  - Reconstruye orders desde SAP
+  - Re-ejecuta scheduler
+  - Actualiza UI
+
+**Elementos interactivos:**
+- Tabs por línea + "No programadas"
+- Tablas con sort/filter
+- Checkbox "en proceso" por job (toggle)
+- Botón regenerar
+
+**Código:** `pages.py` línea ~3768-3900+
+
+#### `/audit` - Auditoría
+
+**Propósito:** Bitácora de operaciones del sistema.
+
+**Funcionalidad:**
+- Tabla con últimas 500 operaciones
+  - Columnas: timestamp, categoría, mensaje, detalles
+  - Categorías: import, config, planner, dispatcher, error
+- No editable (solo lectura)
+- Útil para troubleshooting
+
+**Código:** `pages.py` línea ~1363-1391
+
+#### `/db` - Administración de Base de Datos
+
+**Propósito:** Operaciones de bajo nivel sobre SQLite (administrador).
+
+**Funcionalidad:**
+- **Vacuum**: compactar DB
+- **Backup**: generar copia de seguridad
+- **Ver esquema**: lista de tablas y columnas
+- **Query directo**: ejecutar SQL arbitrario (solo lectura)
+- **Peligroso**: solo para debugging
+
+**Código:** `pages.py` línea ~3301-3376
+
+### Componentes Reutilizables (widgets.py)
+
+**`render_nav(active: str, repo: Repository)`**
+- Barra de navegación superior
+- Links a todas las páginas principales
+- Resalta página activa
+- Sticky top
+
+**`page_container()`**
+- Context manager para contenido principal
+- Padding y max-width consistentes
+- Centra contenido
+
+**Otros Widgets:**
+- `excel_upload()`: Component para subir Excel
+- `confirm_dialog()`: Modal de confirmación
+- `edit_table_cell()`: Edición inline de celdas
+- `date_picker()`: Selector de fecha (NiceGUI nativo)
+
+---
+
+## 8. Changelog y Evolución del Sistema
+
+### 8.1 Migración finish_hours → finish_days (2026-02-07)
+
+**Resumen:** Refactorización completa para cambiar almacenamiento de tiempos de terminación de **horas** a **días**. Se eliminaron defaults automáticos (fail-fast validation).
+
+#### Cambios en Código
+
+**1. Modelo de Datos (`planner/model.py`)**
+- `PlannerPart.finish_hours: float` → `finish_days: int`
+- `PlannerPart.min_finish_hours: float` → `min_finish_days: int`
+
+**2. Solver (`planner/solve.py`)**
+- `PlacementResult.finish_hours_effective: float` → `finish_days_effective: int`
+- **Validación fail-fast** (líneas 66-90): si falta dato → error "Dato faltante o inválido: finish_days=X"
+- **Optimización de finishing** (líneas 237-255): comprime `finish_days` hasta `min_finish_days` para cumplir `due_date`
+- **Retorno** (línea 554): `"finish_hours"` → `"finish_days"`
+
+**3. API (`planner/api.py`)**
+- Construcción de parts (líneas 101-111): elimina conversión días→horas
+- `build_orders_plan_summary()` (líneas 318-394): `finish_hours_nominal` → `finish_days_nominal`
+
+**4. Repository (`planner/planner_repository.py`)**
+- `sync_planner_inputs_from_sap()` (líneas 1190-1220): NO aplica defaults
+- `replace_planner_parts()`, `get_planner_parts_rows()`: columnas `finish_days`, `min_finish_days`
+
+**5. Schema (`data/schema/planner_schema.py`)**
+- Nuevas columnas: `finish_days INTEGER`, `min_finish_days INTEGER`
+- Migración automática desde `finish_hours` (división por 24)
+- Nuevas columnas de lag: `pour_lag_days`, `shakeout_lag_days`
+
+#### Validación de Datos (Fail-Fast)
+
+| Campo              | Validación | Error si Inválido |
+|--------------------|------------|-------------------|
+| `flask_type`       | `!= None and != ""` | "Dato faltante: flask_type" |
+| `cool_hours`       | `> 0` | "Dato faltante o inválido: cool_hours=X" |
+| `finish_days`      | `> 0` | "Dato faltante o inválido: finish_days=X" |
+| `min_finish_days`  | `> 0` | "Dato faltante o inválido: min_finish_days=X" |
+| `pieces_per_mold`  | `> 0` | "Dato faltante o inválido: pieces_per_mold=X" |
+| `net_weight_ton`   | `> 0` | "Dato faltante o inválido: net_weight_ton=X" |
+
+**Comportamiento:** Orden con dato faltante → NO se planifica, se agrega a `errors[]`, UI muestra en "Órdenes No Planificadas".
+
+#### Impacto en Documentación
+
+- **manual-desarrollo.md**: Actualizado con algoritmo heurístico, validación fail-fast
+- **schedule-output.md**: Creado (estructura dict resultado, persistencia)
+- **CAMBIOS-finish-days.md**: Este documento (consolidado aquí)
+
+### 8.2 Persistencia de Schedule en DB (2026-02-07)
+
+**Resumen:** Implementación de persistencia automática del schedule del planner en tabla `planner_schedule_results`.
+
+#### Cambios
+
+**1. Nueva Tabla (`planner_schema.py`)**
+```sql
+CREATE TABLE planner_schedule_results (
+    scenario_id INTEGER NOT NULL,
+    run_timestamp TEXT NOT NULL,
+    asof_date TEXT NOT NULL,
+    status TEXT NOT NULL,
+    molds_schedule_json TEXT,
+    pour_days_json TEXT,
+    shakeout_days_json TEXT,
+    completion_days_json TEXT,
+    finish_days_json TEXT,
+    late_days_json TEXT,
+    errors_json TEXT,
+    PRIMARY KEY (scenario_id, run_timestamp)
+);
+```
+
+**2. Módulo de Persistencia (`planner/persist.py`)**
+- `save_schedule_result()`: guarda resultado completo
+- `get_latest_schedule_result()`: carga último schedule
+- `delete_old_schedule_results()`: auto-cleanup (mantiene últimos 10)
+
+**3. API (`planner/api.py`)**
+- `run_planner()` ahora guarda automáticamente el resultado
+- Importa funciones de `persist.py`
+
+**4. Repository (`planner/planner_repository.py`)**
+- Nuevo método `get_latest_schedule_result()`
+
+**5. UI (`ui/pages.py`)**
+- Nueva función `_render_last_saved_plan()`: carga y muestra último schedule guardado
+- Al abrir `/plan` → muestra automáticamente último plan (sin re-ejecutar heurística)
+- Timestamp visible: "Última ejecución: YYYY-MM-DDTHH:MM:SS"
+
+#### Ventajas
+
+✅ Plan persiste entre sesiones
+✅ UI lista al abrir (no necesita recalcular)
+✅ Historial de últimas 10 ejecuciones
+✅ Trazabilidad completa
+
+
+
+---
+
+## Anexo A: Diseño CP-SAT (implementación futura planificada)
+
+Este anexo documenta una posible evolución del sistema hacia optimización matemática mediante CP-SAT (Constraint Programming - Satisfiability) de Google OR-Tools. Esta implementación **no está activa en el código actual** y se conserva como blueprint para una fase posterior del proyecto.
+
+**Motivación**: La heurística greedy actual es rápida y explicable, pero no garantiza optimalidad global. Para escenarios complejos con múltiples restricciones conflictivas, un solver matemático podría encontrar mejores soluciones.
+
+**Diseño propuesto**:
 - **Definición del problema**: Plan semanal de moldes; unidad = moldes; preferir continuidad de modelo; output diario `plan_daily_order`.
 - **Entidades**: Orders `(order_id, part_id, qty, due_date, priority)`; Parts `(flask_size, cool_hours, finish_hours, min_finish_hours, net_weight_ton, pieces_per_mold, alloy)`; Resources (capacidad por caja y tonelaje diario).
 - **Condiciones iniciales**: flasks ocupadas desde desmoldeo, carga de colada inicial, patrones cargados.
 - **Restricciones previstas**: capacidad de moldeo, mismo molde, metal diario, flasks por tamaño, límites `finish_hours/min_finish_hours`, penalidad/costo por cambio de patrón, horizonte y feriados.
 - **Flujo CP-SAT**: Extract → Transform → Solve (OR-Tools) → Persist (`planner_outputs_*`).
+
+**Estado**: Documentación de diseño únicamente. Implementación pendiente para futuras iteraciones del sistema.

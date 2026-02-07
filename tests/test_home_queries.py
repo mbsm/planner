@@ -27,7 +27,7 @@ def test_get_orders_overdue_execution(temp_db):
     
     # Needs material master
     repo.upsert_part_master(
-        material="40200001",
+        material="40330012345",
         family_id="F1",
         peso_unitario_ton=1.0
     )
@@ -41,7 +41,7 @@ def test_get_orders_overdue_execution(temp_db):
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (
-                'OD1', '10', '40200001', ?,
+                'OD1', '10', '40330012345', ?,
                 10, 0, 0, 1.0, 'Activo'
             )
         """, (last_year,))
@@ -59,7 +59,7 @@ def test_get_orders_due_soon_execution(temp_db):
     db, repo = temp_db
     
     repo.upsert_part_master(
-        material="40200002",
+        material="40330022222",
         family_id="F1",
         peso_unitario_ton=1.0
     )
@@ -74,7 +74,7 @@ def test_get_orders_due_soon_execution(temp_db):
                 pedido, posicion, cod_material, fecha_de_pedido,
                 solicitado, bodega, despachado, peso_unitario_ton, status_comercial
             ) VALUES (
-                'DS1', '10', '40200002', ?,
+                'DS1', '10', '40330022222', ?,
                 10, 0, 0, 1.0, 'Activo'
             )
         """, (tomorrow,))

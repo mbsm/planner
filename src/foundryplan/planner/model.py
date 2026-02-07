@@ -16,9 +16,9 @@ class PlannerOrder:
 class PlannerPart:
     part_id: str
     flask_type: str  # dynamic flask type code
-    cool_hours: float
-    finish_hours: float
-    min_finish_hours: float
+    cool_hours: float  # horas de enfriamiento en molde
+    finish_days: int  # días de terminación nominal (almacenado como días, NO horas)
+    min_finish_days: int  # días mínimos de terminación (compresión máxima permitida)
     pieces_per_mold: float
     net_weight_ton: float
     alloy: str | None = None

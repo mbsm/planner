@@ -4,7 +4,8 @@ from datetime import date
 
 from foundryplan.data.repository_views import PlannerRepository
 from foundryplan.planner.extract import prepare_planner_inputs
-from foundryplan.planner.model import PlannerOrder, PlannerPart, PlannerResource
+from foundryplan.planner.model import PlannerOrder, PlannerPart
+from foundryplan.planner.persist import save_schedule_result, delete_old_schedule_results
 from foundryplan.planner.solve import solve_planner_heuristic
 
 
@@ -78,8 +79,6 @@ def run_planner(
     parts_rows = repo.get_planner_parts_rows(scenario_id=scenario_id)
     calendar_rows = repo.get_planner_calendar_rows(scenario_id=scenario_id)
     progress_rows = repo.get_planner_initial_order_progress_rows(scenario_id=scenario_id, asof_date=asof_date)
-    flask_rows = repo.get_planner_initial_flask_inuse_rows(scenario_id=scenario_id, asof_date=asof_date)
-    pour_rows = repo.get_planner_initial_pour_load_rows(scenario_id=scenario_id, asof_date=asof_date)
     patterns_rows = repo.get_planner_initial_patterns_loaded(scenario_id=scenario_id, asof_date=asof_date)
     res = repo.get_planner_resources(scenario_id=scenario_id)
     if not res:
@@ -100,8 +99,8 @@ def run_planner(
             part_id=str(r["part_id"]),
             flask_type=str(r.get("flask_type") or "").upper(),
             cool_hours=float(r["cool_hours"] or 0.0),
-            finish_hours=float(r.get("finish_days") or r.get("finish_hours") or 0.0) * 24.0,  # Convert days to hours
-            min_finish_hours=float(r.get("min_finish_days") or r.get("min_finish_hours") or 0.0) * 24.0,  # Convert days to hours
+            finish_days=int(r.get("finish_days") or 0),  # Almacenado directamente como días
+            min_finish_days=int(r.get("min_finish_days") or 0),  # Almacenado directamente como días
             pieces_per_mold=float(r["pieces_per_mold"] or 0.0),
             net_weight_ton=float(r["net_weight_ton"] or 0.0),
             alloy=str(r["alloy"]) if r.get("alloy") is not None else None,
@@ -132,65 +131,33 @@ def run_planner(
             )
         )
 
-    flask_capacity = {
-        str(ft.get("flask_type") or "").upper(): int(ft.get("qty_total") or 0)
-        for ft in res.get("flask_types", []) or []
-    }
-    flask_codes_map: dict[str, list[str]] = {}
-    for ft in res.get("flask_types", []) or []:
-        ftype = str(ft.get("flask_type") or "").upper()
-        codes_csv = str(ft.get("codes_csv") or "")
-        codes = [c.strip() for c in codes_csv.split(",") if c.strip()] if codes_csv else []
-        flask_codes_map[ftype] = codes
-
-    # Calculate daily capacities from shift configuration
-    molding_max_per_day = int(res.get("molding_max_per_day") or 0)
-    pour_max_ton_per_day = float(res.get("pour_max_ton_per_day") or 0.0)
-    
-    # If shift configuration exists, calculate from shifts
-    molding_max_per_shift = int(res.get("molding_max_per_shift") or 0)
-    molding_shifts = res.get("molding_shifts") or {}
-    pour_max_ton_per_shift = float(res.get("pour_max_ton_per_shift") or 0.0)
-    pour_shifts = res.get("pour_shifts") or {}
-    
-    # Calculate average daily capacity from shifts (weighted by days configured)
-    if molding_max_per_shift > 0 and molding_shifts:
-        total_molding_shifts = sum(molding_shifts.values())
-        days_with_shifts = sum(1 for v in molding_shifts.values() if v > 0)
-        if days_with_shifts > 0:
-            avg_shifts_per_day = total_molding_shifts / days_with_shifts
-            molding_max_per_day = int(molding_max_per_shift * avg_shifts_per_day)
-    
-    if pour_max_ton_per_shift > 0 and pour_shifts:
-        total_pour_shifts = sum(pour_shifts.values())
-        days_with_shifts = sum(1 for v in pour_shifts.values() if v > 0)
-        if days_with_shifts > 0:
-            avg_shifts_per_day = total_pour_shifts / days_with_shifts
-            pour_max_ton_per_day = float(pour_max_ton_per_shift * avg_shifts_per_day)
-
-    resources = PlannerResource(
-        flask_capacity=flask_capacity,
-        flask_codes=flask_codes_map,
-        molding_max_per_day=molding_max_per_day,
-        molding_max_same_part_per_day=int(res.get("molding_max_same_part_per_day") or 0),
-        pour_max_ton_per_day=pour_max_ton_per_day,
-    )
-
-    initial_pour_load = {int(r["workday_index"]): float(r["tons_committed"] or 0.0) for r in pour_rows}
-
-    # Convert release_day rows into busy-by-day map
-    initial_flask_busy: dict[tuple[str, int], int] = {}
-    for r in flask_rows:
-        ftype = str(r.get("flask_type") or r.get("flask_size") or "").upper()
-        release_idx = int(r.get("release_workday_index") or 0)
-        qty = int(r.get("qty_inuse") or 0)
-        for d in range(min(release_idx, len(workdays))):
-            key = (ftype, d)
-            initial_flask_busy[key] = initial_flask_busy.get(key, 0) + qty
-
     initial_patterns_loaded = {
         str(r["order_id"]) for r in patterns_rows if int(r.get("is_loaded") or 0) == 1
     }
+
+    # Daily resources (single source of truth)
+    daily_rows = repo.get_daily_resources_rows(scenario_id=scenario_id)
+    day_to_idx = {d.isoformat(): idx for idx, d in enumerate(workdays)}
+    daily_resources: dict[int, dict] = {}
+    for row in daily_rows:
+        idx = day_to_idx.get(str(row.get("day") or ""))
+        if idx is None or idx >= len(workdays):
+            continue
+        res_day = daily_resources.setdefault(
+            idx,
+            {
+                "molding_capacity": 0,
+                "same_mold_capacity": 0,
+                "pouring_tons_available": 0.0,
+                "flask_available": {},
+            },
+        )
+        res_day["molding_capacity"] = int(row.get("molding_capacity_per_day") or res_day["molding_capacity"])
+        res_day["same_mold_capacity"] = int(row.get("same_mold_capacity_per_day") or res_day["same_mold_capacity"])
+        res_day["pouring_tons_available"] = float(row.get("pouring_tons_available") or res_day["pouring_tons_available"])
+        flask_type = str(row.get("flask_type") or "").upper()
+        if flask_type:
+            res_day["flask_available"][flask_type] = int(row.get("available_qty") or 0)
 
     # Heuristic-only mode (solver removed by request)
     # Build result wrapper with suggested horizon info
@@ -201,17 +168,37 @@ def run_planner(
         "actual_horizon_days": len(workdays),
     }
     
+    pour_lag_days = res.get("pour_lag_days")
+    shakeout_lag_days = res.get("shakeout_lag_days")
+    max_placement_search_days = res.get("max_placement_search_days")
+    allow_molding_gaps = res.get("allow_molding_gaps")
+
     result = solve_planner_heuristic(
         orders=orders,
         parts=parts,
-        resources=resources,
         workdays=workdays,
-        initial_flask_inuse=initial_flask_busy,
-        initial_pour_load=initial_pour_load,
+        daily_resources=daily_resources,
         initial_patterns_loaded=initial_patterns_loaded,
         max_horizon_days=len(workdays),
+        pour_lag_days=int(pour_lag_days) if pour_lag_days is not None else 1,
+        shakeout_lag_days=int(shakeout_lag_days) if shakeout_lag_days is not None else 1,
+        max_placement_search_days=int(max_placement_search_days) if max_placement_search_days is not None else 365,
+        allow_molding_gaps=bool(allow_molding_gaps) if allow_molding_gaps is not None else False,
     )
-    return {**result_base, **result}
+    
+    # Persist result to database
+    full_result = {**result_base, **result}
+    save_schedule_result(
+        repo._repo.db,
+        scenario_id=scenario_id,
+        asof_date=asof_date.isoformat(),
+        result=full_result,
+    )
+    
+    # Clean up old results (keep last 10)
+    delete_old_schedule_results(repo._repo.db, scenario_id=scenario_id, keep_last_n=10)
+    
+    return full_result
 
 
 def build_weekly_view(
@@ -347,13 +334,13 @@ def build_orders_plan_summary(
     orders_rows: list[dict],
     parts: dict[str, object],
 ) -> list[dict]:
-    """Build order planning summary with delivery dates and finish hour reduction.
+    """Build order planning summary with delivery dates and finish days reduction.
     
     Args:
-        plan_result: Output from run_planner with completion_days, finish_hours, late_days
+        plan_result: Output from run_planner with completion_days, finish_days, late_days
         workdays: List of workday dates (indexed)
         orders_rows: Order metadata from DB
-        parts: {part_id: PlannerPart} with finish_hours and min_finish_hours
+        parts: {part_id: PlannerPart} with finish_days and min_finish_days
     
     Returns:
         List of dicts with:
@@ -362,9 +349,9 @@ def build_orders_plan_summary(
             "due_date": date,
             "completion_date": date or None,
             "planned_delivery_date": date or None,
-            "finish_hours_nominal": float,
-            "finish_hours_real": float,
-            "finish_reduction": float,
+            "finish_days_nominal": int,
+            "finish_days_real": int,
+            "finish_reduction_days": int,
             "late_days": int,
             "status": "A tiempo" or "Atrasado",
         }
@@ -372,7 +359,7 @@ def build_orders_plan_summary(
     result = []
     
     completion_days = plan_result.get("completion_days") or {}
-    finish_hours = plan_result.get("finish_hours") or {}
+    finish_days_map = plan_result.get("finish_days") or {}
     late_days_map = plan_result.get("late_days") or {}
     
     for order_row in orders_rows:
@@ -385,11 +372,11 @@ def build_orders_plan_summary(
         except Exception:
             continue
         
-        # Get part info for nominal finish hours
+        # Get part info for nominal finish days
         part_obj = parts.get(part_id)
-        finish_hours_nominal = float(getattr(part_obj, "finish_hours", 0)) if part_obj else 0
-        finish_hours_real = float(finish_hours.get(order_id, finish_hours_nominal))
-        finish_reduction = finish_hours_nominal - finish_hours_real
+        finish_days_nominal = int(getattr(part_obj, "finish_days", 0)) if part_obj else 0
+        finish_days_real = int(finish_days_map.get(order_id, finish_days_nominal))
+        finish_reduction = finish_days_nominal - finish_days_real
         
         # Get completion date from completion_day index
         completion_day_idx = completion_days.get(order_id)
@@ -409,9 +396,9 @@ def build_orders_plan_summary(
             "due_date": due_date,
             "completion_date": completion_date,
             "planned_delivery_date": completion_date,
-            "finish_hours_nominal": round(finish_hours_nominal, 1),
-            "finish_hours_real": round(finish_hours_real, 1),
-            "finish_reduction": round(finish_reduction, 1),
+            "finish_days_nominal": finish_days_nominal,
+            "finish_days_real": finish_days_real,
+            "finish_reduction_days": finish_reduction,
             "late_days": late_days,
             "status": status,
         })

@@ -24,6 +24,7 @@ class Repository:
     """
 
     def __init__(self, db: Db):
+        self.db = db
         self.data = DataRepository(db)
         self.dispatcher = DispatcherRepository(db, data=self.data)
         self.planner = PlannerRepository(db, data=self.data)
@@ -37,7 +38,7 @@ class Repository:
     def upsert_part_master(self, **kwargs) -> None:
         return self.data.upsert_part_master(**kwargs)
     
-    def move_in_progress(self, *, process: str, pedido: str, posicion: str, is_test: int, line_id: int, split_id: int | None = None) -> None:
+    def move_in_progress(self, *, process: str = "terminaciones", pedido: str, posicion: str, is_test: int = 0, line_id: int, split_id: int | None = None) -> None:
         return self.dispatcher.move_in_progress(process=process, pedido=pedido, posicion=posicion, is_test=is_test, line_id=line_id, split_id=split_id)
     
     def get_orders_overdue_rows(self, *, today=None, limit: int = 200) -> list[dict]:
@@ -53,6 +54,15 @@ class Repository:
         return self.data.import_sap_vision_bytes(content=content)
     
     def import_excel_bytes(self, *, content: bytes, kind: str) -> int:
+        kind_s = str(kind or "").lower()
+        if kind_s == "mb52":
+            self.import_sap_mb52_bytes(content=content, mode="replace")
+            return 1
+        if kind_s == "vision":
+            self.import_sap_vision_bytes(content=content)
+            return 1
+        if kind_s == "demolding":
+            return self.import_sap_demolding_bytes(content=content)
         return self.data.import_excel_bytes(content=content, kind=kind)
     
     def import_sap_demolding_bytes(self, *, content: bytes) -> int:
@@ -68,4 +78,7 @@ class Repository:
         return self.dispatcher.unmark_job_urgent(job_id)
     
     def delete_all_pedido_priorities(self, *, keep_tests: bool = True) -> None:
-        return self.data.delete_all_pedido_priorities(keep_tests=keep_tests)
+        return self.dispatcher.delete_all_pedido_priorities(keep_tests=keep_tests)
+
+    def split_job(self, *, job_id: str, qty_split: int) -> tuple[str, str]:
+        return self.dispatcher.split_job(job_id=job_id, qty_split=qty_split)

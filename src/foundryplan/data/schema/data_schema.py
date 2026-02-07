@@ -27,16 +27,24 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS core_alloy_catalog (
+            alloy_code TEXT PRIMARY KEY,
+            alloy_name TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS core_material_master (
-            material TEXT PRIMARY KEY,
-            descripcion_material TEXT,
+            part_code TEXT PRIMARY KEY,
+            descripcion_pieza TEXT,
             family_id TEXT,
             aleacion TEXT,
             flask_size TEXT,
             piezas_por_molde REAL,
-            tiempo_enfriamiento_molde_dias INTEGER,
-            finish_hours REAL,
-            min_finish_hours REAL,
+            tiempo_enfriamiento_molde_horas INTEGER,
+            finish_days INTEGER,
+            min_finish_days INTEGER,
             vulcanizado_dias INTEGER,
             mecanizado_dias INTEGER,
             inspeccion_externa_dias INTEGER,
@@ -57,6 +65,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             availability_predicate_json TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE VIEW IF NOT EXISTS process AS
+            SELECT process_id, label, sap_almacen, is_active, is_special_moldeo, availability_predicate_json, created_at
+            FROM core_processes;
 
         CREATE TABLE IF NOT EXISTS resource (
             resource_id TEXT PRIMARY KEY,
@@ -241,8 +253,8 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     )
 
     con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_centro', '4000')")
-    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_material_prefixes', '401,402,403,404')")
-    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_vision_material_prefixes', '401,402,403,404')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_center', '4000')")
+    con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('sap_material_prefixes', '436')")
     con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('job_priority_map', '{\"prueba\": 1, \"urgente\": 2, \"normal\": 3}')")
     con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('planner_horizon_days', '30')")
     con.execute("INSERT OR IGNORE INTO core_config(config_key, config_value) VALUES('planner_horizon_buffer_days', '10')")
@@ -263,14 +275,13 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     )
 
     process_defaults = [
-        ("terminaciones", "Terminaciones", "4035", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
-        ("toma_de_dureza", "Toma de dureza", "4035", 0, '{"libre_utilizacion": 0, "en_control_calidad": 1}'),
-        ("mecanizado", "Mecanizado", "4049", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
-        ("mecanizado_externo", "Mecanizado externo", "4050", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
-        ("inspeccion_externa", "Inspección externa", "4046", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
-        ("por_vulcanizar", "Por vulcanizar", "4047", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
-        ("en_vulcanizado", "En vulcanizado", "4048", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
         ("moldeo", "Moldeo", "4032", 1, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("terminaciones", "Terminaciones", "4035", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("mecanizado", "Mecanizado", "4049", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("mecanizado_externo", "Mecanizado Externo", "4050", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("inspeccion_externa", "Inspeccion Externa", "4046", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("vulcanizado", "Vulcanizado", "4047", 0, '{"libre_utilizacion": 1, "en_control_calidad": 0}'),
+        ("toma_dureza", "Toma de Dureza", "4035", 0, '{"libre_utilizacion": 0, "en_control_calidad": 1}'),
     ]
     con.executemany(
         """
@@ -280,10 +291,14 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         process_defaults,
     )
 
-    # Migration: Rename finish_hours to finish_days, min_finish_hours to min_finish_days
-    # SQLite doesn't support column rename directly, so we add new columns and copy data
+    # Migration: Add required columns to core_material_master before part_code migration
     try:
-        con.execute("ALTER TABLE core_material_master ADD COLUMN finish_days INTEGER DEFAULT 15")
+        con.execute("ALTER TABLE core_material_master ADD COLUMN descripcion_material TEXT")
+    except Exception:
+        pass
+    
+    try:
+        con.execute("ALTER TABLE core_material_master ADD COLUMN finish_days INTEGER DEFAULT 20")
     except Exception:
         pass
     
@@ -292,37 +307,151 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     except Exception:
         pass
     
-    # Copy data from old columns to new (if old columns exist and new are empty)
+    # Migration: Rename tiempo_enfriamiento_molde_dias to tiempo_enfriamiento_molde_horas (both store hours)
     try:
-        con.execute("""
-            UPDATE core_material_master 
-            SET finish_days = CAST(finish_hours / 24.0 AS INTEGER)
-            WHERE finish_hours IS NOT NULL AND finish_days IS NULL
-        """)
+        con.execute("ALTER TABLE core_material_master RENAME COLUMN tiempo_enfriamiento_molde_dias TO tiempo_enfriamiento_molde_horas")
     except Exception:
         pass
-    
-    try:
-        con.execute("""
-            UPDATE core_material_master 
-            SET min_finish_days = CAST(min_finish_hours / 24.0 AS INTEGER)
-            WHERE min_finish_hours IS NOT NULL AND min_finish_days IS NULL
-        """)
-    except Exception:
-        pass
-    
+
     # Migration: Add cancha column to core_sap_demolding_snapshot
     try:
         con.execute("ALTER TABLE core_sap_demolding_snapshot ADD COLUMN cancha TEXT")
     except Exception:
         pass
     
-    # Migration: Add descripcion_material column to core_material_master
+    # Migration: Add part_code columns to demolding tables
     try:
-        con.execute("ALTER TABLE core_material_master ADD COLUMN descripcion_material TEXT")
+        con.execute("ALTER TABLE core_moldes_por_fundir ADD COLUMN part_code TEXT")
+    except Exception:
+        pass
+    
+    try:
+        con.execute("ALTER TABLE core_piezas_fundidas ADD COLUMN part_code TEXT")
     except Exception:
         pass
     
     # Note: mold_quantity should be REAL to store fractions (1/piezas_por_molde)
     # SQLite's INTEGER affinity can store REAL values, but for new tables we use REAL
     # Existing data will work correctly with float() conversion in Python
+    
+    # Migration: Refactor material_master to use part_code as PK (consolidates 4 material types)
+    migrate_material_master_to_part_code(con)
+
+
+def migrate_material_master_to_part_code(con: sqlite3.Connection) -> None:
+    """Migrate core_material_master to use part_code (5 digits) as PK instead of material (11 digits).
+    
+    This consolidates multiple material codes (Pieza, Molde, Fundido, Trat.Term) into
+    one record per part. Idempotent - safe to run multiple times.
+    """
+    # Check if already migrated (part_code column exists as PK)
+    cursor = con.execute("PRAGMA table_info(core_material_master)")
+    columns = {row[1]: row for row in cursor.fetchall()}
+    
+    # If part_code is already a column and material is not PK, skip migration
+    if 'part_code' in columns:
+        # Check if part_code is the PK (pk column = 1)
+        if columns['part_code'][5] == 1:  # pk flag is at index 5
+            return  # Already migrated
+    
+    # 1. Backup current table
+    try:
+        con.execute("DROP TABLE IF EXISTS _backup_material_master_20260206")
+    except Exception:
+        pass
+    
+    con.execute("""
+        CREATE TABLE _backup_material_master_20260206 AS
+        SELECT * FROM core_material_master
+    """)
+    
+    # 2. Create new table with part_code as PK
+    con.execute("""
+        CREATE TABLE core_material_master_new (
+            part_code TEXT PRIMARY KEY,
+            descripcion_pieza TEXT,
+            family_id TEXT,
+            aleacion TEXT,
+            flask_size TEXT,
+            piezas_por_molde REAL,
+            tiempo_enfriamiento_molde_horas INTEGER,
+            finish_days INTEGER,
+            min_finish_days INTEGER,
+            vulcanizado_dias INTEGER,
+            mecanizado_dias INTEGER,
+            inspeccion_externa_dias INTEGER,
+            peso_unitario_ton REAL,
+            mec_perf_inclinada INTEGER NOT NULL DEFAULT 0,
+            sobre_medida_mecanizado INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(family_id) REFERENCES core_family_catalog(family_id)
+        )
+    """)
+    
+    # 3. Migrate data - consolidate by part_code, keeping most recent/complete data
+    # Use MAX aggregation to pick non-null values, prioritize Pieza materials
+    con.execute("""
+        INSERT INTO core_material_master_new
+        SELECT
+            part_code,
+            MAX(descripcion_material) AS descripcion_pieza,
+            MAX(family_id) AS family_id,
+            MAX(aleacion) AS aleacion,
+            MAX(flask_size) AS flask_size,
+            MAX(piezas_por_molde) AS piezas_por_molde,
+            MAX(tiempo_enfriamiento_molde_horas) AS tiempo_enfriamiento_molde_horas,
+            MAX(finish_days) AS finish_days,
+            MAX(min_finish_days) AS min_finish_days,
+            MAX(vulcanizado_dias) AS vulcanizado_dias,
+            MAX(mecanizado_dias) AS mecanizado_dias,
+            MAX(inspeccion_externa_dias) AS inspeccion_externa_dias,
+            MAX(peso_unitario_ton) AS peso_unitario_ton,
+            MAX(mec_perf_inclinada) AS mec_perf_inclinada,
+            MAX(sobre_medida_mecanizado) AS sobre_medida_mecanizado,
+            MIN(created_at) AS created_at,
+            MAX(updated_at) AS updated_at
+        FROM (
+            SELECT
+                CASE
+                    WHEN substr(material, 1, 2) = '40' AND substr(material, 5, 2) = '00' THEN substr(material, 7, 5)
+                    WHEN substr(material, 1, 4) = '4310' AND substr(material, 10, 2) = '01' THEN substr(material, 5, 5)
+                    WHEN substr(material, 1, 3) = '435' AND substr(material, 6, 1) = '0' THEN substr(material, 7, 5)
+                    WHEN substr(material, 1, 3) = '436' AND substr(material, 6, 1) = '0' THEN substr(material, 7, 5)
+                END AS part_code,
+                *
+            FROM core_material_master
+        )
+        WHERE part_code IS NOT NULL
+        GROUP BY part_code
+    """)
+    
+    # 4. Replace old table
+    con.execute("DROP TABLE core_material_master")
+    con.execute("ALTER TABLE core_material_master_new RENAME TO core_material_master")
+    
+    con.commit()
+
+
+def seed_alloy_catalog(con: sqlite3.Connection) -> None:
+    """Seed initial alloy codes if table is empty."""
+    count = con.execute("SELECT COUNT(*) FROM core_alloy_catalog").fetchone()[0]
+    if count > 0:
+        return  # Already seeded
+    
+    initial_alloys = [
+        ('32', 'CM2'),
+        ('33', 'CM3'),
+        ('34', 'CM4'),
+        ('37', 'WS170'),
+        ('38', 'CMHC'),
+        ('42', 'CM6'),
+        ('21', 'SP1'),
+        ('28', 'SPX'),
+    ]
+    
+    con.executemany("""
+        INSERT INTO core_alloy_catalog (alloy_code, alloy_name, is_active)
+        VALUES (?, ?, 1)
+    """, initial_alloys)
+    con.commit()
